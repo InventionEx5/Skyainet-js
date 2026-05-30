@@ -1,197 +1,139 @@
-// packages/t369-inference/src/roman_attention.js
+// packages/t369-inference/src/roman_diffusion.js
 // =====================================================
-// RomanAttention — FINAL
-// Roman Dream + RoPE + GQA + Long Context (32k–128k) + Flash-style + MHLA
+// RomanDiffusion — ULTRA
+// S-Box romaine + 9 modes de diffusion + poids adaptatifs + latent
+// Table sin/cos précalculée, in-place, clamp sans prototype pollution
 // SkyAInet × Nikola T369
 // =====================================================
 
-export class RomanAttentionConfig {
-  constructor() {
-    this.numQueryHeads = 16;
-    this.numKvHeads = 4;
-    this.headDim = 128;
-    this.latentDim = 32;
-    this.diffusionStrength = 0.38;
-    this.maxSeqLen = 32768;
-    this.ropeBase = 10000.0;
-    this.ropeScaling = 1.0;
-    this.useFlash = true;
-    this.useMhla = true;
-  }
+"use strict";
+
+const BASE_WEIGHTS = new Float32Array([1.0, 5.0, 10.0, 50.0, 100.0, 200.0, 250.0]);
+const TWO_PI = Math.PI * 2;
+
+// ── Tables trigonométriques précalculées (4096 entrées) ──
+const TRIG_LEN = 4096, TRIG_MASK = TRIG_LEN - 1;
+const SIN_TBL = new Float32Array(TRIG_LEN);
+const COS_TBL = new Float32Array(TRIG_LEN);
+for (let i = 0; i < TRIG_LEN; i++) {
+  const a = (i / TRIG_LEN) * TWO_PI;
+  SIN_TBL[i] = Math.sin(a);
+  COS_TBL[i] = Math.cos(a);
 }
+function fastSin(x) { return SIN_TBL[(((x / TWO_PI) * TRIG_LEN) | 0) + TRIG_LEN * 64 & TRIG_MASK]; }
+function fastCos(x) { return COS_TBL[(((x / TWO_PI) * TRIG_LEN) | 0) + TRIG_LEN * 64 & TRIG_MASK]; }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-export class RomanAttention {
-  constructor(config = new RomanAttentionConfig()) {
-    this.config = config;
-    this.cosCache = null;
-    this.sinCache = null;
-    this.latentKeyProj = null;
-    this.latentValueProj = null;
+// Buffer partagé pour réinterprétation float<->uint (zéro allocation)
+const _reinterpret = new ArrayBuffer(4);
+const _rF32 = new Float32Array(_reinterpret);
+const _rU32 = new Uint32Array(_reinterpret);
 
-    this.#precomputeRope();
-    this.#initLatentProjections();
+export class RomanDiffusion {
+  constructor() {
+    this.baseWeights     = BASE_WEIGHTS;
+    this.phase           = 0.0;
+    this.layerFactor     = 1.0;
+    this.depthBoost      = 1.0;
+    this.chaosIntensity  = 0.012;
+    this.latentInfluence = 0.38;
+    this._workBuf        = null;
   }
 
-  #initLatentProjections() {
-    const { headDim, latentDim } = this.config;
-    const size = headDim * latentDim;
+  // ── Diffusion ultra, in-place sur hidden ──────────
+  applyUltra(hidden, position, layer, latentContext = null) {
+    const len = hidden.length;
+    if (!this._workBuf || this._workBuf.length !== len) this._workBuf = new Float32Array(len);
+    const out = this._workBuf;
 
-    this.latentKeyProj = new Float32Array(size);
-    this.latentValueProj = new Float32Array(size);
+    this.phase      += 0.009;
+    this.layerFactor = 1.0 + layer * 0.028;
+    this.depthBoost  = layer >= 8 ? 1.018 : 1.0;
 
-    for (let i = 0; i < size; i++) {
-      this.latentKeyProj[i] = Math.sin(i * 0.013) * 0.1;
-      this.latentValueProj[i] = Math.cos(i * 0.017) * 0.1;
-    }
-  }
+    const weights = this.baseWeights;
+    const lf      = this.layerFactor;
+    const db      = this.depthBoost;
+    const latInf  = this.latentInfluence;
+    const phase   = this.phase;
+    const latLen  = latentContext ? latentContext.length : 0;
 
-  #precomputeRope() {
-    const { headDim, maxSeqLen, ropeBase, ropeScaling } = this.config;
-    const half = headDim / 2;
+    for (let i = 0; i < len; i++) {
+      const key      = i + position + layer;
+      const romanIdx = key % 7;
+      let weight     = weights[romanIdx] * lf;
 
-    this.cosCache = new Array(maxSeqLen);
-    this.sinCache = new Array(maxSeqLen);
+      if (latLen) weight += latentContext[i % latLen] * latInf * 0.1;
 
-    for (let pos = 0; pos < maxSeqLen; pos++) {
-      const cosRow = new Float32Array(headDim);
-      const sinRow = new Float32Array(headDim);
+      const sboxed = this._sbox(hidden[i], weight, key);
 
-      for (let i = 0; i < half; i++) {
-        const freq = pos / (ropeBase ** ((2 * i) / headDim) * ropeScaling);
-        const c = Math.cos(freq);
-        const s = Math.sin(freq);
-
-        cosRow[2 * i] = c;
-        cosRow[2 * i + 1] = c;
-        sinRow[2 * i] = s;
-        sinRow[2 * i + 1] = s;
+      let d;
+      switch (key % 9) {
+        case 0:  d = sboxed - weight * 0.011; break;
+        case 1:  d = sboxed + weight * 0.011; break;
+        case 2:  d = this._xor(sboxed, weight); break;
+        case 3:  d = sboxed * (1.0 + weight * 0.0009); break;
+        case 4:  d = this._rotate(sboxed, weight | 0); break;
+        case 5:  d = this._hybrid(sboxed, weight, phase); break;
+        case 6:  d = this._chaotic(sboxed, weight, i); break;
+        case 7:  d = this._spiral(sboxed, weight, position); break;
+        default: d = this._quantum(sboxed, weight, layer); break;
       }
 
-      this.cosCache[pos] = cosRow;
-      this.sinCache[pos] = sinRow;
+      out[i] = clamp(d * db, -14.0, 14.0) * 0.97;
     }
+
+    hidden.set(out);
+    return hidden;
   }
 
-  forward(query, key, value, seqLen) {
-    const { numQueryHeads: qHeads, numKvHeads: kvHeads, headDim, useMhla } = this.config;
-
-    // RoPE
-    this.#applyRope(query, seqLen);
-    this.#applyRope(key, seqLen);
-
-    // Roman Diffusion
-    const diffusedKey = this.config.diffusionStrength > 0.01
-      ? this.#applyRomanDiffusion(key)
-      : key;
-
-    if (useMhla) {
-      return this.#forwardMhla(query, diffusedKey, value, seqLen);
-    }
-
-    // GQA classique
-    const output = new Float32Array(query.length);
-    const kvRepeat = qHeads / kvHeads;
-
-    for (let i = 0; i < seqLen; i++) {
-      for (let qh = 0; qh < qHeads; qh++) {
-        const kvH = Math.floor(qh / kvRepeat);
-        const qOffset = (i * qHeads + qh) * headDim;
-        const kOffset = (i * kvHeads + kvH) * headDim;
-        const vOffset = (i * kvHeads + kvH) * headDim;
-
-        let score = 0;
-        for (let d = 0; d < headDim; d++) {
-          score += query[qOffset + d] * diffusedKey[kOffset + d];
-        }
-        score = this.#romanActivation(score);
-
-        for (let d = 0; d < headDim; d++) {
-          output[(i * qHeads + qh) * headDim + d] += score * value[vOffset + d];
-        }
-      }
-    }
-
-    return output;
+  // ── S-Box romaine (table-driven) ──────────────────
+  _sbox(value, weight, seed) {
+    const x = value + weight * 0.0012;
+    return x
+      + fastSin(x * 4.1 + seed * 0.37) * 0.18
+      + fastSin(x * 1.9) * 0.09
+      + fastCos(x * 2.7) * 0.07;
   }
 
-  #forwardMhla(query, key, value, seqLen) {
-    const { numQueryHeads: qHeads, headDim, latentDim } = this.config;
-    const output = new Float32Array(query.length);
-
-    for (let i = 0; i < seqLen; i++) {
-      for (let qh = 0; qh < qHeads; qh++) {
-        const qOffset = (i * qHeads + qh) * headDim;
-
-        // Compression latente
-        const latentKey = new Float32Array(latentDim);
-        const latentValue = new Float32Array(latentDim);
-
-        for (let d = 0; d < headDim; d++) {
-          for (let l = 0; l < latentDim; l++) {
-            const projIdx = d * latentDim + l;
-            latentKey[l] += key[qOffset + d] * this.latentKeyProj[projIdx];
-            latentValue[l] += value[qOffset + d] * this.latentValueProj[projIdx];
-          }
-        }
-
-        // Roman non-linéarité
-        for (let l = 0; l < latentDim; l++) {
-          latentKey[l] = this.#romanActivation(latentKey[l]);
-          latentValue[l] = this.#romanActivation(latentValue[l]);
-        }
-
-        // Attention latente
-        let score = 0;
-        for (let l = 0; l < latentDim; l++) {
-          score += query[qOffset + (l % headDim)] * latentKey[l];
-        }
-        score = this.#romanActivation(score);
-
-        // Projection retour
-        for (let d = 0; d < headDim; d++) {
-          const outIdx = (i * qHeads + qh) * headDim + d;
-          let contrib = 0;
-          for (let l = 0; l < latentDim; l++) {
-            const projIdx = d * latentDim + l;
-            contrib += latentValue[l] * this.latentValueProj[projIdx];
-          }
-          output[outIdx] += score * contrib;
-        }
-      }
-    }
-
-    return output;
+  _xor(value, weight) {
+    _rF32[0] = value;
+    const bits = _rU32[0];
+    const w = (weight * 1371.0) | 0;
+    const xored = (bits ^ w ^ ((bits >>> 7) | (bits << 25))) >>> 0;
+    return xored * 9e-8 + value * 0.998;
   }
 
-  #applyRope(tensor, seqLen) {
-    const { headDim } = this.config;
-    const half = headDim / 2;
-
-    for (let pos = 0; pos < seqLen; pos++) {
-      const cosRow = this.cosCache[pos];
-      const sinRow = this.sinCache[pos];
-
-      for (let h = 0; h < half; h++) {
-        const idx = pos * headDim + 2 * h;
-        const t0 = tensor[idx];
-        const t1 = tensor[idx + 1];
-        tensor[idx] = t0 * cosRow[2 * h] - t1 * sinRow[2 * h];
-        tensor[idx + 1] = t0 * sinRow[2 * h] + t1 * cosRow[2 * h];
-      }
-    }
+  _rotate(value, shift) {
+    _rF32[0] = value;
+    const bits = _rU32[0];
+    const s = (shift + 11) % 29;
+    const rot = ((bits << s) | (bits >>> (32 - s))) >>> 0;
+    return rot * 8e-8 + value * 0.997;
   }
 
-  #applyRomanDiffusion(key) {
-    const out = new Float32Array(key.length);
-    const strength = this.config.diffusionStrength;
-
-    for (let i = 0; i < key.length; i++) {
-      out[i] = key[i] * (1.0 - strength) + Math.sin(key[i] * 0.7) * strength;
-    }
-    return out;
+  _hybrid(value, weight, phase) {
+    const pm = fastSin(phase * 1.3 + weight * 0.013) * 0.6 + 0.4;
+    return value * (1.0 + weight * 0.0005 * pm) + weight * 0.0028 * pm + fastSin(value * 0.0003) * 0.4;
   }
 
-  #romanActivation(x) {
-    return (Math.tanh(x) * 0.88) + (Math.sin(x * 0.6) * this.config.diffusionStrength * 0.12);
+  _chaotic(value, weight, seed) {
+    const c = fastSin(seed * 0.41) * this.chaosIntensity + fastCos(seed * 0.19) * this.chaosIntensity * 0.7;
+    return value + c - value * 0.0012;
+  }
+
+  _spiral(value, weight, position) {
+    const sp = (fastSin(position * 0.27) * 0.5 + 0.5) * weight * 0.0006;
+    return value * (1.0 + sp) + fastCos(value * 0.0008) * 0.3;
+  }
+
+  _quantum(value, weight, layer) {
+    const q = fastSin(layer * 0.11) * 0.4 + 0.6;
+    return value * q + weight * 0.0018 * (1.0 - q);
+  }
+
+  reset() {
+    this.phase = 0.0;
+    this.layerFactor = 1.0;
+    this.depthBoost = 1.0;
   }
 }
