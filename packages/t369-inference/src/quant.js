@@ -1,103 +1,112 @@
 // packages/t369-inference/src/quant.js
 // =====================================================
-// Quant — 4-bit & 8-bit Quantization (GGUF-style)
-// Ultra-optimisé + Compatible avec QuantizedTensor
+// Quant — Block-wise 4/8-bit Quantization (GGUF-style)
+// Blocs de 32, buffer pool, dequant in-place
 // SkyAInet × Nikola T369
 // =====================================================
 
+"use strict";
+
+const BLOCK_SIZE = 32;
+
+// Pool de buffers Float32 réutilisables (zéro GC en boucle chaude)
+class BufferPool {
+  #pool = new Map();
+  acquire(size) {
+    const b = this.#pool.get(size);
+    return (b && b.length) ? b.pop() : new Float32Array(size);
+  }
+  release(buf) {
+    const s = buf.length;
+    if (!this.#pool.has(s)) this.#pool.set(s, []);
+    const b = this.#pool.get(s);
+    if (b.length < 64) { buf.fill(0); b.push(buf); }
+  }
+}
+export const bufferPool = new BufferPool();
+
 export class QuantizedTensor {
   constructor(rows = 0, cols = 0, bits = 8) {
-    const size = bits === 4 ? Math.ceil((rows * cols) / 2) : rows * cols;
-
-    this.data = new Int8Array(size);
-    this.scale = 1.0;
-    this.zeroPoint = 0;
-    this.bits = bits;
+    const numel     = rows * cols;
+    const numBlocks = Math.max(1, Math.ceil(numel / BLOCK_SIZE));
+    const dataSize  = bits === 4 ? Math.ceil(numel / 2) : numel;
+    this.data          = new Int8Array(dataSize);
+    this.scales        = new Float32Array(numBlocks).fill(1.0);
+    this.zeroPoints    = new Float32Array(numBlocks);
+    this.bits          = bits;
     this.originalShape = [rows, cols];
+    this._numel        = numel;
   }
 
-  // === Quantization depuis Float32Array ===
-  static quantizeFromF32(data, bits = 8) {
-    if (!data || data.length === 0) {
-      return new QuantizedTensor(0, 0, bits);
-    }
+  // Compat : ancien nom quantizeFromF32 conservé
+  static quantizeFromF32(data, bits = 8) { return QuantizedTensor.fromF32(data, bits); }
 
-    let minVal = Infinity;
-    let maxVal = -Infinity;
+  static fromF32(data, bits = 8) {
+    if (!data || data.length === 0) return new QuantizedTensor(0, 0, bits);
+    const numel     = data.length;
+    const numBlocks = Math.ceil(numel / BLOCK_SIZE);
+    const qt        = new QuantizedTensor(numel, 1, bits);
+    qt._numel       = numel;
+    const range     = bits === 4 ? 15 : 127;
 
-    for (let i = 0; i < data.length; i++) {
-      if (data[i] < minVal) minVal = data[i];
-      if (data[i] > maxVal) maxVal = data[i];
-    }
-
-    const scale = maxVal !== minVal ? (maxVal - minVal) / ((1 << bits) - 1) : 1.0;
-    const zeroPoint = Math.round(-minVal / scale) | 0;
-
-    const qt = new QuantizedTensor(data.length, 1, bits);
-    qt.scale = scale;
-    qt.zeroPoint = zeroPoint;
-
-    if (bits === 8) {
-      for (let i = 0; i < data.length; i++) {
-        const q = Math.round((data[i] / scale) + zeroPoint);
-        qt.data[i] = Math.max(-128, Math.min(127, q));
+    for (let b = 0; b < numBlocks; b++) {
+      const start = b * BLOCK_SIZE;
+      const end   = Math.min(start + BLOCK_SIZE, numel);
+      let mn = Infinity, mx = -Infinity;
+      for (let i = start; i < end; i++) {
+        const v = data[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
       }
-    } else if (bits === 4) {
-      for (let i = 0; i < data.length; i += 2) {
-        const q1 = Math.round((data[i] / scale) + zeroPoint);
-        const q2 = i + 1 < data.length ? Math.round((data[i + 1] / scale) + zeroPoint) : 0;
+      const scale = mx !== mn ? (mx - mn) / (2 * range) : 1.0;
+      const zp    = Math.round(-mn / scale);
+      qt.scales[b] = scale; qt.zeroPoints[b] = zp;
 
-        const packed = ((q1 & 0x0F) | ((q2 & 0x0F) << 4));
-        qt.data[i >> 1] = packed;
+      if (bits === 8) {
+        for (let i = start; i < end; i++)
+          qt.data[i] = Math.max(-range, Math.min(range, Math.round(data[i] / scale) + zp));
+      } else {
+        for (let i = start; i < end; i += 2) {
+          const q1 = Math.max(0, Math.min(15, Math.round(data[i] / scale) + zp));
+          const q2 = (i + 1 < end) ? Math.max(0, Math.min(15, Math.round(data[i+1] / scale) + zp)) : 0;
+          qt.data[i >> 1] = (q1 & 0x0F) | ((q2 & 0x0F) << 4);
+        }
       }
     }
-
     return qt;
   }
 
-  // === Déquantization (nouvelle allocation) ===
   dequantize() {
-    const [rows, cols] = this.originalShape;
-    const len = rows * cols;
-    const result = new Float32Array(len);
-
-    if (this.bits === 8) {
-      for (let i = 0; i < len; i++) {
-        result[i] = (this.data[i] - this.zeroPoint) * this.scale;
-      }
-    } else if (this.bits === 4) {
-      let outIdx = 0;
-      for (let i = 0; i < this.data.length && outIdx < len; i++) {
-        const packed = this.data[i];
-        result[outIdx++] = ((packed & 0x0F) - this.zeroPoint) * this.scale;
-
-        if (outIdx < len) {
-          result[outIdx++] = (((packed >> 4) & 0x0F) - this.zeroPoint) * this.scale;
-        }
-      }
-    }
-
-    return result;
+    const out = new Float32Array(this._numel);
+    this.dequantizeInplace(out);
+    return out;
   }
 
-  // === Déquantization in-place (ultra-rapide) ===
-  dequantizeInplace(output) {
-    const len = Math.min(output.length, this.originalShape[0] * this.originalShape[1]);
+  // Compat : ancien nom dequantizeInplace
+  dequantizeInplace(output) { return this.dequantizeInto(output); }
 
+  dequantizeInto(output) {
+    const numel     = Math.min(output.length, this._numel);
+    const numBlocks = Math.ceil(numel / BLOCK_SIZE);
     if (this.bits === 8) {
-      for (let i = 0; i < len; i++) {
-        output[i] = (this.data[i] - this.zeroPoint) * this.scale;
+      for (let b = 0; b < numBlocks; b++) {
+        const sc = this.scales[b], zp = this.zeroPoints[b];
+        const s = b * BLOCK_SIZE, e = Math.min(s + BLOCK_SIZE, numel);
+        for (let i = s; i < e; i++) output[i] = (this.data[i] - zp) * sc;
       }
-    } else if (this.bits === 4) {
-      let outIdx = 0;
-      for (let i = 0; i < this.data.length && outIdx < len; i++) {
-        const packed = this.data[i];
-        output[outIdx++] = ((packed & 0x0F) - this.zeroPoint) * this.scale;
-
-        if (outIdx < len) {
-          output[outIdx++] = (((packed >> 4) & 0x0F) - this.zeroPoint) * this.scale;
+    } else {
+      for (let b = 0; b < numBlocks; b++) {
+        const sc = this.scales[b], zp = this.zeroPoints[b];
+        const s = b * BLOCK_SIZE, e = Math.min(s + BLOCK_SIZE, numel);
+        let o = s;
+        for (let i = s >> 1; o < e; i++) {
+          const p = this.data[i];
+          output[o++] = ((p & 0x0F) - zp) * sc;
+          if (o < e) output[o++] = (((p >> 4) & 0x0F) - zp) * sc;
         }
       }
     }
   }
+
+  get numel() { return this._numel; }
 }
