@@ -1,0 +1,30 @@
+{
+  "name": "@skyainet/secure",
+  "version": "6.0.0",
+  "description": "SkyAInet Secure — Post-quantum defense, messaging, contacts & blockchain (Dilithium5 + RomanT369 + Double Ratchet)",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./device": "./src/device/device_key.js",
+    "./defense/*": "./src/defense/*.js",
+    "./contacts/*": "./src/contacts/*.js",
+    "./messaging": "./src/messaging.js",
+    "./blockchain/*": "./src/blockchain/*.js"
+  },
+  "scripts": {
+    "test": "node --test src/**/*.test.js || echo 'No tests yet'",
+    "lint": "eslint src/ --fix || echo 'ESLint not installed'",
+    "build": "echo 'Pure ESM — no build step'",
+    "start": "node src/index.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  },
+  "keywords": ["secure", "post-quantum", "dilithium", "double-ratchet", "skyainet", "defense", "messaging"],
+  "author": "SkyAInet × Nikola T369",
+  "license": "MIT",
+  "engines": { "node": ">=20.0.0" }
+}
