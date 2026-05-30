@@ -1,48 +1,36 @@
 // packages/secure/src/crypto/hybrid.js
 // =====================================================
-// Hybrid Transport — Stratégie Finale Production
-// KemT369 (ML-KEM-768) + RomanT369 (Hyper256) + GematriaAead
+// Hybrid Transport — KemT369 + RomanT369 + GematriaAead
 // SkyAInet × Nikola T369
 // =====================================================
 
 import { KemT369 } from './kem_t369.js';
 import { RomanT369, GematriaMode } from './roman_t369.js';
+import { GematriaAead } from './gematria_aead.js';
 import { hkdfSha256 } from './sha_fips.js';
 
+const TE = new TextEncoder();
+
 export class HybridError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'HybridError';
-  }
+  constructor(message) { super(message); this.name = 'HybridError'; }
 }
 
 export const HybridMode = Object.freeze({
-  KemT369Core:   'KemT369Core',     // 80% du trafic — cœur post-quantique
-  FlashGematria: 'FlashGematria',   // 20% — métadonnées légères
-  FullGematria:  'FullGematria',    // extrémités (mobile, navigateur, WebRTC)
+  KemT369Core:   'KemT369Core',
+  FlashGematria: 'FlashGematria',
+  FullGematria:  'FullGematria',
 });
 
-class GematriaAead {
-  #roman;
-
-  constructor(key, nonce) {
-    this.#roman = new RomanT369(key, nonce, GematriaMode.Hyper256);
-  }
-
-  encrypt(plaintext) {
-    return this.#roman.encrypt(plaintext);
-  }
-
-  decrypt(ciphertext) {
-    return this.#roman.decrypt(ciphertext);
-  }
+// Dérivation de clés depuis le secret partagé
+function deriveKeys(sharedSecret) {
+  const salt  = TE.encode('SkyAInet-Hybrid');
+  const key   = hkdfSha256(sharedSecret, salt, TE.encode('gematria-key'),   32);
+  const nonce = hkdfSha256(sharedSecret, salt, TE.encode('gematria-nonce'), 12);
+  return [key, nonce];
 }
 
 export class HybridTransport {
-  #kem;
-  #currentMode;
-  #cachedSecret; // Uint8Array[32] | null
-
+  #kem; #currentMode; #cachedSecret;
   constructor(is1024 = false) {
     this.#kem = new KemT369(is1024);
     this.#currentMode = HybridMode.KemT369Core;
@@ -50,63 +38,47 @@ export class HybridTransport {
   }
 
   setMode(mode) {
-    if (!Object.values(HybridMode).includes(mode)) {
-      throw new HybridError('Invalid mode');
-    }
+    if (!Object.values(HybridMode).includes(mode)) throw new HybridError('Invalid mode');
     this.#currentMode = mode;
   }
 
-  // === Chiffrement ===
+  generateKeypair() { return this.#kem.generateKeypair(); }
+
   encrypt(publicKey, plaintext, mode = this.#currentMode) {
     const [kemCt, shared] = this.#kem.encapsulate(publicKey);
-    const secret = shared.secret;
-
-    const [key, nonce] = deriveKeys(secret);
-
+    const [key, nonce] = deriveKeys(shared.secret);
+    const pt = plaintext instanceof Uint8Array ? plaintext : new Uint8Array(plaintext);
     let ciphertext;
     if (mode === HybridMode.FlashGematria) {
-      const aead = new GematriaAead(key, nonce);
-      ciphertext = aead.encrypt(plaintext);
+      ciphertext = new GematriaAead(key, nonce).encrypt(pt);
     } else {
-      const roman = new RomanT369(key, nonce, GematriaMode.Hyper256);
-      ciphertext = roman.encrypt(plaintext);
+      ciphertext = new RomanT369(key, nonce, GematriaMode.Hyper256).encrypt(pt);
     }
-
-    if (mode === HybridMode.FullGematria) {
-      this.#cachedSecret = secret;
-    }
-
+    if (mode === HybridMode.FullGematria) this.#cachedSecret = shared.secret;
     return [kemCt, ciphertext];
   }
 
-  // === Déchiffrement ===
   decrypt(secretKey, kemCt, ciphertext, mode = this.#currentMode) {
     const shared = this.#kem.decapsulate(secretKey, kemCt);
-    const secret = shared.secret;
-
-    const [key, nonce] = deriveKeys(secret);
-
-    let plaintext;
+    const [key, nonce] = deriveKeys(shared.secret);
     if (mode === HybridMode.FlashGematria) {
-      const aead = new GematriaAead(key, nonce);
-      plaintext = aead.decrypt(ciphertext);
-    } else {
-      const roman = new RomanT369(key, nonce, GematriaMode.Hyper256);
-      plaintext = roman.decrypt(ciphertext);
+      return new GematriaAead(key, nonce).decrypt(ciphertext);
     }
+    return new RomanT369(key, nonce, GematriaMode.Hyper256).decrypt(ciphertext);
+  }
 
-    return plaintext;
+  // deriveKeys exposé pour skynode (qui appelle this.#hybrid.deriveKeys())
+  deriveKeys() {
+    if (!this.#cachedSecret) {
+      // Pas de secret négocié : génère une paire éphémère et encapsule pour soi
+      const [pub, sec] = this.#kem.generateKeypair();
+      const [kemCt, shared] = this.#kem.encapsulate(pub);
+      this.#cachedSecret = shared.secret;
+    }
+    return deriveKeys(this.#cachedSecret);
   }
 
   encryptWithCurrentMode(publicKey, plaintext) {
     return this.encrypt(publicKey, plaintext, this.#currentMode);
   }
-}
-
-// === Dérivation de clés ultra-rapide (réutilise hkdf natif) ===
-function deriveKeys(sharedSecret) {
-  const salt = new TextEncoder().encode('SkyAInet-Hybrid');
-  const key   = hkdfSha256(sharedSecret, salt, new TextEncoder().encode('gematria-key'),   32);
-  const nonce = hkdfSha256(sharedSecret, salt, new TextEncoder().encode('gematria-nonce'), 12);
-  return [key, nonce];
 }
