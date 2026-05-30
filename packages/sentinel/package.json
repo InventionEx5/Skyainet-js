@@ -1,0 +1,22 @@
+{
+  "name": "@skyainet/sentinel",
+  "description": "Sentinel – Identité Souveraine, Auto-Healing et Anti-Fork pour SkyAInet",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./node_identity": "./src/node_identity.js",
+    "./auto_healing": "./src/auto_healing.js",
+    "./anti_fork": "./src/anti_fork.js"
+  },
+  "dependencies": {
+    "@skyainet/core": "workspace:*",
+    "@skyainet/node": "workspace:*",
+    "@skyainet/secure": "workspace:*"
+  },
+  "peerDependencies": {
+    "@skyainet/core": "*",
+    "@skyainet/node": "*",
+    "@skyainet/secure": "*"
+  }
+}
