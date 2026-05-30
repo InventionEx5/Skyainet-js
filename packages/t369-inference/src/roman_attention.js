@@ -1,139 +1,173 @@
-// packages/t369-inference/src/roman_diffusion.js
+// packages/t369-inference/src/roman_attention.js
 // =====================================================
-// RomanDiffusion — ULTRA
-// S-Box romaine + 9 modes de diffusion + poids adaptatifs + latent
-// Table sin/cos précalculée, in-place, clamp sans prototype pollution
+// RomanAttention — GQA + RoPE + MHLA + softmax-attention
+// RoPE plat, KV-cache intégré, buffers poolés, scale 1/sqrt(d)
 // SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
 
-const BASE_WEIGHTS = new Float32Array([1.0, 5.0, 10.0, 50.0, 100.0, 200.0, 250.0]);
-const TWO_PI = Math.PI * 2;
+import { bufferPool } from './quant.js';
 
-// ── Tables trigonométriques précalculées (4096 entrées) ──
-const TRIG_LEN = 4096, TRIG_MASK = TRIG_LEN - 1;
-const SIN_TBL = new Float32Array(TRIG_LEN);
-const COS_TBL = new Float32Array(TRIG_LEN);
-for (let i = 0; i < TRIG_LEN; i++) {
-  const a = (i / TRIG_LEN) * TWO_PI;
-  SIN_TBL[i] = Math.sin(a);
-  COS_TBL[i] = Math.cos(a);
-}
-function fastSin(x) { return SIN_TBL[(((x / TWO_PI) * TRIG_LEN) | 0) + TRIG_LEN * 64 & TRIG_MASK]; }
-function fastCos(x) { return COS_TBL[(((x / TWO_PI) * TRIG_LEN) | 0) + TRIG_LEN * 64 & TRIG_MASK]; }
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
-
-// Buffer partagé pour réinterprétation float<->uint (zéro allocation)
-const _reinterpret = new ArrayBuffer(4);
-const _rF32 = new Float32Array(_reinterpret);
-const _rU32 = new Uint32Array(_reinterpret);
-
-export class RomanDiffusion {
+export class RomanAttentionConfig {
   constructor() {
-    this.baseWeights     = BASE_WEIGHTS;
-    this.phase           = 0.0;
-    this.layerFactor     = 1.0;
-    this.depthBoost      = 1.0;
-    this.chaosIntensity  = 0.012;
-    this.latentInfluence = 0.38;
-    this._workBuf        = null;
+    this.numQueryHeads    = 16;
+    this.numKvHeads       = 4;
+    this.headDim          = 128;
+    this.latentDim        = 32;
+    this.diffusionStrength= 0.38;
+    this.maxSeqLen        = 32768;
+    this.ropeBase         = 10000.0;
+    this.ropeScaling      = 1.0;
+    this.useFlash         = true;
+    this.useMhla          = true;
   }
+}
 
-  // ── Diffusion ultra, in-place sur hidden ──────────
-  applyUltra(hidden, position, layer, latentContext = null) {
-    const len = hidden.length;
-    if (!this._workBuf || this._workBuf.length !== len) this._workBuf = new Float32Array(len);
-    const out = this._workBuf;
+export class RomanAttention {
+  constructor(config = new RomanAttentionConfig()) {
+    this.config = config;
+    const { headDim, latentDim, maxSeqLen, ropeBase, ropeScaling } = config;
 
-    this.phase      += 0.009;
-    this.layerFactor = 1.0 + layer * 0.028;
-    this.depthBoost  = layer >= 8 ? 1.018 : 1.0;
-
-    const weights = this.baseWeights;
-    const lf      = this.layerFactor;
-    const db      = this.depthBoost;
-    const latInf  = this.latentInfluence;
-    const phase   = this.phase;
-    const latLen  = latentContext ? latentContext.length : 0;
-
-    for (let i = 0; i < len; i++) {
-      const key      = i + position + layer;
-      const romanIdx = key % 7;
-      let weight     = weights[romanIdx] * lf;
-
-      if (latLen) weight += latentContext[i % latLen] * latInf * 0.1;
-
-      const sboxed = this._sbox(hidden[i], weight, key);
-
-      let d;
-      switch (key % 9) {
-        case 0:  d = sboxed - weight * 0.011; break;
-        case 1:  d = sboxed + weight * 0.011; break;
-        case 2:  d = this._xor(sboxed, weight); break;
-        case 3:  d = sboxed * (1.0 + weight * 0.0009); break;
-        case 4:  d = this._rotate(sboxed, weight | 0); break;
-        case 5:  d = this._hybrid(sboxed, weight, phase); break;
-        case 6:  d = this._chaotic(sboxed, weight, i); break;
-        case 7:  d = this._spiral(sboxed, weight, position); break;
-        default: d = this._quantum(sboxed, weight, layer); break;
+    // RoPE plat : [pos * headDim + d]
+    this._cos = new Float32Array(maxSeqLen * headDim);
+    this._sin = new Float32Array(maxSeqLen * headDim);
+    const half = headDim >> 1;
+    for (let pos = 0; pos < maxSeqLen; pos++) {
+      const base = pos * headDim;
+      for (let i = 0; i < half; i++) {
+        const freq = pos / (Math.pow(ropeBase, (2 * i) / headDim) * ropeScaling);
+        const c = Math.cos(freq), s = Math.sin(freq);
+        this._cos[base + 2*i] = c; this._cos[base + 2*i+1] = c;
+        this._sin[base + 2*i] = s; this._sin[base + 2*i+1] = s;
       }
-
-      out[i] = clamp(d * db, -14.0, 14.0) * 0.97;
     }
 
-    hidden.set(out);
-    return hidden;
+    // Projections latentes MHLA
+    const lk = headDim * latentDim;
+    this.latentKeyProj   = new Float32Array(lk);
+    this.latentValueProj = new Float32Array(lk);
+    for (let i = 0; i < lk; i++) {
+      this.latentKeyProj[i]   = Math.sin(i * 0.013) * 0.1;
+      this.latentValueProj[i] = Math.cos(i * 0.017) * 0.1;
+    }
+
+    this._scale = 1.0 / Math.sqrt(headDim);
   }
 
-  // ── S-Box romaine (table-driven) ──────────────────
-  _sbox(value, weight, seed) {
-    const x = value + weight * 0.0012;
-    return x
-      + fastSin(x * 4.1 + seed * 0.37) * 0.18
-      + fastSin(x * 1.9) * 0.09
-      + fastCos(x * 2.7) * 0.07;
+  forward(query, key, value, seqLen, kvCache = null, layerIdx = 0) {
+    const { useMhla } = this.config;
+    const Q = new Float32Array(query); this._rope(Q, seqLen);
+    const K = new Float32Array(key);   this._rope(K, seqLen); this._diffuse(K);
+    const V = new Float32Array(value);
+
+    let Kf = K, Vf = V, kvLen = seqLen;
+    if (kvCache) {
+      kvCache.prefill(layerIdx, K, V);
+      const got = kvCache.getLayer(layerIdx);
+      if (got) { [Kf, Vf] = got; kvLen = kvCache.len() || seqLen; }
+    }
+
+    return useMhla
+      ? this._mhla(Q, Kf, Vf, seqLen)
+      : this._gqa(Q, Kf, Vf, seqLen, kvLen);
   }
 
-  _xor(value, weight) {
-    _rF32[0] = value;
-    const bits = _rU32[0];
-    const w = (weight * 1371.0) | 0;
-    const xored = (bits ^ w ^ ((bits >>> 7) | (bits << 25))) >>> 0;
-    return xored * 9e-8 + value * 0.998;
+  // ── GQA avec softmax (vraie attention pondérée) ───
+  _gqa(Q, K, V, qLen, kvLen) {
+    const { numQueryHeads: qH, numKvHeads: kvH, headDim } = this.config;
+    const rep = qH / kvH;
+    const out = new Float32Array(Q.length);
+    const scores = bufferPool.acquire(kvLen);
+
+    for (let qi = 0; qi < qLen; qi++) {
+      for (let qh = 0; qh < qH; qh++) {
+        const kvh   = (qh / rep) | 0;
+        const qBase = (qi * qH + qh) * headDim;
+
+        // Scores Q·K causal (ki <= qi)
+        const limit = Math.min(kvLen, qi + 1);
+        for (let ki = 0; ki < limit; ki++) {
+          const kBase = (ki * kvH + kvh) * headDim;
+          let dot = 0;
+          for (let d = 0; d < headDim; d++) dot += Q[qBase + d] * K[kBase + d];
+          scores[ki] = dot * this._scale;
+        }
+        // Softmax stable
+        let mx = scores[0];
+        for (let k = 1; k < limit; k++) if (scores[k] > mx) mx = scores[k];
+        let sum = 0;
+        for (let k = 0; k < limit; k++) { scores[k] = Math.exp(scores[k] - mx); sum += scores[k]; }
+        const inv = 1 / sum;
+
+        // Pondération de V
+        for (let ki = 0; ki < limit; ki++) {
+          const w = scores[ki] * inv;
+          const vBase = (ki * kvH + kvh) * headDim;
+          for (let d = 0; d < headDim; d++) out[qBase + d] += w * V[vBase + d];
+        }
+      }
+    }
+    bufferPool.release(scores);
+    return out;
   }
 
-  _rotate(value, shift) {
-    _rF32[0] = value;
-    const bits = _rU32[0];
-    const s = (shift + 11) % 29;
-    const rot = ((bits << s) | (bits >>> (32 - s))) >>> 0;
-    return rot * 8e-8 + value * 0.997;
+  // ── MHLA : compression latente ────────────────────
+  _mhla(Q, K, V, qLen) {
+    const { numQueryHeads: qH, headDim, latentDim } = this.config;
+    const out = new Float32Array(Q.length);
+    const lk  = bufferPool.acquire(latentDim);
+    const lv  = bufferPool.acquire(latentDim);
+
+    for (let qi = 0; qi < qLen; qi++) {
+      for (let qh = 0; qh < qH; qh++) {
+        const qBase = (qi * qH + qh) * headDim;
+        lk.fill(0); lv.fill(0);
+        for (let d = 0; d < headDim; d++) {
+          const kv = K[qBase + d], vv = V[qBase + d];
+          const pb = d * latentDim;
+          for (let l = 0; l < latentDim; l++) {
+            lk[l] += kv * this.latentKeyProj[pb + l];
+            lv[l] += vv * this.latentValueProj[pb + l];
+          }
+        }
+        for (let l = 0; l < latentDim; l++) { lk[l] = this._act(lk[l]); lv[l] = this._act(lv[l]); }
+
+        let score = 0;
+        for (let l = 0; l < latentDim; l++) score += Q[qBase + (l % headDim)] * lk[l];
+        score = this._act(score * this._scale);
+
+        for (let d = 0; d < headDim; d++) {
+          let contrib = 0;
+          const pb = d * latentDim;
+          for (let l = 0; l < latentDim; l++) contrib += lv[l] * this.latentValueProj[pb + l];
+          out[qBase + d] += score * contrib;
+        }
+      }
+    }
+    bufferPool.release(lk); bufferPool.release(lv);
+    return out;
   }
 
-  _hybrid(value, weight, phase) {
-    const pm = fastSin(phase * 1.3 + weight * 0.013) * 0.6 + 0.4;
-    return value * (1.0 + weight * 0.0005 * pm) + weight * 0.0028 * pm + fastSin(value * 0.0003) * 0.4;
+  _rope(t, seqLen) {
+    const hd = this.config.headDim;
+    for (let pos = 0; pos < seqLen; pos++) {
+      const b = pos * hd;
+      for (let i = 0; i < hd; i += 2) {
+        const t0 = t[b+i], t1 = t[b+i+1];
+        const c = this._cos[b+i], s = this._sin[b+i];
+        t[b+i]   = t0 * c - t1 * s;
+        t[b+i+1] = t0 * s + t1 * c;
+      }
+    }
   }
 
-  _chaotic(value, weight, seed) {
-    const c = fastSin(seed * 0.41) * this.chaosIntensity + fastCos(seed * 0.19) * this.chaosIntensity * 0.7;
-    return value + c - value * 0.0012;
+  _diffuse(key) {
+    const str = this.config.diffusionStrength, inv = 1 - str;
+    for (let i = 0; i < key.length; i++) key[i] = key[i] * inv + Math.sin(key[i] * 0.7) * str;
   }
 
-  _spiral(value, weight, position) {
-    const sp = (fastSin(position * 0.27) * 0.5 + 0.5) * weight * 0.0006;
-    return value * (1.0 + sp) + fastCos(value * 0.0008) * 0.3;
-  }
-
-  _quantum(value, weight, layer) {
-    const q = fastSin(layer * 0.11) * 0.4 + 0.6;
-    return value * q + weight * 0.0018 * (1.0 - q);
-  }
-
-  reset() {
-    this.phase = 0.0;
-    this.layerFactor = 1.0;
-    this.depthBoost = 1.0;
+  _act(x) {
+    return Math.tanh(x) * 0.88 + Math.sin(x * 0.6) * this.config.diffusionStrength * 0.12;
   }
 }
