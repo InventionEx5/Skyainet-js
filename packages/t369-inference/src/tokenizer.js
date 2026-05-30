@@ -1,108 +1,96 @@
 // packages/t369-inference/src/tokenizer.js
 // =====================================================
-// T369 BPE Tokenizer — Extremely Optimized
-// High-performance Byte Pair Encoding for T369Inference
+// BpeTokenizer — BPE haute performance
+// Cache LRU, séparateur \x00 (pas de collision), decode </w> propre
 // SkyAInet × Nikola T369
 // =====================================================
 
+"use strict";
+
+class LruCache {
+  constructor(max = 8192) { this._max = max; this._m = new Map(); }
+  get(k) {
+    if (!this._m.has(k)) return undefined;
+    const v = this._m.get(k); this._m.delete(k); this._m.set(k, v); return v;
+  }
+  set(k, v) {
+    if (this._m.has(k)) this._m.delete(k);
+    else if (this._m.size >= this._max) this._m.delete(this._m.keys().next().value);
+    this._m.set(k, v);
+  }
+}
+
+// Pré-tokenisation unicode (lettres / chiffres / ponctuation)
+const PRE_RE = /\p{L}+|\p{N}+|[^\s\p{L}\p{N}]+/gu;
+
 export class BpeTokenizer {
   constructor() {
-    this.vocab = new Map();           // string → number
-    this.idToToken = [];              // number → string
-    this.merges = new Map();          // `\( {a}: \){b}` → rank
-    this.bosToken = 0;
-    this.eosToken = 1;
-    this.padToken = 2;
-    this.unkToken = 3;
-    this.encodeCache = new Map();     // string → number[]
+    this.vocab     = new Map();
+    this.idToToken = [];
+    this.merges    = new Map();   // "a\x00b" → rank
+    this.bosToken  = 0;
+    this.eosToken  = 1;
+    this.padToken  = 2;
+    this.unkToken  = 3;
+    this._cache    = new LruCache(8192);
   }
 
   load(vocab, merges) {
-    this.vocab.clear();
-    this.idToToken = [];
-    this.merges.clear();
-
+    this.vocab.clear(); this.idToToken = []; this.merges.clear();
+    this._cache = new LruCache(8192);
     for (const [token, id] of vocab) {
       this.vocab.set(token, id);
       if (this.idToToken.length <= id) this.idToToken.length = id + 1;
       this.idToToken[id] = token;
     }
-
-    for (const [[a, b], rank] of merges) {
-      this.merges.set(`\( {a}: \){b}`, rank);
-    }
-
+    for (const [[a, b], rank] of merges) this.merges.set(`${a}\x00${b}`, rank);
     return this;
   }
 
   encode(text) {
-    if (this.encodeCache.has(text)) {
-      return this.encodeCache.get(text).slice();
-    }
+    if (!text) return [];
+    const cached = this._cache.get(text);
+    if (cached) return cached.slice();
 
-    let tokens = this.#preTokenize(text);
+    const words  = text.match(PRE_RE) || [];
     const result = [];
+    for (const w of words) {
+      const ids = this._encodeWord(w);
+      for (let i = 0; i < ids.length; i++) result.push(ids[i]);
+    }
+    this._cache.set(text, result);
+    return result.slice();
+  }
 
-    // BPE merge loop (optimisé)
-    while (tokens.length > 1) {
-      let bestRank = Infinity;
-      let bestIdx = -1;
+  _encodeWord(word) {
+    let parts = [...word];
+    if (parts.length === 0) return [];
+    parts[parts.length - 1] += '</w>';
 
-      for (let i = 0; i < tokens.length - 1; i++) {
-        const key = `\( {tokens[i]}: \){tokens[i + 1]}`;
-        const rank = this.merges.get(key);
-        if (rank !== undefined && rank < bestRank) {
-          bestRank = rank;
-          bestIdx = i;
-        }
+    // BPE : fusionne la paire de plus bas rang à chaque tour
+    while (parts.length > 1) {
+      let bestRank = Infinity, bestIdx = -1;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const r = this.merges.get(`${parts[i]}\x00${parts[i+1]}`);
+        if (r !== undefined && r < bestRank) { bestRank = r; bestIdx = i; }
       }
-
       if (bestIdx === -1) break;
-
-      const newToken = this.#getMergedToken(tokens[bestIdx], tokens[bestIdx + 1]);
-      tokens.splice(bestIdx, 2, newToken);
+      parts.splice(bestIdx, 2, parts[bestIdx] + parts[bestIdx + 1]);
     }
-
-    for (const token of tokens) {
-      const id = this.vocab.get(token);
-      result.push(id !== undefined ? id : this.unkToken);
-    }
-
-    if (this.encodeCache.size < 10000) {
-      this.encodeCache.set(text, result.slice());
-    }
-
-    return result;
+    return parts.map(p => this.vocab.get(p) ?? this.unkToken);
   }
 
   decode(tokens) {
-    let result = '';
+    let out = '';
     for (const id of tokens) {
-      const token = this.idToToken[id];
-      result += token !== undefined ? token : '<unk>';
+      const tok = this.idToToken[id];
+      if (tok === undefined) { out += '<unk>'; continue; }
+      out += tok.endsWith('</w>') ? tok.slice(0, -4) + ' ' : tok;
     }
-    return result;
+    return out.trimEnd();
   }
 
-  #preTokenize(text) {
-    return text.split(/\s+/).flatMap(word => {
-      if (!word) return [];
-      const chars = [...word];
-      if (chars.length > 0) chars[chars.length - 1] += '</w>';
-      return chars;
-    });
-  }
-
-  #getMergedToken(a, b) {
-    const ta = this.idToToken[a] || '';
-    const tb = this.idToToken[b] || '';
-    return ta + tb;
-  }
-
-  vocabSize() {
-    return this.vocab.size;
-  }
-
+  vocabSize() { return this.vocab.size; }
   addSpecialToken(token, id) {
     this.vocab.set(token, id);
     if (this.idToToken.length <= id) this.idToToken.length = id + 1;
