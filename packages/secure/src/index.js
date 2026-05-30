@@ -1,19 +1,132 @@
 // packages/secure/src/index.js
 // =====================================================
 // @skyainet/secure — Point d'entrée principal
-// SkyAInet × Nikola T369 — Secure Messaging + Defense + Blockchain
+// SkyAInet × Nikola T369
 // Version 6.0 — Production Ready
 // =====================================================
 
-// === DEVICE ===
-export {
-  DeviceKeyManager,
-  DeviceKey,
-  DeviceStatus,
-  DeviceKeyError,
-} from './device/device_key.js';
+// ============================================
+// 1. IMPORTS DES MODULES EXISTANTS (fournis)
+// ============================================
 
-// === DEFENSE ===
+// Crypto
+export {
+  Dilithium5Signer,
+  Dilithium5KeyPair,
+  DilithiumError,
+} from './crypto/dilithium.js';
+
+export {
+  RomanT369,
+  RomanT369Error,
+} from './crypto/roman_t369.js';
+
+export {
+  KemT369,
+  KemT369Error,
+} from './crypto/kem_t369.js';
+
+export {
+  HybridEncryption,
+  HybridError,
+} from './crypto/hybrid.js';
+
+export {
+  DoubleRatchet,
+  DoubleRatchetError,
+} from './crypto/double_ratchet.js';
+
+export {
+  GematriaAead,
+  GematriaAeadError,
+} from './crypto/gematria_aead.js';
+
+export {
+  AesFips,
+  AesFipsError,
+} from './crypto/aes_fips.js';
+
+export {
+  ShaFips,
+  ShaFipsError,
+} from './crypto/sha_fips.js';
+
+export {
+  ConstantTime,
+  ConstantTimeError,
+} from './crypto/constant_time.js';
+
+export {
+  Steganography,
+  SteganographyError,
+} from './crypto/steganography.js';
+
+// Protocol
+export {
+  Handshake,
+  HandshakeError,
+} from './protocol/handshake.js';
+
+export {
+  Session,
+  SessionError,
+} from './protocol/session.js';
+
+// Transport
+export {
+  TransportTrait,
+  TransportError,
+} from './transport/trait.js';
+
+export {
+  Libp2pTransport,
+  Libp2pTransportError,
+} from './transport/libp2p_transport.js';
+
+// Suites
+export {
+  GematriaSuite,
+  GematriaSuiteError,
+} from './suites/gematria.js';
+
+export {
+  PostQuantumSuite,
+  PostQuantumSuiteError,
+} from './suites/post_quantum.js';
+
+// Roots
+export {
+  CircuitBuilder,
+  CircuitBuilderError,
+} from './roots/circuit/builder.js';
+
+export {
+  EpochRekey,
+  EpochRekeyError,
+} from './roots/circuit/epoch_rekey.js';
+
+export {
+  Pool,
+  PoolError,
+} from './roots/pool.js';
+
+export {
+  Reputation,
+  ReputationError,
+} from './roots/reputation.js';
+
+export {
+  Attestation,
+  AttestationError,
+} from './roots/attestation.js';
+
+// Identity
+export {
+  Did,
+  DidError,
+} from './identity/did.js';
+
+// Defense
 export {
   CanvasBlocker,
   CanvasProtectionLevel,
@@ -28,36 +141,22 @@ export {
   AntiDebug,
 } from './defense/anti_debug.js';
 
-// === CONTACTS ===
 export {
-  Contact,
-  createDefaultContact,
-} from './contacts/contact.js';
+  PhysicalAccessProtection,
+  PhysicalAccessError,
+} from './defense/pa/index.js';
 
 export {
-  ContactManager,
-  ContactManagerError,
-  Did,
-} from './contacts/manager.js';
+  Deception,
+  DeceptionError,
+} from './defense/deception/index.js';
 
 export {
-  ContactVerification,
-  GroupVerification,
-  Group,
-  VerificationError,
-  VerificationLevel,
-} from './contacts/verification.js';
+  AntiExploit,
+  AntiExploitError,
+} from './defense/ae/index.js';
 
-// === MESSAGING ===
-export {
-  MessagingManager,
-  MessagingError,
-  Message,
-  Conversation,
-  MessageType,
-} from './messaging.js';
-
-// === BLOCKCHAIN ===
+// Blockchain
 export {
   EpochManager,
   EpochError,
@@ -70,49 +169,94 @@ export {
   SessionStatus,
 } from './blockchain/broadcast.js';
 
-// === CRYPTO (stubs / à implémenter) ===
-// Décommente quand les fichiers seront prêts
-// export { Dilithium5Signer, DilithiumError } from './crypto/dilithium.js';
-// export { RomanT369, GematriaMode } from './crypto/roman_t369.js';
-// export { KemT369 } from './crypto/kem_t369.js';
-// export { DoubleRatchet } from './crypto/double_ratchet.js';
-// export { hkdfSha256 } from './crypto/sha_fips.js';
+// Device
+export {
+  DeviceKeyManager,
+  DeviceKey,
+  DeviceStatus,
+  DeviceKeyError,
+} from './device/device_key.js';
 
-// === UTILITAIRES ===
+// Group
+export {
+  GroupManager,
+  GroupError,
+} from './group/index.js';
+
+export {
+  SenderKeys,
+  SenderKeysError,
+} from './group/sender_keys.js';
+
+// Media
+export {
+  MediaEncryptor,
+  MediaEncryptorError,
+} from './media/encryptor.js';
+
+// Metrics
+export {
+  RedTeam,
+  RedTeamError,
+} from './metrics/red_team.js';
+
+// Contacts
+export {
+  Contact,
+  createDefaultContact,
+} from './contacts/contact.js';
+
+export {
+  ContactManager,
+  ContactManagerError,
+  Did as ContactDid,
+} from './contacts/manager.js';
+
+export {
+  ContactVerification,
+  GroupVerification,
+  Group,
+  VerificationError,
+  VerificationLevel,
+} from './contacts/verification.js';
+
+// Messaging
+export {
+  MessagingManager,
+  MessagingError,
+  Message,
+  Conversation,
+  MessageType,
+} from './messaging.js';
+
+// Utils
+export {
+  Compression,
+  CompressionError,
+} from './utils/compression.js';
+
+export {
+  MarkovGenerator,
+  MarkovError,
+} from './utils/markov.js';
+
+export {
+  TimeUtils,
+  TimeUtilsError,
+} from './utils/time.js';
+
+export {
+  Reproducible,
+  ReproducibleError,
+} from './utils/reproducible.js';
+
+// ============================================
+// 2. UTILITAIRES
+// ============================================
 export const VERSION = '6.0.0';
 export const AUTHOR = 'SkyAInet × Nikola T369';
 
-/**
- * Crée une instance complète du système Secure
- * (helper pour démarrage rapide)
- */
-export function createSecureSystem(options = {}) {
-  const {
-    maxDevices = 10,
-    maxDecoys = 50,
-    maxContacts = 500,
-    epochDuration = 3600,
-    rekeyThreshold = 0.66,
-  } = options;
-
-  console.info('[Secure] Système Secure initialisé (v' + VERSION + ')');
-
-  return {
-    version: VERSION,
-    deviceKeyManager: null,
-    decoyCircuitManager: null,
-    canvasBlocker: null,
-    antiDebug: new (await import('./defense/anti_debug.js')).default(),
-    contactManager: null,
-    messagingManager: null,
-    epochManager: new (await import('./blockchain/epoch.js')).default(epochDuration, rekeyThreshold),
-    broadcastSession: null,
-  };
-}
-
-// Export par défaut pour import facile
 export default {
   VERSION,
   AUTHOR,
-  createSecureSystem,
 };
