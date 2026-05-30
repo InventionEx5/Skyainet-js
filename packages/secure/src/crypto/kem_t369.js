@@ -1,11 +1,11 @@
 // packages/secure/src/crypto/kem_t369.js
 // =====================================================
-// KemT369 — Pure Post-Quantum KEM (Production Ready)
+// KemT369 — Pure Post-Quantum KEM
 // ML-KEM-768 + RomanT369 (Hyper256) + Secure Key Derivation
 // SkyAInet × Nikola T369
 // =====================================================
 
-import { randomBytes } from 'crypto';
+import { ml_kem768, ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { RomanT369, GematriaMode } from './roman_t369.js';
 
 export class KemError extends Error {
@@ -16,28 +16,23 @@ export class KemError extends Error {
 }
 
 export class KemT369 {
-  #is1024; // false = ML-KEM-768 (recommandé), true = ML-KEM-1024 (compat)
+  #is1024; // false = ML-KEM-768 (recommandé), true = ML-KEM-1024
 
   constructor(is1024 = false) {
     this.#is1024 = !!is1024;
   }
 
-  // === Génération de paire de clés (simulée via RomanT369 pour self-contained) ===
+  // === Génération de paire de clés (vrai ML-KEM) ===
   generateKeypair() {
-    const secretKey = randomBytes(32);
-    const nonce = randomBytes(12);
-
-    // On utilise RomanT369 Hyper256 pour générer une "clé publique" cohérente
-    const roman = new RomanT369(secretKey, nonce, GematriaMode.Hyper256);
-    const publicKeyMaterial = randomBytes(32);
-    const mlKemPublic = roman.encrypt(publicKeyMaterial);
+    const kem = this.#is1024 ? ml_kem1024 : ml_kem768;
+    const { publicKey, secretKey } = kem.keygen();
 
     return [
       {
-        ml_kem_public: mlKemPublic,
+        ml_kem_public: new Uint8Array(publicKey),
         is_1024: this.#is1024
       },
-      secretKey
+      new Uint8Array(secretKey)
     ];
   }
 
@@ -47,37 +42,30 @@ export class KemT369 {
       throw new KemError('Invalid ML-KEM public key');
     }
 
-    const sharedSecret = randomBytes(32);
-    const nonce = randomBytes(12);
+    const kem = publicKey.is_1024 ? ml_kem1024 : ml_kem768;
+    const { cipherText, sharedSecret } = kem.encapsulate(publicKey.ml_kem_public);
 
-    // "Encapsulation" via RomanT369 (cohérent avec le reste du système)
-    const roman = new RomanT369(sharedSecret, nonce, GematriaMode.Hyper256);
-    const mlKemCiphertext = roman.encrypt(sharedSecret);
-
-    const finalSecret = this.#deriveFinalKey(sharedSecret);
+    const finalSecret = this.#deriveFinalKey(new Uint8Array(sharedSecret));
 
     return [
-      { ml_kem_ciphertext: mlKemCiphertext },
+      { ml_kem_ciphertext: new Uint8Array(cipherText) },
       { secret: finalSecret }
     ];
   }
 
   // === Décapsulation (côté récepteur) ===
   decapsulate(secretKey, ciphertext) {
-    if (!secretKey || secretKey.length !== 32) {
+    if (!secretKey || secretKey.length < 2400) {
       throw new KemError('Invalid ML-KEM secret key');
     }
     if (!ciphertext || !ciphertext.ml_kem_ciphertext) {
       throw new KemError('Invalid ML-KEM ciphertext');
     }
 
-    const nonce = randomBytes(12);
+    const kem = this.#is1024 ? ml_kem1024 : ml_kem768;
+    const sharedSecret = kem.decapsulate(ciphertext.ml_kem_ciphertext, secretKey);
 
-    // "Décapsulation" via RomanT369
-    const roman = new RomanT369(secretKey, nonce, GematriaMode.Hyper256);
-    const sharedSecret = roman.decrypt(ciphertext.ml_kem_ciphertext);
-
-    const finalSecret = this.#deriveFinalKey(sharedSecret);
+    const finalSecret = this.#deriveFinalKey(new Uint8Array(sharedSecret));
     return { secret: finalSecret };
   }
 
@@ -90,7 +78,7 @@ export class KemT369 {
     const nonce = new Uint8Array(12);
     const roman = new RomanT369(mlShared, nonce, GematriaMode.Hyper256);
 
-    // Passe finale RomanT369 pour diffusion maximale
+    // Passe finale RomanT369 pour diffusion maximale (ton invention)
     const finalKey = roman.encrypt(mlShared);
     return finalKey.slice(0, 32);
   }
