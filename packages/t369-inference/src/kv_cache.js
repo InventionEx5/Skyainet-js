@@ -1,94 +1,78 @@
 // packages/t369-inference/src/kv_cache.js
 // =====================================================
-// KVCache — High-Performance Key-Value Cache
-// Ultra-optimized for autoregressive generation
+// KVCache — Flat TypedArray, O(1) append, sliding window
+// Allocation unique, prefill batch, compat API d'origine
 // SkyAInet × Nikola T369
 // =====================================================
 
+"use strict";
+
 export class KVCache {
   constructor(numLayers, numHeads, headDim, maxSeqLen) {
-    this.numLayers = numLayers;
-    this.numHeads = numHeads;
-    this.headDim = headDim;
-    this.maxSeqLen = maxSeqLen;
+    this.numLayers     = numLayers;
+    this.numHeads      = numHeads;
+    this.headDim       = headDim;
+    this.maxSeqLen     = maxSeqLen;
     this.currentSeqLen = 0;
 
-    const headSize = numHeads * headDim;
-
-    this.keys = new Array(numLayers);
-    this.values = new Array(numLayers);
-
-    for (let layer = 0; layer < numLayers; layer++) {
-      this.keys[layer] = new Array(maxSeqLen);
-      this.values[layer] = new Array(maxSeqLen);
-
-      for (let pos = 0; pos < maxSeqLen; pos++) {
-        this.keys[layer][pos] = new Float32Array(headSize);
-        this.values[layer][pos] = new Float32Array(headSize);
-      }
-    }
+    this._slot      = numHeads * headDim;
+    this._layerSize = maxSeqLen * this._slot;
+    this._K = new Float32Array(numLayers * this._layerSize);
+    this._V = new Float32Array(numLayers * this._layerSize);
   }
 
-  // Append new key and value for current position
   append(layer, key, value) {
-    if (layer >= this.numLayers || this.currentSeqLen >= this.maxSeqLen) {
-      return;
+    if (layer >= this.numLayers) return;
+
+    if (this.currentSeqLen >= this.maxSeqLen) {
+      // Sliding window : décale tout d'un slot
+      const slot = this._slot;
+      for (let l = 0; l < this.numLayers; l++) {
+        const base = l * this._layerSize;
+        this._K.copyWithin(base, base + slot, base + this.currentSeqLen * slot);
+        this._V.copyWithin(base, base + slot, base + this.currentSeqLen * slot);
+      }
+      if (layer === this.numLayers - 1) this.currentSeqLen--;
     }
 
-    const pos = this.currentSeqLen;
-    const headSize = this.numHeads * this.headDim;
+    const base = layer * this._layerSize + this.currentSeqLen * this._slot;
+    const n    = Math.min(this._slot, key.length);
+    for (let i = 0; i < n; i++) { this._K[base + i] = key[i]; this._V[base + i] = value[i]; }
 
-    const k = this.keys[layer][pos];
-    const v = this.values[layer][pos];
-
-    const kLen = Math.min(headSize, key.length);
-    for (let i = 0; i < kLen; i++) k[i] = key[i];
-
-    const vLen = Math.min(headSize, value.length);
-    for (let i = 0; i < vLen; i++) v[i] = value[i];
-
-    if (layer === this.numLayers - 1) {
-      this.currentSeqLen++;
-    }
+    if (layer === this.numLayers - 1) this.currentSeqLen++;
   }
 
-  // Get keys and values up to current position for a layer
+  // Renvoie des vues plates (zéro copie)
   getLayer(layer) {
     if (layer >= this.numLayers) return null;
-
-    const end = this.currentSeqLen;
-    return [
-      this.keys[layer].slice(0, end),
-      this.values[layer].slice(0, end)
-    ];
+    const base = layer * this._layerSize;
+    const end  = this.currentSeqLen * this._slot;
+    return [this._K.subarray(base, base + end), this._V.subarray(base, base + end)];
   }
 
-  // Reset cache (for new generation)
-  clear() {
-    this.currentSeqLen = 0;
+  // Copie tout le prompt d'un coup
+  prefill(layer, keys, values) {
+    const base = layer * this._layerSize;
+    const n    = Math.min(keys.length, this._layerSize);
+    this._K.set(keys.subarray(0, n), base);
+    this._V.set(values.subarray(0, n), base);
   }
 
-  // Resize cache if needed (for longer context)
-  resize(newMaxSeqLen) {
-    if (newMaxSeqLen <= this.maxSeqLen) return;
+  clear()   { this.currentSeqLen = 0; }
+  len()     { return this.currentSeqLen; }
+  isEmpty() { return this.currentSeqLen === 0; }
 
-    const headSize = this.numHeads * this.headDim;
-
-    for (let layer = 0; layer < this.numLayers; layer++) {
-      for (let pos = this.maxSeqLen; pos < newMaxSeqLen; pos++) {
-        this.keys[layer][pos] = new Float32Array(headSize);
-        this.values[layer][pos] = new Float32Array(headSize);
-      }
+  resize(newMax) {
+    if (newMax <= this.maxSeqLen) return;
+    const slot   = this._slot;
+    const newLS  = newMax * slot;
+    const nK = new Float32Array(this.numLayers * newLS);
+    const nV = new Float32Array(this.numLayers * newLS);
+    for (let l = 0; l < this.numLayers; l++) {
+      const src = l * this._layerSize, dst = l * newLS;
+      nK.set(this._K.subarray(src, src + this._layerSize), dst);
+      nV.set(this._V.subarray(src, src + this._layerSize), dst);
     }
-
-    this.maxSeqLen = newMaxSeqLen;
-  }
-
-  len() {
-    return this.currentSeqLen;
-  }
-
-  isEmpty() {
-    return this.currentSeqLen === 0;
+    this._K = nK; this._V = nV; this._layerSize = newLS; this.maxSeqLen = newMax;
   }
 }
