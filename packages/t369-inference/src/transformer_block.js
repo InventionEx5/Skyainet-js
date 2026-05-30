@@ -1,6 +1,6 @@
 // packages/t369-inference/src/transformer_block.js
 // =====================================================
-// TransformerBlock — ULTRA-PUISSANT
+// TransformerBlock
 // RMSNorm + Roman Dream Attention (GQA + MHLA) + MoE + RomanDiffusion Ultra
 // SkyAInet × Nikola T369
 // =====================================================
