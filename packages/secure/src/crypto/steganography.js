@@ -1,4 +1,4 @@
-// src/crypto/steganography.js
+// packages/secure/src/crypto/steganography.js
 // =====================================================
 // Markov Steganography — Production Ready
 // SkyAInet × Nikola T369 — KL Divergence < 0.03
