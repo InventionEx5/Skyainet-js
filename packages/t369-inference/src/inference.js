@@ -1,208 +1,124 @@
 // packages/t369-inference/src/inference.js
 // =====================================================
-// T369Inference — ULTRA ULTRA PUISSANT
-// Roman Neural Inference Engine
+// T369Inference — Orchestrateur
+// tokenize → generate (standard/speculative/parallel) → decode
+// Compat : API d'origine + métriques tokens/sec
 // SkyAInet × Nikola T369
 // =====================================================
 
-import { T369Model, ModelConfig } from './model.js';
-import { KVCache } from './kv_cache.js';
-import { SpeculativeDecoder, SpeculativeConfig } from './speculative.js';
+"use strict";
+
+import { T369Model, ModelConfig }                          from './model.js';
+import { KVCache }                                         from './kv_cache.js';
+import { SpeculativeDecoder, SpeculativeConfig }            from './speculative.js';
 import { ParallelExecutor, ParallelConfig, ParallelStrategy } from './parallel.js';
-import { BpeTokenizer } from './tokenizer.js';
+import { BpeTokenizer }                                    from './tokenizer.js';
 
 export const ParallelMode = Object.freeze({
-  None: 'None',
-  Pipeline: 'Pipeline',
-  Tensor: 'Tensor',
-  Speculative: 'Speculative',
+  None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Speculative: 'Speculative',
 });
 
 export class T369Inference {
-  constructor() {
-    const config = new ModelConfig();
-    this.model = new T369Model(config);
-    this.kvCache = null;
-    this.useKVCache = true;
+  constructor(config = new ModelConfig()) {
+    this.model              = new T369Model(config);
+    this.kvCache            = null;
+    this.useKVCache         = true;
     this.speculativeDecoder = null;
-    this.parallelExecutor = null;
-    this.parallelMode = ParallelMode.None;
+    this.parallelExecutor   = null;
+    this.parallelMode       = ParallelMode.None;
+    this._tokens = 0; this._calls = 0; this._start = Date.now();
   }
-
-  // === INITIALISATION ===
 
   initKVCache() {
-    if (!this.kvCache) {
-      this.kvCache = new KVCache(
-        this.model.config.numLayers,
-        this.model.config.numKvHeads,
-        this.model.config.headDim,
-        this.model.config.maxSeqLen
-      );
-      console.info('[Inference] KV Cache initialisé');
-    }
+    this.model.initKVCache();
+    this.kvCache = this.model.kvCache;
   }
+
+  loadTokenizer(tokenizer) { this.model.setTokenizer(tokenizer); return this; }
 
   enableSpeculativeDecoding(config = new SpeculativeConfig()) {
-    const modelConfig = { ...this.model.config };
-    this.speculativeDecoder = new SpeculativeDecoder(modelConfig, config);
+    this.speculativeDecoder = new SpeculativeDecoder(this.model.config, config);
     this.parallelMode = ParallelMode.Speculative;
-    console.info('[Inference] Speculative Decoding activé');
+    return this;
   }
 
-  setParallelMode(mode) {
-    this.parallelMode = mode;
-    if (mode === ParallelMode.Pipeline) console.info('[Inference] Mode Pipeline Parallel activé');
-    else if (mode === ParallelMode.Tensor) console.info('[Inference] Mode Tensor Parallel activé');
-    else if (mode === ParallelMode.Speculative) console.info('[Inference] Mode Speculative activé');
-  }
-
-  enablePipelineParallel() {
-    const config = new ParallelConfig();
-    config.strategy = ParallelStrategy.Pipeline;
-    config.numWorkers = 4;
-    config.pipelineStages = 4;
-    this.parallelExecutor = new ParallelExecutor(this.model, config);
+  enablePipelineParallel(stages = 4) {
+    const c = new ParallelConfig();
+    c.strategy = ParallelStrategy.Pipeline; c.pipelineStages = stages;
+    this.parallelExecutor = new ParallelExecutor(this.model, c);
     this.parallelMode = ParallelMode.Pipeline;
-    console.info('[Inference] Pipeline Parallel activé (4 stages)');
+    return this;
   }
 
-  enableTensorParallel() {
-    const config = new ParallelConfig();
-    config.strategy = ParallelStrategy.Tensor;
-    config.numWorkers = 4;
-    config.tensorParallelDegree = 4;
-    this.parallelExecutor = new ParallelExecutor(this.model, config);
+  enableTensorParallel(degree = 4) {
+    const c = new ParallelConfig();
+    c.strategy = ParallelStrategy.Tensor; c.tensorParallelDegree = degree;
+    this.parallelExecutor = new ParallelExecutor(this.model, c);
     this.parallelMode = ParallelMode.Tensor;
-    console.info('[Inference] Tensor Parallel activé (4 workers)');
+    return this;
   }
 
-  // === GÉNÉRATION ULTRA-PUISSANTE ===
+  setParallelMode(mode) { this.parallelMode = mode; return this; }
 
-  generate(prompt, maxNewTokens = 128) {
+  async generate(prompt, maxNewTokens = 128) {
+    const tok = this.model.tokenizer;
+    if (!tok) throw new Error('[Inference] Tokenizer non chargé');
+    this._calls++;
+
+    const promptTokens = tok.encode(prompt);
+    if (promptTokens.length === 0) throw new Error('[Inference] Prompt vide');
+
+    let outTokens;
     switch (this.parallelMode) {
-      case ParallelMode.Speculative:
-        return this.#speculativeGenerate(prompt, maxNewTokens);
+      case ParallelMode.Speculative: outTokens = await this._spec(promptTokens, maxNewTokens); break;
       case ParallelMode.Pipeline:
-      case ParallelMode.Tensor:
-        return this.#parallelGenerate(prompt, maxNewTokens);
-      default:
-        return this.#standardGenerate(prompt, maxNewTokens);
+      case ParallelMode.Tensor:      outTokens = await this._parallel(promptTokens, maxNewTokens); break;
+      default:                       outTokens = this._standard(promptTokens, maxNewTokens);
     }
+
+    const gen = outTokens.slice(promptTokens.length);
+    this._tokens += gen.length;
+    return prompt + tok.decode(gen);
   }
 
-  #standardGenerate(prompt, maxNewTokens) {
+  _standard(promptTokens, maxNewTokens) {
     if (this.useKVCache) this.initKVCache();
-
-    const tokenizer = this.model.tokenizer;
-    if (!tokenizer) throw new Error('Tokenizer non chargé');
-
-    let tokens = tokenizer.encode(prompt);
-    let generatedText = prompt;
-
-    console.info('[Inference] Génération ULTRA-PUISSANTE démarrée (MoE + CollectivIn + InSelf + InAware + InDream)');
-
-    for (let step = 0; step < maxNewTokens; step++) {
-      const logits = this.model.forward(tokens);
-
-      // InAware (placeholder)
-      const nextToken = this.#argmax(logits);
-
-      tokens.push(nextToken);
-
-      const tokenStr = tokenizer.decode([nextToken]).split(/\s+/)[0] || '';
-      generatedText += tokenStr;
-
-      if (nextToken === 1) break;
-
-      if (step % 5 === 0 && step > 0) {
-        this.model.inSelf.evolveSelf();
-      }
-
-      if (this.kvCache && step % 8 === 0) {
-        this.kvCache.clear();
-      }
-    }
-
-    if (this.model.inSelf.isEvolving) {
-      this.model.inSelf.evolveSelf();
-    }
-
-    console.info(`[Inference] Génération terminée | Tokens: ${tokens.length}`);
-    return generatedText;
+    const tokens = this.model.generate(promptTokens, maxNewTokens);
+    if (this.model.inSelf.isEvolving && this._calls % 5 === 0) this.model.inSelf.evolveSelf();
+    return tokens;
   }
 
-  #parallelGenerate(prompt, maxNewTokens) {
-    const tokenizer = this.model.tokenizer;
-    if (!tokenizer) throw new Error('Tokenizer non chargé');
-
-    let tokens = tokenizer.encode(prompt);
-    let generatedText = prompt;
-
-    console.info(`[Inference] Génération parallèle ULTRA (mode: ${this.parallelMode})`);
-
-    for (let i = 0; i < maxNewTokens; i++) {
-      const logits = this.parallelExecutor
-        ? this.parallelExecutor.executeParallel(tokens)
-        : this.model.forward(tokens);
-
-      const nextToken = this.#argmax(logits);
-      tokens.push(nextToken);
-
-      const tokenStr = tokenizer.decode([nextToken]).split(/\s+/)[0] || '';
-      generatedText += tokenStr;
-
-      if (nextToken === 1) break;
-    }
-
-    return generatedText;
+  async _spec(promptTokens, maxNewTokens) {
+    if (!this.speculativeDecoder) return this._standard(promptTokens, maxNewTokens);
+    return this.speculativeDecoder.speculativeGenerate(promptTokens, maxNewTokens);
   }
 
-  #speculativeGenerate(prompt, maxNewTokens) {
-    const tokenizer = this.model.tokenizer;
-    if (!tokenizer) throw new Error('Tokenizer non chargé');
-
-    const promptTokens = tokenizer.encode(prompt);
-
-    if (this.speculativeDecoder) {
-      const tokens = this.speculativeDecoder.speculativeGenerate(promptTokens, maxNewTokens);
-      let generatedText = prompt;
-      for (let i = promptTokens.length; i < tokens.length; i++) {
-        const tokenStr = tokenizer.decode([tokens[i]]).split(/\s+/)[0] || '';
-        generatedText += tokenStr;
-      }
-      return generatedText;
-    } else {
-      console.warn('[Inference] Speculative non initialisé → fallback');
-      return this.#standardGenerate(prompt, maxNewTokens);
-    }
+  async _parallel(promptTokens, maxNewTokens) {
+    if (!this.parallelExecutor) return this._standard(promptTokens, maxNewTokens);
+    // Préchauffe via l'exécuteur puis génère
+    await this.parallelExecutor.executeParallel(promptTokens);
+    return this.model.generate(promptTokens, maxNewTokens);
   }
 
-  // === UTILITAIRES ===
-
-  setKVCacheEnabled(enabled) {
-    this.useKVCache = enabled;
-    if (!enabled) this.kvCache = null;
-  }
-
-  loadTokenizer(tokenizer) {
-    this.model.setTokenizer(tokenizer);
-  }
-
-  clearKVCache() {
-    if (this.kvCache) this.kvCache.clear();
-  }
+  setKVCacheEnabled(enabled) { this.useKVCache = enabled; if (!enabled) { this.model.kvCache = null; this.kvCache = null; } else this.initKVCache(); }
+  clearKVCache() { this.model.clearKVCache(); }
+  loadTokenizerInstance(t) { this.model.setTokenizer(t); }
 
   getUltraStats() {
     const m = this.model;
-    return `InSelf cycles: ${m.inSelf.selfImprovementCycles} | Wisdom: ${m.inSelf.cumulativeWisdom.toFixed(3)} | CollectivIn fusions: 0 | InAware confidence: 0.92`;
+    const [cyc, wis] = m.inSelf.getStats();
+    const [, conf] = m.inAware.getStats();
+    return `InSelf: ${cyc} | Wisdom: ${wis.toFixed(3)} | Confidence: ${conf.toFixed(2)}`;
   }
 
-  #argmax(arr) {
-    let maxIdx = 0, maxVal = arr[0];
-    for (let i = 1; i < arr.length; i++) {
-      if (arr[i] > maxVal) { maxVal = arr[i]; maxIdx = i; }
-    }
-    return maxIdx;
+  getStats() {
+    const up = (Date.now() - this._start) / 1000;
+    return {
+      totalTokens: this._tokens, totalCalls: this._calls,
+      tokensPerSec: up > 0 ? (this._tokens / up).toFixed(1) : '0',
+      parallelMode: this.parallelMode,
+      model: this.model.getStats(),
+      speculative: this.speculativeDecoder?.getStats() ?? null,
+    };
   }
 }
