@@ -1,56 +1,40 @@
 // packages/secure/src/crypto/constant_time.js
 // =====================================================
 // Constant-Time Primitives — Production Ready
-// SkyAInet × Nikola T369 — Gematria-Safe + Timing Attack Resistant
+// SkyAInet × Nikola T369 — Timing Attack Resistant
 // =====================================================
 
 import { randomBytes, timingSafeEqual } from 'crypto';
 
+const toU8 = (x) => x instanceof Uint8Array ? x : new Uint8Array(x);
+
+// Échantillonnage uniforme mod n via rejection sampling non biaisé.
+// Boucle jusqu'à obtenir une valeur dans la zone non biaisée (pas de fallback
+// déterministe qui réintroduirait un biais statistique exploitable).
 export function sampleUniformMod(modulus) {
-  if (modulus < 2 || modulus > 95) {
-    throw new Error('Modulus must be between 2 and 95');
-  }
-
+  if (modulus < 2 || modulus > 95) throw new Error('Modulus must be between 2 and 95');
   const bound = 256 - (256 % modulus);
-  let attempts = 0;
-
-  // Rejection sampling borné (max 5 essais)
+  // Tire par lots pour limiter les appels à randomBytes
   while (true) {
-    const byte = randomBytes(1)[0];
-    if (byte < bound) {
-      return byte % modulus;
-    }
-    attempts++;
-    if (attempts > 4) {
-      return byte % modulus; // fallback déterministe
-    }
+    const batch = randomBytes(16);
+    for (let i = 0; i < 16; i++) if (batch[i] < bound) return batch[i] % modulus;
   }
 }
 
-export function addMod(a, b, modulus) {
-  return ((a + b) % modulus) & 0xff;
-}
+export function addMod(a, b, modulus) { return ((a + b) % modulus) & 0xff; }
+export function subMod(a, b, modulus) { return ((a - b + modulus) % modulus) & 0xff; }
 
-export function subMod(a, b, modulus) {
-  return ((a - b + modulus) % modulus) & 0xff;
-}
-
+// Sélection sans branche : choice falsy → a, choice truthy → b
 export function select(a, b, choice) {
-  // choice = 0 ou 1 (ou truthy/falsy)
-  const mask = (-(!!choice | 0)) & 0xff; // 0 ou 0xff (bitwise constant-time)
-  return (a & \~mask) | (b & mask);
+  const mask = (-((choice ? 1 : 0))) & 0xff; // 0x00 ou 0xff
+  return ((a & (~mask & 0xff)) | (b & mask)) & 0xff;
 }
 
 export function constantTimeEq(a, b) {
-  const bufA = a instanceof Uint8Array ? a : new Uint8Array(a);
-  const bufB = b instanceof Uint8Array ? b : new Uint8Array(b);
+  const bufA = toU8(a), bufB = toU8(b);
   if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
 }
 
-export function constantTimeEqFixed(a, b) {
-  const bufA = a instanceof Uint8Array ? a : new Uint8Array(a);
-  const bufB = b instanceof Uint8Array ? b : new Uint8Array(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
+// Alias historique
+export const constantTimeEqFixed = constantTimeEq;
