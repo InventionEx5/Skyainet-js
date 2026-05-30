@@ -1,96 +1,72 @@
 // packages/t369-inference/src/transformer_block.js
 // =====================================================
-// TransformerBlock
-// RMSNorm + Roman Dream Attention (GQA + MHLA) + MoE + RomanDiffusion Ultra
+// TransformerBlock — Pre-Norm RMSNorm + GQA/MHLA + MoE + RomanDiffusion
+// Forward in-place, RMSNorm avec weights, MoE sur dernier token
 // SkyAInet × Nikola T369
 // =====================================================
 
+"use strict";
+
 import { RomanAttention } from './roman_attention.js';
-import { MoELayer } from './moe.js';
+import { MoELayer }       from './moe.js';
 import { RomanDiffusion } from './roman_diffusion.js';
 
 export class TransformerBlock {
-  constructor(hiddenSize, numQueryHeads, numKvHeads, headDim) {
+  constructor(hiddenSize, numQueryHeads, numKvHeads, headDim, moeConfig = null) {
     this.hiddenSize = hiddenSize;
 
     this.attention = new RomanAttention({
-      numQueryHeads,
-      numKvHeads,
-      headDim,
-      latentDim: 32,
-      diffusionStrength: 0.38,
-      maxSeqLen: 32768,
-      ropeBase: 10000.0,
-      ropeScaling: 1.0,
-      useFlash: true,
-      useMhla: true,
+      numQueryHeads, numKvHeads, headDim,
+      latentDim: 32, diffusionStrength: 0.38, maxSeqLen: 32768,
+      ropeBase: 10000.0, ropeScaling: 1.0, useFlash: true, useMhla: true,
     });
 
-    this.moeLayer = new MoELayer({
-      numExperts: 8,
-      topK: 2,
-      hiddenSize,
-      intermediateSize: hiddenSize * 4,
+    this.moeLayer = new MoELayer(moeConfig ?? {
+      numExperts: 8, topK: 2, hiddenSize,
+      intermediateSize: hiddenSize * 4, bits: 4,
     });
 
     this.romanDiffusion = new RomanDiffusion();
-
-    // RMSNorm weights (initialized to 1.0)
     this.norm1 = new Float32Array(hiddenSize).fill(1.0);
     this.norm2 = new Float32Array(hiddenSize).fill(1.0);
+    this._normBuf = new Float32Array(hiddenSize);
   }
 
-  // === RMSNorm ultra-rapide (une seule passe) ===
-  #rmsNorm(x) {
-    const eps = 1e-6;
-    const len = x.length;
-    let sumSq = 0;
-
-    for (let i = 0; i < len; i++) {
-      sumSq += x[i] * x[i];
-    }
-
-    const rms = Math.sqrt(sumSq / len + eps);
-    const invRms = 1.0 / rms;
-
-    const out = new Float32Array(len);
-    for (let i = 0; i < len; i++) {
-      out[i] = x[i] * invRms;
-    }
-    return out;
+  _rmsNorm(x, weights, buf) {
+    const len = x.length, eps = 1e-6;
+    let ss = 0;
+    for (let i = 0; i < len; i++) ss += x[i] * x[i];
+    const inv = 1.0 / Math.sqrt(ss / len + eps);
+    for (let i = 0; i < len; i++) buf[i] = x[i] * inv * weights[i];
+    return buf;
   }
 
-  // === Forward pass ultra-puissant ===
-  forward(hidden, seqLen, layerIdx) {
-    const hiddenSize = this.hiddenSize;
+  // Forward in-place sur hidden [seqLen × hiddenSize]
+  forward(hidden, seqLen, layerIdx, kvCache = null) {
+    const H = this.hiddenSize;
 
-    // === 1. Pre-Norm + Roman Dream Attention (GQA + MHLA + RoPE) ===
-    let normed = this.#rmsNorm(hidden);
-    const attnOut = this.attention.forward(normed, normed, normed, seqLen);
-
-    // Residual connection (in-place pour perf)
-    for (let i = 0; i < hidden.length; i++) {
-      hidden[i] += attnOut[i];
+    // 1. Pre-Norm (sur tout) + Attention + Residual
+    // Norme une copie du tenseur complet pour l'attention
+    const total = H * seqLen;
+    const normedFull = new Float32Array(total);
+    for (let t = 0; t < seqLen; t++) {
+      const off = t * H;
+      let ss = 0;
+      for (let i = 0; i < H; i++) ss += hidden[off+i] * hidden[off+i];
+      const inv = 1.0 / Math.sqrt(ss / H + 1e-6);
+      for (let i = 0; i < H; i++) normedFull[off+i] = hidden[off+i] * inv * this.norm1[i];
     }
+    const attn = this.attention.forward(normedFull, normedFull, normedFull, seqLen, kvCache, layerIdx);
+    for (let i = 0; i < total; i++) hidden[i] += attn[i];
 
-    // === 2. Pre-Norm + MoE (remplace SwiGLU) ===
-    normed = this.#rmsNorm(hidden);
-    const mlpOut = this.moeLayer.forward(normed);
+    // 2. Pre-Norm + MoE (dernier token) + Residual
+    const lastOff   = (seqLen - 1) * H;
+    const lastTok   = hidden.subarray(lastOff, lastOff + H);
+    const normed2   = this._rmsNorm(lastTok, this.norm2, this._normBuf);
+    const moeOut    = this.moeLayer.forward(normed2);
+    for (let i = 0; i < H; i++) hidden[lastOff + i] += moeOut[i];
 
-    for (let i = 0; i < hidden.length; i++) {
-      hidden[i] += mlpOut[i];
-    }
-
-    // === 3. RomanDiffusion Ultra (post-processing) ===
-    const diffused = this.romanDiffusion.applyUltra(hidden, seqLen, layerIdx, null);
-
-    // Copie finale (peut être optimisée avec subarray si besoin)
-    for (let i = 0; i < hidden.length; i++) {
-      hidden[i] = diffused[i];
-    }
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.debug(`[TransformerBlock] Layer ${layerIdx} processed (MoE + RomanDiffusion Ultra)`);
-    }
+    // 3. RomanDiffusion Ultra (in-place)
+    this.romanDiffusion.applyUltra(hidden, seqLen, layerIdx, null);
   }
 }
