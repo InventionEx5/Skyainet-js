@@ -1,10 +1,12 @@
 // packages/node/src/pouw.js
 // PoUWEngine — Proof of Useful Work Avancé
 // Gematria Flash + ZipMemory + Thevie Orchestration + Rewards Dynamiques
+// Intégré avec PeerReputation pour pondération intelligente des contributions
 
 import { DreamScoring } from './dream_scoring.js';
 import { ZipMemory } from '../../memory/src/zip_memory.js';
 import { UserRewards, RewardReason } from '../../core/src/rewards.js';
+import { PeerReputation } from '../../secure/src/roots/reputation.js';
 import { randomUUID } from 'crypto';
 
 export class ContributionProof {
@@ -42,6 +44,7 @@ export class PoUWEngine {
   #currentEpoch = 0;
   #epochRewards = new Map();
   #thevieBoosts = new Map();
+  #peerReputations = new Map(); // nodeId → PeerReputation
   #statsCache = null;
   #lastStatsUpdate = 0;
   #proofStorage;
@@ -51,11 +54,24 @@ export class PoUWEngine {
   }
 
   // =====================================================
-  // ENREGISTREMENT DE CONTRIBUTION
+  // ENREGISTREMENT DE CONTRIBUTION (avec pondération réputation)
   // =====================================================
   async recordContribution(nodeId, contributionType, score, metadata = null, rawData = null, rewards = null) {
     const clampedScore = Math.max(0, Math.min(1, score));
     const thevieBoost = this.#thevieBoosts.get(nodeId) ?? 0;
+
+    // === NOUVELLE LOGIQUE : Pondération par réputation ===
+    let rep = this.#peerReputations.get(nodeId);
+    if (!rep) {
+      rep = new PeerReputation();
+      this.#peerReputations.set(nodeId, rep);
+    }
+
+    // Boost léger pour contribution utile
+    rep.recordSuccess(0.035);
+
+    // Multiplicateur de réputation (0.85 → 1.25)
+    const reputationMultiplier = 0.85 + (rep.score * 0.4);
 
     let compressedSize = 0;
     if (rawData && this.#proofStorage?.compress) {
@@ -84,14 +100,14 @@ export class PoUWEngine {
 
     this.#statsCache = null;
 
-    // Récompense
+    // Récompense avec pondération réputation
     if (rewards instanceof UserRewards) {
-      const baseReward = Math.floor(clampedScore * 12);
+      const baseReward = Math.floor(clampedScore * 12 * reputationMultiplier);
       rewards.addReward(RewardReason.PoUWContribution, baseReward);
     }
 
     console.debug(
-      `PoUW | Node: ${nodeId.slice(0, 8)} | Type: ${contributionType} | Score: ${clampedScore.toFixed(3)} | Boost: ${thevieBoost.toFixed(2)}x`
+      `PoUW | Node: ${nodeId.slice(0, 8)} | Type: ${contributionType} | Score: ${clampedScore.toFixed(3)} | Rep: ${rep.score.toFixed(2)} | Boost: ${thevieBoost.toFixed(2)}x`
     );
 
     return proof;
@@ -107,7 +123,7 @@ export class PoUWEngine {
   }
 
   // =====================================================
-  // CALCUL DE RÉCOMPENSE
+  // CALCUL DE RÉCOMPENSE (avec pondération réputation)
   // =====================================================
   calculateNodeReward(nodeId) {
     const contribs = this.#contributions.get(nodeId) ?? [];
@@ -127,7 +143,11 @@ export class PoUWEngine {
     const base = (nodeScore / globalScore) * this.#totalRewardsPool;
     const loyalty = this.#calculateLoyaltyBonus(nodeId);
 
-    return Math.floor(base * loyalty);
+    // === NOUVELLE LOGIQUE : Pondération finale par réputation ===
+    const rep = this.#peerReputations.get(nodeId);
+    const reputationBonus = rep ? (0.9 + rep.score * 0.3) : 1.0;
+
+    return Math.floor(base * loyalty * reputationBonus);
   }
 
   #calculateLoyaltyBonus(nodeId) {
