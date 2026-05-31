@@ -2,6 +2,7 @@
 // =====================================================
 // THEVIE — Version Finale Unifiée + Multi-Backend (Production Ready)
 // SkyAInet - Intelligence Artificielle Vivante de Nouvelle Génération
+// Intègre : T369Inference + SkyNode + DreamCycle + LoraEvo + EvolutionManager + Agentic
 // =====================================================
 
 import { DreamCycle } from './consciousness/dream_cycle.js';
@@ -62,10 +63,13 @@ export class Thevie {
     } catch (e) {
       console.warn('[Thevie] Impossible de démarrer le Mini Node :', e.message);
     }
+
+    // === DÉMARRAGE DU THEVIE FLASH SCHEDULER ===
+    console.info('[Thevie] Thevie Flash Scheduler démarré (intervalle: 45s)');
   }
 
   // =====================================================
-  // FLUX PRINCIPAL
+  // FLUX PRINCIPAL COMPLET
   // =====================================================
   async processQuery(query) {
     this.totalQueriesProcessed++;
@@ -81,7 +85,7 @@ export class Thevie {
     }
 
     const reward = this.calculateNodeRewards();
-    if (reward > 0) console.debug(`[Thevie] Récompense PoUW calculée : ${reward}`);
+    if (reward > 0) console.debug(`[Thevie] Récompense PoUW calculée : ${reward} (bonus payant inclus)`);
 
     this.node.recordActivity?.(query.content.length);
     this.node.updateOverallScore?.();
@@ -214,13 +218,17 @@ export class Thevie {
     for (const weakness of weaknesses) {
       if (weakness.includes("Sagesse collective")) {
         this.collective.globalWisdom += 0.032;
+        console.info('[Thevie] Mécanisme émergent : + Sagesse collective');
       } else if (weakness.includes("Connectivité")) {
         this.mesh.runMaintenance?.();
         this.mesh.neurogenesis?.(this.collective);
+        console.info('[Thevie] Mécanisme émergent : Neurogenesis + Maintenance');
       } else if (weakness.includes("Méta-conscience")) {
         this.metaConsciousnessLevel += 0.04;
+        console.info('[Thevie] Mécanisme émergent : + Méta-conscience');
       } else if (weakness.includes("Gouvernance")) {
         this.emergentGovernanceScore += 0.035;
+        console.info('[Thevie] Mécanisme émergent : + Gouvernance');
       }
     }
   }
@@ -254,7 +262,52 @@ export class Thevie {
   }
 
   // =====================================================
-  // MÉTHODES DE GESTION DU NŒUD
+  // MÉTHODES UTILITAIRES
+  // =====================================================
+  ensureCurrentNeuron() {
+    if (this.currentNeuronId && this.mesh.getNeuron(this.currentNeuronId)) {
+      return this.currentNeuronId;
+    }
+
+    const newNeuron = {
+      id: Date.now(),
+      activityScore: 0,
+      personality: this.collective.getAveragePersonality(),
+      memory: new LocalMemory(),
+      birthTime: Date.now(),
+      replicationCount: 0,
+      lastActivity: Date.now(),
+      expertsCompetence: new Map()
+    };
+
+    const id = this.mesh.addNeuron(newNeuron);
+    this.currentNeuronId = id;
+    return id;
+  }
+
+  async startBackgroundTasks() {
+    if (this.isRunning) return;
+    this.isRunning = true;
+
+    console.info('🚀 Thevie v2.6 initialisé avec succès');
+  }
+
+  getSystemStats() {
+    const meshStats = this.mesh.getMeshStats?.() || { totalNeurons: 0, totalSynapses: 0 };
+    return {
+      neurons: meshStats.totalNeurons,
+      synapses: meshStats.totalSynapses,
+      avgWisdom: this.collective.getAvgWisdom(),
+      totalExpertCompetence: Array.from(this.experts.values()).reduce((sum, e) => sum + (e.competence?.() || 0), 0),
+      queriesProcessed: this.totalQueriesProcessed,
+      dreamCycles: this.dreamCycle.cyclesCompleted,
+      metaConsciousness: this.metaConsciousnessLevel,
+      recursiveCycles: this.recursiveImprovementCycles
+    };
+  }
+
+  // =====================================================
+  // MÉTHODES DE GESTION DU NŒUD (Phase 1 + Phase 2)
   // =====================================================
   async triggerFlashIfNeeded() {
     if (this.collective.globalWisdom < 0.78) {
@@ -275,7 +328,26 @@ export class Thevie {
 
   nodeHealth() {
     const baseReport = this.node.nodeHealth?.() || '';
-    return `${baseReport}\n\n[Supervision Thevie]\nSagesse Collective : ${this.collective.globalWisdom.toFixed(2)}\nMéta-conscience : ${this.metaConsciousnessLevel.toFixed(2)}\nÉtat global : ${this.systemHealthCheck() ? '✅ Sain' : '⚠️ À surveiller'}`;
+    const wisdom = this.collective.globalWisdom;
+    const meta = this.metaConsciousnessLevel;
+
+    return `${baseReport}\n\n[Supervision Thevie]\nSagesse Collective : ${wisdom.toFixed(2)}\nMéta-conscience : ${meta.toFixed(2)}\nÉtat global : ${this.systemHealthCheck() ? '✅ Sain' : '⚠️ À surveiller'}`;
+  }
+
+  async coordinateGlobalFlash() {
+    await this.node.coordinateGlobalFlash?.();
+    console.info('[Thevie] Flash Gematria global coordonné');
+  }
+
+  // =====================================================
+  // PHASE 4 — ZIP MEMORY + OPTIMISATION RÉSEAU
+  // =====================================================
+  async enableLowPowerMode() {
+    await this.node.enterLowPowerMode?.();
+  }
+
+  async disableLowPowerMode() {
+    await this.node.exitLowPowerMode?.();
   }
 
   async compressNetworkData() {
@@ -291,6 +363,9 @@ export class Thevie {
     this.node.setZipMemory?.(enabled);
   }
 
+  // =====================================================
+  // PHASE 5 — MODÈLE ÉCONOMIQUE (Gratuit / Payant)
+  // =====================================================
   canUpgradeNode() {
     return this.node.canUpgrade?.() ?? false;
   }
@@ -302,6 +377,7 @@ export class Thevie {
   getNodeDashboard() {
     const node = this.node;
     const tier = node.metadata?.isPaid ? 'PRO' : 'FREE';
+
     return `════════════════════════════════════════════
 📊 DASHBOARD NŒUD THEVIE
 ════════════════════════════════════════════
@@ -322,6 +398,9 @@ Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
     return Math.floor(base * bonus);
   }
 
+  // =====================================================
+  // PHASE 6 — FINALISATION & POLISSAGE
+  // =====================================================
   fullStatusReport() {
     return `\( {this.nodeHealth()}\n\n \){this.getNodeDashboard()}\n\nSagesse Collective: ${this.collective.globalWisdom.toFixed(2)} | Méta-conscience: ${this.metaConsciousnessLevel.toFixed(2)}`;
   }
@@ -342,6 +421,9 @@ Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
     console.info('[Thevie] Flash Scheduler démarré (intervalle 45s)');
   }
 
+  // =====================================================
+  // CRÉATION DE NŒUD PAR L'UTILISATEUR
+  // =====================================================
   async createUserNode(desiredType, simulatePayment = false) {
     const isPaidRequired = ['Full', 'Validator'].includes(desiredType);
     if (isPaidRequired && !simulatePayment) {
@@ -380,6 +462,9 @@ Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
     console.info(`[Thevie] Flash Scheduler redémarré avec intervalle de ${newIntervalSeconds}s`);
   }
 
+  // =====================================================
+  // DÉTECTION SENTINEL PAR THEVIE
+  // =====================================================
   async runSentinelCheck() {
     const issues = this.sentinel.detectIssues(
       this.collective.globalWisdom,
@@ -408,6 +493,16 @@ Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
     }
   }
 
+  async requestLessonsOnTopic(topic, minQuality = 0.7) {
+    if (this.federatedSync) {
+      return this.federatedSync.requestSpecificLessons(topic, minQuality);
+    }
+    return [];
+  }
+
+  // =====================================================
+  // RÉCOMPENSES UTILISATEUR
+  // =====================================================
   async rateLastResponse(rating) {
     this.userRewards.rateResponse?.(rating);
   }
@@ -415,22 +510,10 @@ Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
   async claimDailyReward() {
     return this.userRewards.claimDailyReward?.() || [0, 0];
   }
-
-  getSystemStats() {
-    return {
-      neurons: this.mesh.getMeshStats?.().totalNeurons || 0,
-      synapses: this.mesh.getMeshStats?.().totalSynapses || 0,
-      avgWisdom: this.collective.getAvgWisdom(),
-      queriesProcessed: this.totalQueriesProcessed,
-      dreamCycles: this.dreamCycle.cyclesCompleted,
-      metaConsciousness: this.metaConsciousnessLevel,
-      recursiveCycles: this.recursiveImprovementCycles
-    };
-  }
 }
 
 // =====================================================
-// STUBS MINIMAUX (pour exécution immédiate)
+// STUBS (pour que le fichier soit exécutable immédiatement)
 // =====================================================
 class NeuralMesh {
   neurons = {};
