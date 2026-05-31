@@ -1,4 +1,4 @@
-// packages/core/src/node_types.js
+// packages/node/src/node_types.js
 // Node Types — Architecture des Nœuds SkyAInet × Thevie
 
 export const NodeType = Object.freeze({
