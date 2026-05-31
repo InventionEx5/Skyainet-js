@@ -491,6 +491,12 @@ function handle_ws(ws) {
 // DÉMARRAGE
 // =====================================================
 const marketplace = new GpuCpuMarketplaceService('./data/marketplace.db');
+// === CONNEXION MARKETPLACE (temps réel + dashboard) ===
+state.marketplace = marketplace;
+
+marketplace.on('notification', (notif) => {
+  console.log(`🔔 [${notif.type.toUpperCase()}] ${notif.userId || 'system'}: ${notif.message}`);
+});
 const PORT = process.env.PORT || 8080;
 const server = app.listen(PORT, () => {
   console.log(`✅ SkyNode Server démarré sur http://0.0.0.0:${PORT}`);
