@@ -1,4 +1,4 @@
-// packages/sentinel/src/node_identity.js
+// packages/node/src/node_identity.js
 // NodeIdentity — Identité Souveraine & Attestation Post-Quantique
 // Dilithium5 + HybridTransport + Réputation Dynamique + Peer Trust
 
