@@ -1,14 +1,17 @@
 // packages/node/src/mixed.js
 // MixedNode — Nœud Hybride Souverain Dynamique
 // Compute + Storage + Validator + Orchestration intelligente
+// Intégré avec PeerPool pour sélection de pairs fiables par rôle
 
 import { NodeCapabilities, NodeState, SubscriptionLevel, NodeType } from '../../core/src/node_types.js';
 import { StorageNode } from './storage.js';
 import { UserRewards, RewardReason } from '../../core/src/rewards.js';
+import { PeerPool } from '../../secure/src/roots/pool.js';
 
 export class MixedNode {
   #hybridTransport = null;
   #zipMemory = null;
+  #peerPool = null;
 
   constructor(sovereignAlias, subscription = SubscriptionLevel.Pro) {
     if (!sovereignAlias) throw new Error('sovereignAlias requis');
@@ -24,13 +27,20 @@ export class MixedNode {
     this.totalTasksProcessed = 0;
     this.lastRoleSwitch = null;
 
-    // Infrastructure partagée (optionnelle)
     this.#hybridTransport = null;
     this.#zipMemory = null;
+    this.#peerPool = new PeerPool().withMinReputation(0.68);
   }
 
   // =====================================================
-  // GESTION DYNAMIQUE DES RÔLES
+  // GETTER PEERPOOL
+  // =====================================================
+  get peerPool() {
+    return this.#peerPool;
+  }
+
+  // =====================================================
+  // GESTION DYNAMIQUE DES RÔLES (avec sélection intelligente)
   // =====================================================
   async activateRole(role) {
     if (this.activeRoles.includes(role)) return;
@@ -41,11 +51,32 @@ export class MixedNode {
     if (role === NodeType.Storage) {
       this.storage = new StorageNode(this.sovereignAlias, SubscriptionLevel.Pro);
       console.info('[MixedNode] Rôle Storage activé');
+
+      // Sélection de pairs fiables pour le stockage
+      if (this.#peerPool && this.#peerPool.len() > 0) {
+        try {
+          const storagePeers = this.#peerPool.getDiversePeers(4);
+          console.debug(`[MixedNode] ${storagePeers.length} pairs sélectionnés pour rôle Storage`);
+        } catch {}
+      }
     }
 
     if (role === NodeType.Validator) {
       this.validatorStake = 12000;
       console.info(`[MixedNode] Rôle Validator activé avec stake ${this.validatorStake}`);
+
+      // Sélection de pairs à haute réputation pour la validation
+      if (this.#peerPool && this.#peerPool.len() > 0) {
+        try {
+          const trustedPeers = this.#peerPool.getHighReputationPeers(5);
+          console.debug(`[MixedNode] ${trustedPeers.length} pairs haute réputation sélectionnés pour Validator`);
+        } catch {}
+      }
+    }
+
+    // Boost de réputation après activation réussie
+    if (this.#peerPool) {
+      this.#peerPool.updateReputation(this.nodeId, 0.02);
     }
   }
 
@@ -92,6 +123,10 @@ export class MixedNode {
           if (rewards instanceof UserRewards) {
             rewards.addReward(RewardReason.Validation, 15);
           }
+          // Mise à jour de réputation après validation
+          if (this.#peerPool) {
+            this.#peerPool.updateReputation(this.nodeId, 0.025);
+          }
           return 'Validation PoUW effectuée avec succès';
         }
         break;
@@ -117,7 +152,7 @@ export class MixedNode {
     return `MixedNode \( {this.sovereignAlias} | Rôles: [ \){this.activeRoles.join(', ')}] | Power: ${this.getTotalPower().toFixed(3)} | Tasks: ${this.totalTasksProcessed} | Storage: ${this.storage ? this.storage.usedStorageGb || 0 : 0} Go | Stake: ${this.validatorStake}`;
   }
 
-  // Getters / Setters utiles
+  // Getters / Setters
   get hybridTransport() { return this.#hybridTransport; }
   set hybridTransport(t) { this.#hybridTransport = t; }
 
