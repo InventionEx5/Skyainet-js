@@ -1,9 +1,12 @@
 // packages/node/src/node_communication.js
 // NodeCommunication — Réseau de Nœuds Vivant & Sécurisé
 // HybridTransport + GematriaAead + GossipSub + Lesson Propagation
+// Intégré avec PeerPool + PeerReputation (sélection intelligente + mise à jour dynamique)
 
 import { HybridTransport } from '../../secure/src/crypto/hybrid.js';
 import { ContributionProof } from './pouw.js';
+import { PeerPool } from '../../secure/src/roots/pool.js';
+import { PeerReputation } from '../../secure/src/roots/reputation.js';
 
 export class NodeMessage {
   constructor(from, to = null, messageType, payload, signature = null) {
@@ -32,22 +35,37 @@ export class NodeCommunication {
   #lastBroadcast = null;
   #receivedLessons = [];
   #stats = new CommunicationStats();
+  #peerPool = null;
 
   constructor(peerId, hybridTransport = null) {
     if (!peerId) throw new Error('peerId requis');
     this.#peerId = peerId;
     this.#hybridTransport = hybridTransport || new HybridTransport(true);
+    this.#peerPool = new PeerPool().withMinReputation(0.65);
   }
 
   // =====================================================
-  // BROADCAST DE LEÇON
+  // INTÉGRATION PEERPOOL (injection ou accès direct)
+  // =====================================================
+  setPeerPool(peerPool) {
+    if (peerPool instanceof PeerPool) {
+      this.#peerPool = peerPool;
+    }
+  }
+
+  get peerPool() {
+    return this.#peerPool;
+  }
+
+  // =====================================================
+  // BROADCAST DE LEÇON (avec sélection intelligente via PeerPool)
   // =====================================================
   async broadcastLesson(lesson, qualityThreshold = 0.7) {
     if (!lesson || lesson.score < qualityThreshold) return;
 
     const lessonData = Buffer.from(JSON.stringify(lesson));
 
-    // Chiffrement hybride (KemT369 + GematriaAead)
+    // Chiffrement hybride
     let encrypted;
     try {
       encrypted = await this.#hybridTransport.encrypt(lessonData);
@@ -59,10 +77,28 @@ export class NodeCommunication {
     const topic = 'skyainet/lessons/v2';
 
     try {
+      // === NOUVELLE LOGIQUE : Sélection intelligente des pairs ===
+      let targetPeers = [];
+      if (this.#peerPool && this.#peerPool.len() > 0) {
+        try {
+          targetPeers = this.#peerPool.getHighReputationPeers(3);
+        } catch {
+          targetPeers = this.#peerPool.getRandomPeers(3);
+        }
+      }
+
+      // Publication GossipSub (comportement original conservé)
       await this.#hybridTransport.publish(topic, encrypted);
+
+      // Mise à jour de réputation (boost léger après broadcast réussi)
+      if (this.#peerPool) {
+        this.#peerPool.updateReputation(this.#peerId, 0.015);
+      }
+
       this.#stats.messagesSent++;
       this.#stats.lessonsPropagated++;
       this.#lastBroadcast = Date.now();
+
     } catch (e) {
       this.#stats.failedBroadcasts++;
       throw new Error(`GossipSub publish failed: ${e.message}`);
@@ -70,7 +106,7 @@ export class NodeCommunication {
   }
 
   // =====================================================
-  // RÉCEPTION DE LEÇON
+  // RÉCEPTION DE LEÇON (avec mise à jour de réputation)
   // =====================================================
   async receiveRemoteLesson(encryptedData) {
     if (!encryptedData || encryptedData.length === 0) {
@@ -91,7 +127,6 @@ export class NodeCommunication {
       throw new Error(`Deserialization failed: ${e.message}`);
     }
 
-    // Reconstruit l’objet ContributionProof
     const proof = new ContributionProof(
       lesson.nodeId,
       lesson.contributionType,
@@ -107,6 +142,15 @@ export class NodeCommunication {
     this.#receivedLessons.push(proof);
     this.#stats.messagesReceived++;
 
+    // === NOUVELLE LOGIQUE : Mise à jour de réputation du sender ===
+    if (this.#peerPool && proof.nodeId) {
+      const rep = new PeerReputation();
+      rep.withContact(proof.nodeId);
+      rep.recordSuccess(0.04); // Bonus pour leçon reçue
+
+      this.#peerPool.updateReputation(proof.nodeId, rep.score);
+    }
+
     return proof;
   }
 
@@ -118,6 +162,11 @@ export class NodeCommunication {
 
     try {
       await this.#hybridTransport.publish('skyainet/signals/v2', signal);
+
+      if (this.#peerPool) {
+        this.#peerPool.updateReputation(this.#peerId, 0.01);
+      }
+
       this.#stats.messagesSent++;
       this.#lastBroadcast = Date.now();
     } catch (e) {
