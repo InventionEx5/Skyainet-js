@@ -1,7 +1,6 @@
 // packages/node/src/skynode.js
 // SkyNode — Nœud Principal Souverain
 // SkyAInet – Gateway, Hub IA, Stockage, Récompenses + Apprentissage Continu
-// Intégré : PeerPool + EpochRekeyManager + DiamantCircuitBuilder
 
 import { Dilithium5Signer }                       from '../../secure/src/crypto/dilithium.js';
 import { HybridTransport }                        from '../../secure/src/crypto/hybrid.js';
@@ -21,11 +20,6 @@ import { DreamCycle }   from './thevie/dream_cycle.js';
 import { LoraEvo }      from './thevie/lora_evolution.js';
 import { ThevieAgent }  from './thevie/agent.js';
 
-// === NOUVEAUX IMPORTS INTÉGRÉS ===
-import { PeerPool }               from '../../core/src/peer_pool.js';
-import { EpochRekeyManager }      from '../../secure/src/crypto/epoch_rekey_manager.js';
-import { DiamantCircuitBuilder }  from '../../secure/src/crypto/diamant_circuit_builder.js';
-
 // =====================================================
 // CONSTANTES
 // =====================================================
@@ -44,7 +38,7 @@ const WISDOM_LEARN_GAIN = 0.005;
 const WISDOM_DREAM_GAIN = 0.002;
 
 // =====================================================
-// PEER (conservé pour compatibilité)
+// PEER
 // =====================================================
 class Peer {
   constructor({ id, address, reputation = 1.0, lastSeen = Date.now(), wisdomContribution = 0 } = {}) {
@@ -228,7 +222,7 @@ class ApiKeyStore {
 }
 
 // =====================================================
-// SKYNODE PRINCIPAL (optimisé à l'extrême + PeerPool + Rekey + Diamant)
+// SKYNODE PRINCIPAL (optimisé à l'extrême)
 // =====================================================
 export class SkyNode {
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
@@ -237,11 +231,6 @@ export class SkyNode {
   #gatewayEnabled; #gatewayPort; #apiKeyStore;
   #startTime; #lastDreamCycle;
   #dreamCycle; #loraEvo; #thevieAgent;
-
-  // === NOUVEAUX CHAMPS PRIVÉS ===
-  #peerPool;
-  #epochRekeyManager;
-  #diamantCircuitBuilder;
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -267,15 +256,11 @@ export class SkyNode {
     this.#apiKeyStore = new ApiKeyStore();
 
     this.#engine = new T369InferenceEngine(modelConfig);
+    this.peers = [];
 
     this.#dreamCycle = new DreamCycle();
     this.#loraEvo = new LoraEvo();
     this.#thevieAgent = new ThevieAgent({ loraEvo: this.#loraEvo, dreamCycle: this.#dreamCycle });
-
-    // === INTÉGRATION DES 3 NOUVEAUX SERVICES ===
-    this.#peerPool = new PeerPool();
-    this.#epochRekeyManager = new EpochRekeyManager(this.#id, this.#hybrid);
-    this.#diamantCircuitBuilder = new DiamantCircuitBuilder(this.#signer, this.#hybrid);
 
     this._registerBuiltinAIs();
   }
@@ -294,9 +279,6 @@ export class SkyNode {
   get dreamCycle() { return this.#dreamCycle; }
   get loraEvo() { return this.#loraEvo; }
   get thevieAgent() { return this.#thevieAgent; }
-  get peerPool() { return this.#peerPool; }           // exposé
-  get epochRekeyManager() { return this.#epochRekeyManager; }
-  get diamantCircuitBuilder() { return this.#diamantCircuitBuilder; }
 
   async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
@@ -338,7 +320,7 @@ export class SkyNode {
 
     if (isExternal) {
       if (!this.#externalAIEnabled) throw new Error('Les IA externes sont désactivées');
-      if (!apiKey) throw new Error('Clé API requée');
+      if (!apiKey) throw new Error('Clé API requise');
       const check = this.#apiKeyStore.validate(apiKey, to);
       if (!check.valid) throw new Error(`Accès refusé : ${check.reason}`);
     }
@@ -438,40 +420,10 @@ export class SkyNode {
     return siteId;
   }
 
-  // === MÉTHODES PAIRS via PeerPool ===
-  addPeer(peerData) {
-    const p = new Peer(peerData);
-    this.#peerPool.add(p);
-    return p;
-  }
-
-  removePeer(peerId) {
-    this.#peerPool.remove(peerId);
-  }
-
-  async syncWithNetwork() {
-    return this.#peerPool.sync();
-  }
-
-  getPeers() {
-    return this.#peerPool.list().map(p => ({
-      id: p.id,
-      address: p.address,
-      reputation: p.reputation,
-      alive: p.isAlive()
-    }));
-  }
-
-  // === NOUVELLES MÉTHODES SÉCURITÉ ===
-  async rotateSessionKeys() {
-    if (!this.#epochRekeyManager) return { error: 'EpochRekeyManager non initialisé' };
-    return await this.#epochRekeyManager.rotateKeys();
-  }
-
-  async createSecureCircuit(targetPeerId, options = {}) {
-    if (!this.#diamantCircuitBuilder) return { error: 'DiamantCircuitBuilder non initialisé' };
-    return await this.#diamantCircuitBuilder.buildCircuit(targetPeerId, options);
-  }
+  addPeer(peerData) { const p = new Peer(peerData); if (!this.peers.find(x => x.id === p.id)) this.peers.push(p); return p; }
+  removePeer(peerId) { this.peers = this.peers.filter(p => p.id !== peerId); }
+  async syncWithNetwork() { this.peers = this.peers.filter(p => p.isAlive()); return { peersActive: this.peers.length }; }
+  getPeers() { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   claimRewards() { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
   getRewardsStats() { return { totalEarned: this.#userRewards.totalSkyEarned ?? 0 }; }
@@ -484,10 +436,9 @@ export class SkyNode {
     return {
       id: this.#id, state: this.#state, isRunning: this.#isRunning,
       wisdomScore: +this.#wisdomScore.toFixed(4), totalRequests: this.#totalRequests,
-      evolutionCycles: this.#evolutionCycles, peers: this.#peerPool.list().length,
+      evolutionCycles: this.#evolutionCycles, peers: this.peers.length,
       registeredAIs: this.#registeredAIs.size, engineReady: this.#engine.isReady,
       gatewayEnabled: this.#gatewayEnabled, externalAIEnabled: this.#externalAIEnabled,
-      rekeyEpoch: this.#epochRekeyManager?.getStatus?.().epoch ?? 0
     };
   }
 
@@ -497,12 +448,10 @@ export class SkyNode {
       node_id: this.#id, state: this.#state, engine_ready: this.#engine.isReady,
       engine_stats: this.#engine.stats(), wisdom_score: +this.#wisdomScore.toFixed(4),
       total_requests: this.#totalRequests, evolution_cycles: this.#evolutionCycles,
-      last_dream_cycle: this.#lastDreamCycle, peers_connected: this.#peerPool.list().filter(p => p.isAlive?.()).length,
+      last_dream_cycle: this.#lastDreamCycle, peers_connected: this.peers.filter(p => p.isAlive()).length,
       registered_ais: [...this.#registeredAIs.keys()],
       uptime_formatted: `${Math.floor(upSec/3600)}h ${Math.floor((upSec%3600)/60)}m`,
       api_keys_count: this.#apiKeyStore.list().length,
-      rekey_status: this.#epochRekeyManager?.getStatus?.(),
-      circuits_active: 0 // stub
     };
   }
 
@@ -553,10 +502,6 @@ export class SkyNode {
       getLoraEvoStatus: () => n.#loraEvo?.getStatus(),
       getDreamCycleStats: () => n.#dreamCycle?.getStats(),
       getAgentStatus: () => n.#thevieAgent?.getStatus(),
-      // === NOUVELLES COMMANDES SÉCURITÉ ===
-      rotateSessionKeys: n.rotateSessionKeys.bind(n),
-      createSecureCircuit: n.createSecureCircuit.bind(n),
-      getPeerPoolStats: () => ({ total: n.#peerPool.list().length, trusted: n.#peerPool.getTrustedPeers?.(0.7).length || 0 })
     };
   }
 }
