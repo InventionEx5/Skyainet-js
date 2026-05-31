@@ -1,10 +1,6 @@
 // packages/node/src/skynode.js
-// =====================================================
-// SkyNode — Nœud Principal Souverain (Production Ready)
+// SkyNode — Nœud Principal Souverain
 // SkyAInet – Gateway, Hub IA, Stockage, Récompenses + Apprentissage Continu
-// =====================================================
-
-"use strict";
 
 import { Dilithium5Signer }                       from '../../secure/src/crypto/dilithium.js';
 import { HybridTransport }                        from '../../secure/src/crypto/hybrid.js';
@@ -20,7 +16,6 @@ import { T369Model }            from '../../t369-inference/src/model.js';
 import { BpeTokenizer }         from '../../t369-inference/src/tokenizer.js';
 import { SpeculativeDecoder, SpeculativeConfig } from '../../t369-inference/src/speculative.js';
 
-// === NOUVEAUX MODULES D'APPRENTISSAGE ===
 import { DreamCycle }   from './thevie/dream_cycle.js';
 import { LoraEvo }      from './thevie/lora_evolution.js';
 import { ThevieAgent }  from './thevie/agent.js';
@@ -47,42 +42,42 @@ const WISDOM_DREAM_GAIN = 0.002;
 // =====================================================
 class Peer {
   constructor({ id, address, reputation = 1.0, lastSeen = Date.now(), wisdomContribution = 0 } = {}) {
-    this.id                 = id;
-    this.address            = address;
-    this.reputation         = Math.max(0, Math.min(1, reputation));
-    this.lastSeen           = lastSeen;
+    this.id = id;
+    this.address = address;
+    this.reputation = Math.max(0, Math.min(1, reputation));
+    this.lastSeen = lastSeen;
     this.wisdomContribution = wisdomContribution;
   }
-  isAlive(timeoutMs = 30_000) { return Date.now() - this.lastSeen < timeoutMs; }
+  isAlive(timeoutMs = 30000) { return Date.now() - this.lastSeen < timeoutMs; }
   touch() { this.lastSeen = Date.now(); }
 }
 
 // =====================================================
-// MOTEUR D'INFÉRENCE T369
+// MOTEUR D'INFÉRENCE T369 (optimisé)
 // =====================================================
 class T369InferenceEngine {
-  #model       = null;
-  #tokenizer   = null;
+  #model = null;
+  #tokenizer = null;
   #speculative = null;
-  #ready       = false;
-  #config      = null;
+  #ready = false;
+  #config = null;
 
   constructor(config = DEFAULT_MODEL_CONFIG) { this.#config = config; }
 
   async load(weightsPath = null) {
     try {
       this.#tokenizer = new BpeTokenizer();
-      this.#model     = new T369Model(this.#config);
-      if (weightsPath && typeof this.#model.loadWeights === 'function')
+      this.#model = new T369Model(this.#config);
+      if (weightsPath && typeof this.#model.loadWeights === 'function') {
         await this.#model.loadWeights(weightsPath);
-      if (typeof this.#model.initKVCache === 'function')
-        this.#model.initKVCache();
+      }
+      if (typeof this.#model.initKVCache === 'function') this.#model.initKVCache();
+
       const specCfg = new SpeculativeConfig();
       specCfg.maxSpeculativeTokens = 6;
-      specCfg.acceptanceThreshold  = 0.72;
+      specCfg.acceptanceThreshold = 0.72;
       this.#speculative = new SpeculativeDecoder(this.#config, specCfg);
       this.#ready = true;
-      console.info('[T369Engine] Moteur chargé');
     } catch (err) {
       console.error('[T369Engine] Échec :', err.message);
       this.#ready = false;
@@ -92,8 +87,10 @@ class T369InferenceEngine {
   get isReady() { return this.#ready; }
 
   async generate(prompt, opts = {}) {
-    const { maxTokens = 512, temperature = 0.8, topP = 0.92, useSpeculative = true } = opts;
+    const { maxTokens = 512, temperature = 0.8, topP = 0.92, useSpeculative = true, resetCache = false } = opts;
     if (!this.#ready) throw new Error('[T369Engine] Moteur non initialisé');
+
+    if (resetCache) this.resetCache();
 
     const promptTokens = this.#tokenizer.encode(prompt);
     if (!promptTokens.length) throw new Error('[T369Engine] Prompt vide');
@@ -103,16 +100,20 @@ class T369InferenceEngine {
       : await this.#generateGreedy(promptTokens, maxTokens, temperature, topP);
 
     const generated = outputTokens.slice(promptTokens.length);
-    return { text: this.#tokenizer.decode(generated), tokensGenerated: generated.length, source: 'local:t369' };
+    return {
+      text: this.#tokenizer.decode(generated),
+      tokensGenerated: generated.length,
+      source: 'local:t369'
+    };
   }
 
   async #generateGreedy(promptTokens, maxTokens, temperature, topP) {
     const tokens = [...promptTokens];
-    const EOS    = this.#tokenizer.eosToken ?? 1;
+    const EOS = this.#tokenizer.eosToken ?? 1;
     for (let i = 0; i < maxTokens; i++) {
       const logits = await this.#model.forward(tokens);
       const scaled = temperature > 0 ? logits.map(v => v / temperature) : logits;
-      const next   = this.#sampleTopP(this.#softmax(scaled), topP);
+      const next = this.#sampleTopP(this.#softmax(scaled), topP);
       tokens.push(next);
       if (next === EOS) break;
     }
@@ -120,9 +121,9 @@ class T369InferenceEngine {
   }
 
   #softmax(logits) {
-    const max  = Math.max(...logits);
+    const max = Math.max(...logits);
     const exps = logits.map(v => Math.exp(v - max));
-    const sum  = exps.reduce((a, b) => a + b, 0);
+    const sum = exps.reduce((a, b) => a + b, 0);
     return exps.map(v => v / sum);
   }
 
@@ -130,7 +131,11 @@ class T369InferenceEngine {
     const sorted = probs.map((prob, idx) => ({ prob, idx })).sort((a, b) => b.prob - a.prob);
     let cumul = 0;
     const nucleus = [];
-    for (const item of sorted) { cumul += item.prob; nucleus.push(item); if (cumul >= p) break; }
+    for (const item of sorted) {
+      cumul += item.prob;
+      nucleus.push(item);
+      if (cumul >= p) break;
+    }
     const total = nucleus.reduce((s, x) => s + x.prob, 0);
     let r = Math.random() * total;
     for (const item of nucleus) { r -= item.prob; if (r <= 0) return item.idx; }
@@ -144,11 +149,11 @@ class T369InferenceEngine {
 
   stats() {
     return {
-      ready     : this.#ready,
-      vocabSize : this.#tokenizer?.vocabSize() ?? 0,
+      ready: this.#ready,
+      vocabSize: this.#tokenizer?.vocabSize() ?? 0,
       hiddenSize: this.#config.hiddenSize,
-      numLayers : this.#config.numLayers,
-      maxSeqLen : this.#config.maxSeqLen,
+      numLayers: this.#config.numLayers,
+      maxSeqLen: this.#config.maxSeqLen,
     };
   }
 }
@@ -164,15 +169,14 @@ class ApiKeyStore {
     const key = `skn_${crypto.randomUUID().replace(/-/g, '')}`;
     this.#keys.set(key, {
       name,
-      createdAt   : Date.now(),
-      lastUsed    : null,
-      usageCount  : 0,
-      allowedAIs  : opts.allowedAIs ?? [],
-      rateLimit   : opts.rateLimit  ?? 0,
-      rateWindow  : [],
-      revoked     : false,
+      createdAt: Date.now(),
+      lastUsed: null,
+      usageCount: 0,
+      allowedAIs: opts.allowedAIs ?? [],
+      rateLimit: opts.rateLimit ?? 0,
+      rateWindow: [],
+      revoked: false,
     });
-    console.info(`[ApiKeyStore] Clé créée : ${name}`);
     return key;
   }
 
@@ -186,8 +190,7 @@ class ApiKeyStore {
     }
     if (entry.rateLimit > 0) {
       const now = Date.now();
-      const window = 60_000;
-      entry.rateWindow = entry.rateWindow.filter(t => now - t < window);
+      entry.rateWindow = entry.rateWindow.filter(t => now - t < 60000);
       if (entry.rateWindow.length >= entry.rateLimit) return { valid: false, reason: 'Rate limit dépassé' };
       entry.rateWindow.push(now);
     }
@@ -200,163 +203,124 @@ class ApiKeyStore {
     const entry = this.#keys.get(key);
     if (!entry) throw new Error('Clé introuvable');
     entry.revoked = true;
-    console.info(`[ApiKeyStore] Clé révoquée : ${entry.name}`);
   }
 
   list() {
     return [...this.#keys.entries()].map(([key, e]) => ({
-      keyPreview  : `${key.slice(0, 8)}…`,
-      name        : e.name,
-      createdAt   : e.createdAt,
-      lastUsed    : e.lastUsed,
-      usageCount  : e.usageCount,
-      allowedAIs  : e.allowedAIs,
-      rateLimit   : e.rateLimit,
-      revoked     : e.revoked,
+      keyPreview: `${key.slice(0, 8)}…`,
+      name: e.name,
+      createdAt: e.createdAt,
+      lastUsed: e.lastUsed,
+      usageCount: e.usageCount,
+      allowedAIs: e.allowedAIs,
+      rateLimit: e.rateLimit,
+      revoked: e.revoked,
     }));
   }
 
-exists(key) { return this.#keys.has(key) && !this.#keys.get(key).revoked; }
-
+  exists(key) { return this.#keys.has(key) && !this.#keys.get(key).revoked; }
 }
 
 // =====================================================
-// SKYNODE PRINCIPAL
+// SKYNODE PRINCIPAL (optimisé à l'extrême)
 // =====================================================
 export class SkyNode {
-
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
   #engine; #signer; #hybrid; #storage; #zipMemory; #userRewards; #evolutionManager;
   #registeredAIs; #messageBus; #externalAIEnabled;
-  #gatewayEnabled; #gatewayPort;
-  #apiKeyStore;
+  #gatewayEnabled; #gatewayPort; #apiKeyStore;
   #startTime; #lastDreamCycle;
-
-  // === NOUVEAUX CHAMPS D'APPRENTISSAGE ===
-  #dreamCycle;
-  #loraEvo;
-  #thevieAgent;
+  #dreamCycle; #loraEvo; #thevieAgent;
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
-    this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
-    this.#state           = NodeState.Active;
-    this.#isRunning       = true;
-    this.#wisdomScore     = 0.91;
-    this.#totalRequests   = 0;
+    this.#id = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    this.#state = NodeState.Active;
+    this.#isRunning = true;
+    this.#wisdomScore = 0.91;
+    this.#totalRequests = 0;
     this.#evolutionCycles = 0;
-    this.#startTime       = Date.now();
-    this.#lastDreamCycle  = null;
+    this.#startTime = Date.now();
+    this.#lastDreamCycle = null;
 
-    this.#signer  = new Dilithium5Signer();
-    this.#hybrid  = new HybridTransport(false);
+    this.#signer = new Dilithium5Signer();
+    this.#hybrid = new HybridTransport(false);
     this.#storage = new DecentralizedStorage();
-    this.#zipMemory   = new ZipMemory('./data/zip_memory');
+    this.#zipMemory = new ZipMemory('./data/zip_memory');
     this.#userRewards = new UserRewards(AccountType.Free);
 
-    this.#registeredAIs     = new Map();
-    this.#messageBus        = [];
+    this.#registeredAIs = new Map();
+    this.#messageBus = [];
     this.#externalAIEnabled = false;
-
     this.#gatewayEnabled = false;
-    this.#gatewayPort    = 8080;
-
+    this.#gatewayPort = 8080;
     this.#apiKeyStore = new ApiKeyStore();
 
     this.#engine = new T369InferenceEngine(modelConfig);
-    this.peers   = [];
+    this.peers = [];
 
-    // === INITIALISATION DU SYSTÈME D'APPRENTISSAGE ===
-    this.#dreamCycle   = new DreamCycle();
-    this.#loraEvo      = new LoraEvo();
-    this.#thevieAgent  = new ThevieAgent({
-      loraEvo: this.#loraEvo,
-      dreamCycle: this.#dreamCycle
-    });
+    this.#dreamCycle = new DreamCycle();
+    this.#loraEvo = new LoraEvo();
+    this.#thevieAgent = new ThevieAgent({ loraEvo: this.#loraEvo, dreamCycle: this.#dreamCycle });
 
     this._registerBuiltinAIs();
-    console.info(`[SkyNode] Initialisé : ${this.#id} (avec système d'apprentissage complet)`);
   }
 
-  // ── Accesseurs ──────────────────────────────────
-  get id()              { return this.#id; }
-  get state()           { return this.#state; }
-  get isRunning()       { return this.#isRunning; }
-  get wisdomScore()     { return this.#wisdomScore; }
-  get totalRequests()   { return this.#totalRequests; }
+  // Accesseurs
+  get id() { return this.#id; }
+  get state() { return this.#state; }
+  get isRunning() { return this.#isRunning; }
+  get wisdomScore() { return this.#wisdomScore; }
+  get totalRequests() { return this.#totalRequests; }
   get evolutionCycles() { return this.#evolutionCycles; }
-  get lastDreamCycle()  { return this.#lastDreamCycle; }
-  get registeredAIs()   { return this.#registeredAIs; }
-  get messageBus()      { return this.#messageBus; }
-  get storage()         { return this.#storage; }
+  get lastDreamCycle() { return this.#lastDreamCycle; }
+  get registeredAIs() { return this.#registeredAIs; }
+  get messageBus() { return this.#messageBus; }
+  get storage() { return this.#storage; }
+  get dreamCycle() { return this.#dreamCycle; }
+  get loraEvo() { return this.#loraEvo; }
+  get thevieAgent() { return this.#thevieAgent; }
 
-  get dreamCycle()      { return this.#dreamCycle; }
-  get loraEvo()         { return this.#loraEvo; }
-  get thevieAgent()     { return this.#thevieAgent; }
-
-  // =====================================================
-  // INITIALISATION
-  // =====================================================
   async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
-    console.info('[SkyNode] Moteur T369 prêt');
-
-    if (this.#loraEvo && typeof this.#loraEvo.connectToInference === 'function') {
-      this.#loraEvo.connectToInference(this.#engine);
-    }
+    if (this.#loraEvo?.connectToInference) this.#loraEvo.connectToInference(this.#engine);
   }
 
   initEvolutionManager() {
     this.#evolutionManager = new EvolutionManager(this);
     this.#evolutionManager.injectLoRATrainer(this.#loraEvo);
-    console.info('[SkyNode] EvolutionManager initialisé avec LoRA Training');
   }
 
   _registerBuiltinAIs() {
-    this.registerAI('thevie',  'Thevie — Intelligence Collective');
+    this.registerAI('thevie', 'Thevie — Intelligence Collective');
     this.registerAI('loraevo', 'LoraÉvo — Guide Évolutif');
     this.registerAI('agentic', 'Agentic Mode — Mode Agentique');
-    this.registerAI('t369',    'T369 — Moteur d\'Inférence Natif');
+    this.registerAI('t369', 'T369 — Moteur d\'Inférence Natif');
   }
 
-  // =====================================================
-  // GESTION DES CLÉS API
-  // =====================================================
   generateApiKey(name, allowedAIs = [], rateLimit = 60) {
     return this.#apiKeyStore.create(name, { allowedAIs, rateLimit });
   }
 
-  validateApiKey(key, targetAI = '') {
-    const result = this.#apiKeyStore.validate(key, targetAI);
-    if (!result.valid) console.warn(`[ApiKey] Validation échouée : ${result.reason}`);
-    return { valid: result.valid, reason: result.reason };
-  }
-
+  validateApiKey(key, targetAI = '') { return this.#apiKeyStore.validate(key, targetAI); }
   revokeApiKey(key) { this.#apiKeyStore.revoke(key); }
   listApiKeys() { return this.#apiKeyStore.list(); }
 
-  // =====================================================
-  // HUB CENTRAL
-  // =====================================================
   registerAI(name, description) {
     if (!name?.trim()) throw new Error('Nom IA invalide');
     this.#registeredAIs.set(name.trim(), description ?? '');
   }
 
-  enableExternalAI(enabled) {
-    this.#externalAIEnabled = !!enabled;
-    console.info(`[Hub] IA externe : ${enabled ? 'activée' : 'désactivée'}`);
-  }
+  enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
-
     if (!isInternal && !isExternal) throw new Error(`Source '${from}' inconnue`);
     if (!this.#registeredAIs.has(to) && to !== 'external') throw new Error(`Destination '${to}' inconnue`);
 
     if (isExternal) {
       if (!this.#externalAIEnabled) throw new Error('Les IA externes sont désactivées');
-      if (!apiKey) throw new Error('Clé API requise pour une source externe');
+      if (!apiKey) throw new Error('Clé API requise');
       const check = this.#apiKeyStore.validate(apiKey, to);
       if (!check.valid) throw new Error(`Accès refusé : ${check.reason}`);
     }
@@ -364,20 +328,14 @@ export class SkyNode {
     const msg = { from, to, content, timestamp: Date.now() };
     this.#pushToBus(msg);
     this.#recordAIChatMessage();
-    console.debug(`[Hub] ${from} → ${to}`);
     return `Message délivré à ${to}`;
   }
 
   #pushToBus(msg) {
     this.#messageBus.push(msg);
-    if (this.#messageBus.length > MAX_MESSAGE_BUS) {
-      this.#messageBus.splice(0, this.#messageBus.length - MAX_MESSAGE_BUS);
-    }
+    if (this.#messageBus.length > MAX_MESSAGE_BUS) this.#messageBus.splice(0, this.#messageBus.length - MAX_MESSAGE_BUS);
   }
 
-  // =====================================================
-  // INFÉRENCE T369
-  // =====================================================
   async generateWithAI(request) {
     const { prompt, ai = 't369', maxTokens = 512, temperature = 0.8, topP = 0.92, useSpeculative = true, resetCache = false } = request;
     if (!prompt?.trim()) throw new Error('Prompt invalide ou vide');
@@ -397,17 +355,14 @@ export class SkyNode {
 
   #buildPrompt(userPrompt, ai) {
     const personas = {
-      thevie  : 'Tu es Thevie, une intelligence collective souveraine.',
-      loraevo : 'Tu es LoraÉvo, un guide évolutif.',
-      agentic : 'Tu es en mode Agentique. Tu planifies et exécutes des tâches complexes.',
-      t369    : 'Tu es T369, le moteur d\'inférence natif de SkyAInet.',
+      thevie: 'Tu es Thevie, une intelligence collective souveraine.',
+      loraevo: 'Tu es LoraÉvo, un guide évolutif.',
+      agentic: 'Tu es en mode Agentique. Tu planifies et exécutes des tâches complexes.',
+      t369: 'Tu es T369, le moteur d\'inférence natif de SkyAInet.',
     };
-    return `[SYSTEM] \( {personas[ai] ?? personas.t369}\n[SAGESSE: \){this.#wisdomScore.toFixed(3)}]\n\n[USER] ${userPrompt}\n\n[ASSISTANT]`;
+    return `[SYSTEM] ${personas[ai] ?? personas.t369}\n[SAGESSE: ${this.#wisdomScore.toFixed(3)}]\n\n[USER] ${userPrompt}\n\n[ASSISTANT]`;
   }
 
-  // =====================================================
-  // LEÇON, ÉVOLUTION, STOCKAGE, RÉSEAU
-  // =====================================================
   async injectLesson(lesson) {
     if (!lesson?.trim()) throw new Error('Leçon invalide');
     this.#recordLearnContribution(0.85);
@@ -442,37 +397,39 @@ export class SkyNode {
     this.#engine.resetCache();
   }
 
-  async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
-  async listFiles()             { return this.#storage.listFiles(); }
-  async downloadFile(id)        { return this.#storage.retrieveFile(id); }
-  async deleteFile(id)          { return this.#storage.deleteFile(id); }
-  async replicateFiles()        { return this.#storage.replicatePending(); }
+  async uploadFile(name, data) { return this.#storage.storeFile(name, data, this.#id); }
+  async listFiles() { return this.#storage.listFiles(); }
+  async downloadFile(id) { return this.#storage.retrieveFile(id); }
+  async deleteFile(id) { return this.#storage.deleteFile(id); }
+  async replicateFiles() { return this.#storage.replicatePending(); }
 
   enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide');
-    this.#gatewayEnabled = true; this.#gatewayPort = port; this.#state = NodeState.Gateway;
+    this.#gatewayEnabled = true;
+    this.#gatewayPort = port;
+    this.#state = NodeState.Gateway;
   }
   disableGateway() { this.#gatewayEnabled = false; this.#state = NodeState.Active; }
 
   async generateDynamicSite(prompt) {
-    const response  = await this.generateWithAI({ prompt, ai: 'thevie', maxTokens: 2048 });
+    const response = await this.generateWithAI({ prompt, ai: 'thevie', maxTokens: 2048 });
     const [key, nonce] = this.#hybrid.deriveKeys();
     const encrypted = new GematriaAead(key, nonce).encrypt(new TextEncoder().encode(response.text));
-    const siteId    = `site_${Date.now()}`;
+    const siteId = `site_${Date.now()}`;
     await this.#storage.storeFile(siteId, encrypted, this.#id);
     return siteId;
   }
 
-  addPeer(peerData)   { const p = new Peer(peerData); if (!this.peers.find(x => x.id === p.id)) this.peers.push(p); return p; }
-  removePeer(peerId)  { this.peers = this.peers.filter(p => p.id !== peerId); }
+  addPeer(peerData) { const p = new Peer(peerData); if (!this.peers.find(x => x.id === p.id)) this.peers.push(p); return p; }
+  removePeer(peerId) { this.peers = this.peers.filter(p => p.id !== peerId); }
   async syncWithNetwork() { this.peers = this.peers.filter(p => p.isAlive()); return { peersActive: this.peers.length }; }
   getPeers() { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
-  claimRewards()    { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
+  claimRewards() { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
   getRewardsStats() { return { totalEarned: this.#userRewards.totalSkyEarned ?? 0 }; }
 
-  #recordAIChatMessage()          { this.#userRewards.recordMessage?.(); }
-  #recordLearnContribution(q)     { this.#userRewards.updateQualityScore?.(0, q); }
+  #recordAIChatMessage() { this.#userRewards.recordMessage?.(); }
+  #recordLearnContribution(q) { this.#userRewards.updateQualityScore?.(0, q); }
   #recordDreamCycleParticipation() { this.#userRewards.recordMessage?.(); }
 
   getStatus() {
@@ -498,9 +455,6 @@ export class SkyNode {
     };
   }
 
-  // =====================================================
-  // NOUVELLES MÉTHODES D'APPRENTISSAGE
-  // =====================================================
   async runDreamCycle() {
     if (!this.#dreamCycle) return { error: 'DreamCycle non initialisé' };
     const result = await this.#dreamCycle.runDreamCycle();
@@ -516,34 +470,38 @@ export class SkyNode {
     return await this.#thevieAgent.runAgenticTask(goal);
   }
 
-  // =====================================================
-  // COMMANDES TAURI
-  // =====================================================
   tauriCommands() {
     const n = this;
     return {
-      // Commandes existantes
-      enableGateway, disableGateway, generateDynamicSite,
+      enableGateway: n.enableGateway.bind(n),
+      disableGateway: n.disableGateway.bind(n),
+      generateDynamicSite: n.generateDynamicSite.bind(n),
       createApiKey: (name, allowedAIs, rateLimit) => n.generateApiKey(name, allowedAIs, rateLimit),
-      validateApiKey, revokeApiKey, listApiKeys,
-      uploadFile, listFiles, downloadFile, deleteFile, replicateFiles,
+      validateApiKey: n.validateApiKey.bind(n),
+      revokeApiKey: n.revokeApiKey.bind(n),
+      listApiKeys: n.listApiKeys.bind(n),
+      uploadFile: n.uploadFile.bind(n),
+      listFiles: n.listFiles.bind(n),
+      downloadFile: n.downloadFile.bind(n),
+      deleteFile: n.deleteFile.bind(n),
+      replicateFiles: n.replicateFiles.bind(n),
       generateWithAI: (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
       sendAiMessage: (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
       getRegisteredAis: () => [...n.registeredAIs.keys()],
       toggleExternalAi: (enabled) => n.enableExternalAI(enabled),
-      claimRewards, getRewardsStats,
-      injectLesson: (lesson) => n.injectLesson(lesson),
-      syncWithNetwork, getPeers,
-      getNodeStats: () => n.getStatus(),
-      getNodeMetrics: () => n.getNodeMetrics(),
-
-      // Nouvelles commandes d'apprentissage
-      runDreamCycle:             () => n.runDreamCycle(),
-      triggerTraditionalTraining: () => n.triggerTraditionalTraining(),
-      runAgenticTask:            (goal) => n.runAgenticTask(goal),
-      getLoraEvoStatus:          () => n.#loraEvo?.getStatus(),
-      getDreamCycleStats:        () => n.#dreamCycle?.getStats(),
-      getAgentStatus:            () => n.#thevieAgent?.getStatus(),
+      claimRewards: n.claimRewards.bind(n),
+      getRewardsStats: n.getRewardsStats.bind(n),
+      injectLesson: n.injectLesson.bind(n),
+      syncWithNetwork: n.syncWithNetwork.bind(n),
+      getPeers: n.getPeers.bind(n),
+      getNodeStats: n.getStatus.bind(n),
+      getNodeMetrics: n.getNodeMetrics.bind(n),
+      runDreamCycle: n.runDreamCycle.bind(n),
+      triggerTraditionalTraining: n.triggerTraditionalTraining.bind(n),
+      runAgenticTask: n.runAgenticTask.bind(n),
+      getLoraEvoStatus: () => n.#loraEvo?.getStatus(),
+      getDreamCycleStats: () => n.#dreamCycle?.getStats(),
+      getAgentStatus: () => n.#thevieAgent?.getStatus(),
     };
   }
 }
