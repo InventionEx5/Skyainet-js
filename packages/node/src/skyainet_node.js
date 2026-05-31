@@ -1,8 +1,12 @@
 // packages/node/src/skyainet_node.js
 // SkyAInetNode — Nœud Intelligent & Souverain
 // Gematria Flash Core + Zip Memory + Modèle Économique Avancé
+// Intégré avec PeerPool + PeerReputation + NodeAttestation
 
 import { randomBytes } from 'crypto';
+import { PeerPool } from '../../secure/src/roots/pool.js';
+import { PeerReputation } from '../../secure/src/roots/reputation.js';
+import { NodeAttestation } from '../../secure/src/roots/attestation.js';
 
 // =====================================================
 // ENUMS
@@ -41,12 +45,25 @@ class ZipMemory {
 }
 
 class NodeCommunication {
-  constructor(peerId) {
+  constructor(peerId, peerPool = null) {
     this.peerId = peerId;
     this.messages = [];
+    this.peerPool = peerPool;
   }
-  async broadcast_lesson(lesson, quality) { this.messages.push({ lesson, quality, ts: new Date() }); }
-  async receive_remote_lesson(data) { return { proof: data }; }
+  async broadcast_lesson(lesson, quality) {
+    this.messages.push({ lesson, quality, ts: new Date() });
+    if (this.peerPool) {
+      this.peerPool.updateReputation(this.peerId, 0.01);
+    }
+  }
+  async receive_remote_lesson(data) {
+    if (this.peerPool && data?.nodeId) {
+      const rep = new PeerReputation();
+      rep.recordSuccess(0.03);
+      this.peerPool.updateReputation(data.nodeId, rep.score);
+    }
+    return { proof: data };
+  }
 }
 
 // =====================================================
@@ -103,6 +120,8 @@ class EthicalScore {
 // SKYAINETNODE — CLASSE PRINCIPALE (optimisée)
 // =====================================================
 export class SkyAInetNode {
+  #peerPool;
+
   constructor(nodeType, role, subscription, capabilities) {
     const id = randomBytes(32).toString('hex');
     const isPaid = subscription !== SubscriptionLevel.Free;
@@ -115,14 +134,15 @@ export class SkyAInetNode {
     this.dream_scoring = new DreamScoring();
     this.economics = new NodeEconomics(tier);
     this.zip_memory = null;
-    this.communication = new NodeCommunication(this.metadata.peer_id);
+    this.#peerPool = new PeerPool().withMinReputation(0.65);
+    this.communication = new NodeCommunication(this.metadata.peer_id, this.#peerPool);
 
     this.total_messages_processed = 0;
     this.total_bytes_stored = 0;
     this.last_flash_gematria = null;
     this.external_ai_enabled = false;
 
-    // === SHIMS DE COMPATIBILITÉ SERVEUR (seamless) ===
+    // === SHIMS DE COMPATIBILITÉ SERVEUR ===
     this.id = this.metadata.peer_id;
     this.is_running = false;
     this.wisdom_score = this.metadata.reputation_score;
@@ -132,7 +152,6 @@ export class SkyAInetNode {
     this.evolution_cycles = 12;
     this.last_dream_cycle = new Date().toISOString();
 
-    // Auto-update des shims
     const origUpdate = this.update_overall_score.bind(this);
     this.update_overall_score = () => {
       origUpdate();
@@ -140,7 +159,6 @@ export class SkyAInetNode {
       this.total_requests = this.total_messages_processed;
     };
 
-    // Méthodes serveur (stubs intelligents)
     this.run_real_dream_cycle = async () => {
       this.dream_scoring.record_dream(0.96);
       this.update_overall_score();
@@ -165,7 +183,6 @@ export class SkyAInetNode {
 
     this.enable_external_ai = (enabled) => { this.external_ai_enabled = !!enabled; };
 
-    // Stockage interne ultra-rapide
     this.storage = new Map();
     this.upload_file = (name, data) => {
       const id = `file-\( {Date.now()}- \){Math.random().toString(36).slice(2, 9)}`;
@@ -187,6 +204,9 @@ export class SkyAInetNode {
       return true;
     };
   }
+
+  // === GETTERS ===
+  get peerPool() { return this.#peerPool; }
 
   // === CYCLE DE VIE ===
   async start() {
@@ -250,10 +270,45 @@ export class SkyAInetNode {
     return `Compression: ${s.compression_ratio}x | Économie: ${this.zip_memory.get_saved_space_mb()} MB | Items: ${s.items_stored}`;
   }
 
-  // === COMMUNICATION & GEMATRIA ===
-  async broadcast_lesson(lesson) { if (this.communication) await this.communication.broadcast_lesson(lesson, 0.85); }
-  async receive_remote_lesson(data) { return this.communication ? await this.communication.receive_remote_lesson(data) : null; }
+  // === COMMUNICATION & GEMATRIA (avec PeerPool) ===
+  async broadcast_lesson(lesson) {
+    if (!this.communication) return;
+    await this.communication.broadcast_lesson(lesson, 0.85);
+    if (this.#peerPool) {
+      this.#peerPool.updateReputation(this.metadata.peer_id, 0.015);
+    }
+  }
+
+  async receive_remote_lesson(data) {
+    if (!this.communication) return null;
+    const result = await this.communication.receive_remote_lesson(data);
+    return result;
+  }
+
   async trigger_flash_gematria() { this.last_flash_gematria = new Date(); }
+
+  // === ATTESTATION D'IDENTITÉ (NodeAttestation) ===
+  createAttestation(signer) {
+    if (!signer) throw new Error('Dilithium5Signer requis');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = signer.sign(Buffer.from(this.metadata.peer_id));
+    return NodeAttestation.create(
+      Buffer.from(this.metadata.id, 'hex'),
+      signer.publicKeyBytes(),
+      signature,
+      0,
+      null
+    );
+  }
+
+  verifyAttestation(attestation, signer, contactManager = null) {
+    if (!attestation || !signer) return false;
+    try {
+      return attestation.verify(signer, contactManager);
+    } catch {
+      return false;
+    }
+  }
 
   // === MISE À JOUR & SANTÉ ===
   update_overall_score() {
