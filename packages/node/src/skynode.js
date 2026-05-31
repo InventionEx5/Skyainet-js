@@ -1,8 +1,7 @@
 // packages/node/src/skynode.js
 // =====================================================
-// SkyNode — Nœud Principal Souverain
-// SkyAInet – Gateway, Hub IA, Stockage, Récompenses
-// Inférence 100% native via T369Inference Engine
+// SkyNode — Nœud Principal Souverain (Production Ready)
+// SkyAInet – Gateway, Hub IA, Stockage, Récompenses + Apprentissage Continu
 // =====================================================
 
 "use strict";
@@ -21,10 +20,14 @@ import { T369Model }            from '../../t369-inference/src/model.js';
 import { BpeTokenizer }         from '../../t369-inference/src/tokenizer.js';
 import { SpeculativeDecoder, SpeculativeConfig } from '../../t369-inference/src/speculative.js';
 
+// === NOUVEAUX MODULES D'APPRENTISSAGE ===
+import { DreamCycle }   from './thevie/dream_cycle.js';
+import { LoraEvo }      from './thevie/lora_evolution.js';
+import { ThevieAgent }  from './thevie/agent.js';
+
 // =====================================================
 // CONSTANTES
 // =====================================================
-
 const DEFAULT_MODEL_CONFIG = Object.freeze({
   hiddenSize    : 2048,
   numLayers     : 24,
@@ -42,7 +45,6 @@ const WISDOM_DREAM_GAIN = 0.002;
 // =====================================================
 // PEER
 // =====================================================
-
 class Peer {
   constructor({ id, address, reputation = 1.0, lastSeen = Date.now(), wisdomContribution = 0 } = {}) {
     this.id                 = id;
@@ -58,7 +60,6 @@ class Peer {
 // =====================================================
 // MOTEUR D'INFÉRENCE T369
 // =====================================================
-
 class T369InferenceEngine {
   #model       = null;
   #tokenizer   = null;
@@ -153,21 +154,11 @@ class T369InferenceEngine {
 }
 
 // =====================================================
-// API KEY STORE — validation IA externes
+// API KEY STORE
 // =====================================================
-
 class ApiKeyStore {
-  /** @type {Map<string, ApiKeyEntry>} clé → métadonnées */
   #keys = new Map();
 
-  /**
-   * Génère et enregistre une nouvelle clé API.
-   * @param {string} name      — nom lisible (ex: "openai-bridge")
-   * @param {object} [opts]
-   * @param {string[]} [opts.allowedAIs]  — liste des IA destination autorisées, vide = toutes
-   * @param {number}   [opts.rateLimit]   — max requêtes/minute (0 = illimité)
-   * @returns {string} la clé générée
-   */
   create(name, opts = {}) {
     if (!name || typeof name !== 'string') throw new Error('Nom de clé invalide');
     const key = `skn_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -176,63 +167,35 @@ class ApiKeyStore {
       createdAt   : Date.now(),
       lastUsed    : null,
       usageCount  : 0,
-      allowedAIs  : opts.allowedAIs ?? [],   // [] = accès à toutes les IA
+      allowedAIs  : opts.allowedAIs ?? [],
       rateLimit   : opts.rateLimit  ?? 0,
-      rateWindow  : [],                       // timestamps des appels dans la fenêtre glissante
+      rateWindow  : [],
       revoked     : false,
     });
     console.info(`[ApiKeyStore] Clé créée : ${name}`);
     return key;
   }
 
-  /**
-   * Valide une clé API entrante.
-   * @param {string} key
-   * @param {string} targetAI — IA de destination visée
-   * @returns {{ valid: boolean, reason?: string, entry?: ApiKeyEntry }}
-   */
   validate(key, targetAI = '') {
-    if (!key || typeof key !== 'string') {
-      return { valid: false, reason: 'Clé absente ou malformée' };
-    }
-
+    if (!key || typeof key !== 'string') return { valid: false, reason: 'Clé absente ou malformée' };
     const entry = this.#keys.get(key);
-
-    if (!entry) {
-      return { valid: false, reason: 'Clé inconnue' };
-    }
-
-    if (entry.revoked) {
-      return { valid: false, reason: 'Clé révoquée' };
-    }
-
-    // Vérification des IA autorisées
+    if (!entry) return { valid: false, reason: 'Clé inconnue' };
+    if (entry.revoked) return { valid: false, reason: 'Clé révoquée' };
     if (entry.allowedAIs.length > 0 && !entry.allowedAIs.includes(targetAI)) {
-      return { valid: false, reason: `IA '${targetAI}' non autorisée pour cette clé` };
+      return { valid: false, reason: `IA '${targetAI}' non autorisée` };
     }
-
-    // Rate limiting (fenêtre glissante 60 s)
     if (entry.rateLimit > 0) {
-      const now    = Date.now();
+      const now = Date.now();
       const window = 60_000;
       entry.rateWindow = entry.rateWindow.filter(t => now - t < window);
-      if (entry.rateWindow.length >= entry.rateLimit) {
-        return { valid: false, reason: 'Rate limit dépassé' };
-      }
+      if (entry.rateWindow.length >= entry.rateLimit) return { valid: false, reason: 'Rate limit dépassé' };
       entry.rateWindow.push(now);
     }
-
-    // Mise à jour stats
     entry.lastUsed = Date.now();
     entry.usageCount++;
-
     return { valid: true, entry };
   }
 
-  /**
-   * Révoque une clé existante.
-   * @param {string} key
-   */
   revoke(key) {
     const entry = this.#keys.get(key);
     if (!entry) throw new Error('Clé introuvable');
@@ -240,9 +203,6 @@ class ApiKeyStore {
     console.info(`[ApiKeyStore] Clé révoquée : ${entry.name}`);
   }
 
-  /**
-   * Liste toutes les clés (sans exposer la valeur brute).
-   */
   list() {
     return [...this.#keys.entries()].map(([key, e]) => ({
       keyPreview  : `${key.slice(0, 8)}…`,
@@ -256,22 +216,26 @@ class ApiKeyStore {
     }));
   }
 
-  /** Vérifie l'existence brute sans effets de bord (usage interne). */
-  exists(key) { return this.#keys.has(key) && !this.#keys.get(key).revoked; }
+exists(key) { return this.#keys.has(key) && !this.#keys.get(key).revoked; }
+
 }
 
 // =====================================================
 // SKYNODE PRINCIPAL
 // =====================================================
-
 export class SkyNode {
 
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
   #engine; #signer; #hybrid; #storage; #zipMemory; #userRewards; #evolutionManager;
   #registeredAIs; #messageBus; #externalAIEnabled;
   #gatewayEnabled; #gatewayPort;
-  #apiKeyStore;   // ← remplace l'ancien Map<name, key>
+  #apiKeyStore;
   #startTime; #lastDreamCycle;
+
+  // === NOUVEAUX CHAMPS D'APPRENTISSAGE ===
+  #dreamCycle;
+  #loraEvo;
+  #thevieAgent;
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -296,14 +260,21 @@ export class SkyNode {
     this.#gatewayEnabled = false;
     this.#gatewayPort    = 8080;
 
-    // Store centralisé pour les clés API
     this.#apiKeyStore = new ApiKeyStore();
 
     this.#engine = new T369InferenceEngine(modelConfig);
     this.peers   = [];
 
+    // === INITIALISATION DU SYSTÈME D'APPRENTISSAGE ===
+    this.#dreamCycle   = new DreamCycle();
+    this.#loraEvo      = new LoraEvo();
+    this.#thevieAgent  = new ThevieAgent({
+      loraEvo: this.#loraEvo,
+      dreamCycle: this.#dreamCycle
+    });
+
     this._registerBuiltinAIs();
-    console.info(`[SkyNode] Initialisé : ${this.#id}`);
+    console.info(`[SkyNode] Initialisé : ${this.#id} (avec système d'apprentissage complet)`);
   }
 
   // ── Accesseurs ──────────────────────────────────
@@ -318,17 +289,26 @@ export class SkyNode {
   get messageBus()      { return this.#messageBus; }
   get storage()         { return this.#storage; }
 
+  get dreamCycle()      { return this.#dreamCycle; }
+  get loraEvo()         { return this.#loraEvo; }
+  get thevieAgent()     { return this.#thevieAgent; }
+
   // =====================================================
   // INITIALISATION
   // =====================================================
-
   async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
     console.info('[SkyNode] Moteur T369 prêt');
+
+    if (this.#loraEvo && typeof this.#loraEvo.connectToInference === 'function') {
+      this.#loraEvo.connectToInference(this.#engine);
+    }
   }
 
   initEvolutionManager() {
     this.#evolutionManager = new EvolutionManager(this);
+    this.#evolutionManager.injectLoRATrainer(this.#loraEvo);
+    console.info('[SkyNode] EvolutionManager initialisé avec LoRA Training');
   }
 
   _registerBuiltinAIs() {
@@ -339,45 +319,24 @@ export class SkyNode {
   }
 
   // =====================================================
-  // GESTION DES CLÉS API (IA externes)
+  // GESTION DES CLÉS API
   // =====================================================
-
-  /**
-   * Crée une clé API pour une IA externe.
-   * @param {string}   name
-   * @param {string[]} [allowedAIs=[]]  — IA destination autorisées (vide = toutes)
-   * @param {number}   [rateLimit=60]   — max appels/minute
-   * @returns {string} clé brute à transmettre à l'IA externe
-   */
   generateApiKey(name, allowedAIs = [], rateLimit = 60) {
     return this.#apiKeyStore.create(name, { allowedAIs, rateLimit });
   }
 
-  /**
-   * Valide une clé API pour une destination donnée.
-   * Utilisé en interne ET exposable via Tauri pour un middleware HTTP.
-   * @param {string} key
-   * @param {string} targetAI
-   * @returns {{ valid: boolean, reason?: string }}
-   */
   validateApiKey(key, targetAI = '') {
     const result = this.#apiKeyStore.validate(key, targetAI);
-    if (!result.valid) {
-      console.warn(`[ApiKey] Validation échouée : ${result.reason}`);
-    }
+    if (!result.valid) console.warn(`[ApiKey] Validation échouée : ${result.reason}`);
     return { valid: result.valid, reason: result.reason };
   }
 
-  /** Révoque une clé API. */
   revokeApiKey(key) { this.#apiKeyStore.revoke(key); }
-
-  /** Liste toutes les clés (sans valeur brute). */
   listApiKeys() { return this.#apiKeyStore.list(); }
 
   // =====================================================
-  // HUB CENTRAL — sendMessage avec validation externe
+  // HUB CENTRAL
   // =====================================================
-
   registerAI(name, description) {
     if (!name?.trim()) throw new Error('Nom IA invalide');
     this.#registeredAIs.set(name.trim(), description ?? '');
@@ -388,49 +347,23 @@ export class SkyNode {
     console.info(`[Hub] IA externe : ${enabled ? 'activée' : 'désactivée'}`);
   }
 
-  /**
-   * Envoie un message dans le bus.
-   *
-   * — Sources internes ('system', 'user', IA enregistrée) : pas de clé requise.
-   * — Source 'external' : clé API obligatoire + validation complète.
-   *
-   * @param {string} from
-   * @param {string} to
-   * @param {string} content
-   * @param {string} [apiKey]   — obligatoire si from === 'external'
-   */
   sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
-    if (!isInternal && !isExternal) {
-      throw new Error(`Source '${from}' inconnue`);
-    }
+    if (!isInternal && !isExternal) throw new Error(`Source '${from}' inconnue`);
+    if (!this.#registeredAIs.has(to) && to !== 'external') throw new Error(`Destination '${to}' inconnue`);
 
-    if (!this.#registeredAIs.has(to) && to !== 'external') {
-      throw new Error(`Destination '${to}' inconnue`);
-    }
-
-    // ── Validation obligatoire pour les sources externes ──
     if (isExternal) {
-      if (!this.#externalAIEnabled) {
-        throw new Error('Les IA externes sont désactivées sur ce nœud');
-      }
-
-      if (!apiKey) {
-        throw new Error('Clé API requise pour une source externe');
-      }
-
+      if (!this.#externalAIEnabled) throw new Error('Les IA externes sont désactivées');
+      if (!apiKey) throw new Error('Clé API requise pour une source externe');
       const check = this.#apiKeyStore.validate(apiKey, to);
-      if (!check.valid) {
-        throw new Error(`Accès refusé : ${check.reason}`);
-      }
+      if (!check.valid) throw new Error(`Accès refusé : ${check.reason}`);
     }
 
     const msg = { from, to, content, timestamp: Date.now() };
     this.#pushToBus(msg);
     this.#recordAIChatMessage();
-
     console.debug(`[Hub] ${from} → ${to}`);
     return `Message délivré à ${to}`;
   }
@@ -445,16 +378,10 @@ export class SkyNode {
   // =====================================================
   // INFÉRENCE T369
   // =====================================================
-
   async generateWithAI(request) {
-    const {
-      prompt, ai = 't369', maxTokens = 512,
-      temperature = 0.8, topP = 0.92,
-      useSpeculative = true, resetCache = false,
-    } = request;
-
+    const { prompt, ai = 't369', maxTokens = 512, temperature = 0.8, topP = 0.92, useSpeculative = true, resetCache = false } = request;
     if (!prompt?.trim()) throw new Error('Prompt invalide ou vide');
-    if (!this.#engine.isReady) throw new Error('Moteur T369 non chargé — appelle initEngine()');
+    if (!this.#engine.isReady) throw new Error('Moteur T369 non chargé');
 
     this.#totalRequests++;
     this.#recordAIChatMessage();
@@ -475,23 +402,23 @@ export class SkyNode {
       agentic : 'Tu es en mode Agentique. Tu planifies et exécutes des tâches complexes.',
       t369    : 'Tu es T369, le moteur d\'inférence natif de SkyAInet.',
     };
-    return `[SYSTEM] ${personas[ai] ?? personas.t369}\n[SAGESSE:${this.#wisdomScore.toFixed(3)}]\n\n[USER] ${userPrompt}\n\n[ASSISTANT]`;
+    return `[SYSTEM] \( {personas[ai] ?? personas.t369}\n[SAGESSE: \){this.#wisdomScore.toFixed(3)}]\n\n[USER] ${userPrompt}\n\n[ASSISTANT]`;
   }
 
   // =====================================================
-  // LEÇON, ÉVOLUTION, STOCKAGE, RÉSEAU, MÉTRIQUES
-  // (identiques à la version précédente)
+  // LEÇON, ÉVOLUTION, STOCKAGE, RÉSEAU
   // =====================================================
-
   async injectLesson(lesson) {
     if (!lesson?.trim()) throw new Error('Leçon invalide');
     this.#recordLearnContribution(0.85);
     this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_LEARN_GAIN);
     this.#pushToBus({ from: 'user', to: 'thevie', content: lesson, timestamp: Date.now() });
+
     if (this.#evolutionManager) {
       await this.#evolutionManager.runDreamCycle();
       this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_DREAM_GAIN);
     }
+
     let synthesis = '(moteur non initialisé)';
     if (this.#engine.isReady) {
       const r = await this.generateWithAI({ prompt: `Synthétise cette leçon : ${lesson}`, ai: 'thevie', maxTokens: 256 });
@@ -501,7 +428,7 @@ export class SkyNode {
   }
 
   async runEvolutionCycle() {
-    if (!this.#evolutionManager) throw new Error('EvolutionManager non initialisé');
+    if (!this.#evolutionManager) this.initEvolutionManager();
     await this.#evolutionManager.runDreamCycle();
     this.#evolutionCycles++;
     this.#lastDreamCycle = Date.now();
@@ -510,7 +437,7 @@ export class SkyNode {
   }
 
   async triggerTraditionalTraining() {
-    if (!this.#evolutionManager) throw new Error('EvolutionManager non initialisé');
+    if (!this.#evolutionManager) this.initEvolutionManager();
     await this.#evolutionManager.runTraditionalTraining();
     this.#engine.resetCache();
   }
@@ -541,7 +468,7 @@ export class SkyNode {
   async syncWithNetwork() { this.peers = this.peers.filter(p => p.isAlive()); return { peersActive: this.peers.length }; }
   getPeers() { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
- claimRewards()    { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
+  claimRewards()    { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
   getRewardsStats() { return { totalEarned: this.#userRewards.totalSkyEarned ?? 0 }; }
 
   #recordAIChatMessage()          { this.#userRewards.recordMessage?.(); }
@@ -572,54 +499,51 @@ export class SkyNode {
   }
 
   // =====================================================
+  // NOUVELLES MÉTHODES D'APPRENTISSAGE
+  // =====================================================
+  async runDreamCycle() {
+    if (!this.#dreamCycle) return { error: 'DreamCycle non initialisé' };
+    const result = await this.#dreamCycle.runDreamCycle();
+    this.#evolutionCycles++;
+    this.#lastDreamCycle = Date.now();
+    return result;
+  }
+
+  async runAgenticTask(goal) {
+    if (!this.#thevieAgent) {
+      this.#thevieAgent = new ThevieAgent({ loraEvo: this.#loraEvo, dreamCycle: this.#dreamCycle });
+    }
+    return await this.#thevieAgent.runAgenticTask(goal);
+  }
+
+  // =====================================================
   // COMMANDES TAURI
   // =====================================================
-
   tauriCommands() {
     const n = this;
     return {
-      enableGateway        : (port)                  => n.enableGateway(port),
-      disableGateway       : ()                      => n.disableGateway(),
-      generateDynamicSite  : (prompt)                => n.generateDynamicSite(prompt),
+      // Commandes existantes
+      enableGateway, disableGateway, generateDynamicSite,
+      createApiKey: (name, allowedAIs, rateLimit) => n.generateApiKey(name, allowedAIs, rateLimit),
+      validateApiKey, revokeApiKey, listApiKeys,
+      uploadFile, listFiles, downloadFile, deleteFile, replicateFiles,
+      generateWithAI: (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
+      sendAiMessage: (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
+      getRegisteredAis: () => [...n.registeredAIs.keys()],
+      toggleExternalAi: (enabled) => n.enableExternalAI(enabled),
+      claimRewards, getRewardsStats,
+      injectLesson: (lesson) => n.injectLesson(lesson),
+      syncWithNetwork, getPeers,
+      getNodeStats: () => n.getStatus(),
+      getNodeMetrics: () => n.getNodeMetrics(),
 
-      // Clés API
-      createApiKey         : (name, allowedAIs, rateLimit) => n.generateApiKey(name, allowedAIs, rateLimit),
-      validateApiKey       : (key, targetAI)         => n.validateApiKey(key, targetAI),
-      revokeApiKey         : (key)                   => n.revokeApiKey(key),
-      listApiKeys          : ()                      => n.listApiKeys(),
-
-      // Stockage
-      uploadFile           : (name, data)            => n.uploadFile(name, data),
-      listFiles            : ()                      => n.listFiles(),
-      downloadFile         : (id)                    => n.downloadFile(id),
-      deleteFile           : (id)                    => n.deleteFile(id),
-      replicateFiles       : ()                      => n.replicateFiles(),
-
-      // IA / Hub
-      generateWithAI       : (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
-      // apiKey obligatoire pour from='external'
-      sendAiMessage        : (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
-      getRegisteredAis     : ()                      => [...n.registeredAIs.keys()],
-      toggleExternalAi     : (enabled)               => n.enableExternalAI(enabled),
-
-      // Évolution
-      runEvolutionCycle         : () => n.runEvolutionCycle(),
+      // Nouvelles commandes d'apprentissage
+      runDreamCycle:             () => n.runDreamCycle(),
       triggerTraditionalTraining: () => n.triggerTraditionalTraining(),
-
-      // Récompenses
-      claimRewards    : () => n.claimRewards(),
-      getRewardsStats : () => n.getRewardsStats(),
-
-      // Leçon
-      injectLesson : (lesson) => n.injectLesson(lesson),
-
-      // Réseau
-      syncWithNetwork : () => n.syncWithNetwork(),
-      getPeers        : () => n.getPeers(),
-
-      // Métriques
-      getNodeStats   : () => n.getStatus(),
-      getNodeMetrics : () => n.getNodeMetrics(),
+      runAgenticTask:            (goal) => n.runAgenticTask(goal),
+      getLoraEvoStatus:          () => n.#loraEvo?.getStatus(),
+      getDreamCycleStats:        () => n.#dreamCycle?.getStats(),
+      getAgentStatus:            () => n.#thevieAgent?.getStatus(),
     };
   }
 }
