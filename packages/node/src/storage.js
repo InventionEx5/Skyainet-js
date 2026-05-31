@@ -1,68 +1,50 @@
 // packages/node/src/storage.js
 // =====================================================
 // StorageNode — Gestionnaire de Stockage Souverain
-// SkyAInet – ZipMemory + Chiffrement Hybride Post‑Quantique + Facturation + Réplication
+// ZipMemory + Chiffrement Hybride Post-Quantique + Facturation + Réplication
 // =====================================================
 
-import { NodeCapabilities, NodeState, SubscriptionLevel } from '../../core/src/node_types.js';
-import { UserRewards, RewardReason } from '../../core/src/rewards.js';
+import { ZipMemory } from '../../memory/src/zip_memory.js';
 import { HybridTransport } from '../../secure/src/crypto/hybrid.js';
 import { GematriaAead } from '../../secure/src/crypto/gematria_aead.js';
-import { RomanT369, GematriaMode } from '../../secure/src/crypto/roman_t369.js';
-import { ZipMemory } from '../../memory/src/zip_memory.js';
 
 export class StorageNode {
-  /**
-   * @param {string} sovereignAlias
-   * @param {string} subscription - clé de SubscriptionLevel (Free, Pro, Validator, etc.)
-   */
-  constructor(sovereignAlias, subscription) {
+  constructor(sovereignAlias, subscription = 'Free') {
     this.nodeId = `storage-${sovereignAlias.toLowerCase()}`;
     this.sovereignAlias = sovereignAlias;
-    this.capabilities = new NodeCapabilities(subscription);
-    this.currentState = NodeState.Active;
 
-    // Définition du stockage maximal selon l'abonnement
-    const maxMap = {
-      [SubscriptionLevel.Free]: 5,
-      [SubscriptionLevel.Pro]: 50,
-      [SubscriptionLevel.Validator]: 200,
+    this.capabilities = {
+      computePower: 0.95,
+      storagePower: 1.0,
+      bandwidth: 0.90,
     };
-    this.maxStorageGb = maxMap[subscription] ?? 20;
+    this.currentState = 'Active';
 
+    // === Stockage & Quota ===
     this.usedStorageGb = 0;
     this.reservedGb = 0;
+    this.maxStorageGb = subscription === 'Free' ? 5 : subscription === 'Pro' ? 50 : 200;
     this.totalFiles = 0;
 
-    // Compression & cache
+    // === Compression & Cache ===
     this.zipMemory = new ZipMemory(`./data/storage/${sovereignAlias}_zip`);
-    this.hotCache = new Map(); // Map<string, Uint8Array>
+    this.hotCache = new Map();
 
-    // Chiffrement hybride post‑quantique
-    this.hybrid = new HybridTransport(true); // mode full post‑quantum
-    this.encryptedFiles = new Map(); // Map<filename, cid>
+    // === Chiffrement Hybride ===
+    this.hybrid = new HybridTransport(true);
+    this.encryptedFiles = new Map(); // filename → cid
 
+    // === Facturation ===
     this.lastBillingUpdate = Date.now();
     this.monthlyCostSky = 0.0;
     this.storageShieldEnabled = false;
   }
 
-  // ---------- Dérivation de clés ponctuelles ----------
-  #deriveEncryptionKeys() {
-    // HybridTransport expose une méthode pour obtenir key/nonce
-    // Dans l'implémentation actuelle, on peut directement appeler cette méthode.
-    return this.hybrid.deriveKeys();
-  }
-
-  // ---------- Upload optimisé ----------
-  /**
-   * @param {string} filename
-   * @param {Uint8Array} data
-   * @param {UserRewards} rewards
-   * @returns {Promise<string>} CID
-   */
-  async uploadFile(filename, data, rewards) {
-    const rawSizeGb = data.byteLength / (1024 ** 3);
+  // =====================================================
+  // UPLOAD AVEC ZIP + CHIFFREMENT HYBRIDE
+  // =====================================================
+  async uploadFile(filename, data, rewards = null) {
+    const rawSizeGb = data.length / (1024 ** 3);
 
     if (this.usedStorageGb + rawSizeGb > this.maxStorageGb) {
       throw new Error('Quota de stockage dépassé');
@@ -70,102 +52,98 @@ export class StorageNode {
 
     // Compression
     const compressed = await this.zipMemory.compress(data);
-    const compressedSizeGb = compressed.byteLength / (1024 ** 3);
+    const compressedSizeGb = compressed.length / (1024 ** 3);
 
-    // Chiffrement hybride
-    const [key, nonce] = this.#deriveEncryptionKeys();
+    // Chiffrement Hybride
+    const [key, nonce] = this.hybrid.deriveKeys();
     const aead = new GematriaAead(key, nonce);
     const encrypted = aead.encrypt(compressed);
 
-    // Génération CID
-    const cid = `skn:${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+    const cid = `skn:${crypto.randomUUID()}`;
 
     this.usedStorageGb += compressedSizeGb;
-    this.totalFiles += 1;
+    this.totalFiles++;
     this.encryptedFiles.set(filename, cid);
 
-    this.#updateMonthlyCost();
+    this.updateMonthlyCost();
 
-    rewards.addReward(RewardReason.StorageContribution, 3);
+    // Récompense
+    if (rewards && typeof rewards.addReward === 'function') {
+      rewards.addReward('StorageContribution', 3);
+    }
 
-    console.debug(`[Storage] Fichier uploadé : ${filename} → ${compressedSizeGb.toFixed(3)} GB (compressé)`);
+    console.debug(`[Storage] Fichier uploadé : ${filename} → ${compressedSizeGb.toFixed(3)} GB`);
+
     return cid;
   }
 
-  // ---------- Téléchargement ----------
-  /**
-   * @param {string} filename
-   * @returns {Promise<Uint8Array|null>}
-   */
+  // =====================================================
+  // DOWNLOAD
+  // =====================================================
   async downloadFile(filename) {
     const cid = this.encryptedFiles.get(filename);
     if (!cid) return null;
 
-    // Simulation de récupération (à remplacer par un accès réel au réseau)
-    const encrypted = new Uint8Array(1024); // placeholder
+    // Simulation récupération (à connecter à vrai stockage décentralisé)
+    const encrypted = new Uint8Array(1024); // Placeholder
 
-    const [key, nonce] = this.#deriveEncryptionKeys();
+    const [key, nonce] = this.hybrid.deriveKeys();
     const aead = new GematriaAead(key, nonce);
+    const decrypted = aead.decrypt(encrypted);
 
-    try {
-      const decrypted = aead.decrypt(encrypted);
+    if (decrypted) {
       return await this.zipMemory.decompress(decrypted);
-    } catch {
-      return null;
     }
+    return null;
   }
 
-  // ---------- Suppression ----------
-  /**
-   * @param {string} filename
-   * @returns {boolean}
-   */
+  // =====================================================
+  // DELETE
+  // =====================================================
   deleteFile(filename) {
-    if (!this.encryptedFiles.has(filename)) return false;
-    this.encryptedFiles.delete(filename);
-    this.totalFiles = Math.max(0, this.totalFiles - 1);
-    // Libération de l'espace : la logique réelle doit être implémentée dans ZipMemory
-    return true;
+    if (this.encryptedFiles.has(filename)) {
+      this.encryptedFiles.delete(filename);
+      this.totalFiles = Math.max(0, this.totalFiles - 1);
+      return true;
+    }
+    return false;
   }
 
-  // ---------- Facturation ----------
-  #updateMonthlyCost() {
-    const baseRate = this.storageShieldEnabled ? 0.7 : 0.5; // SKY/GB/mois
+  // =====================================================
+  // FACTURATION & SHIELD
+  // =====================================================
+  updateMonthlyCost() {
+    const baseRate = this.storageShieldEnabled ? 0.7 : 0.5;
     this.monthlyCostSky = Math.max(0.5, this.usedStorageGb * baseRate);
-    this.lastBillingUpdate = Date.now();
   }
 
   toggleStorageShield() {
     this.storageShieldEnabled = !this.storageShieldEnabled;
-    this.#updateMonthlyCost();
+    this.updateMonthlyCost();
     console.info(`[Storage] Storage Shield ${this.storageShieldEnabled ? 'activé' : 'désactivé'}`);
   }
 
-  // ---------- Statistiques ----------
   getStorageStats() {
     const usagePercent = (this.usedStorageGb / this.maxStorageGb) * 100;
     return {
       usedGb: this.usedStorageGb,
       maxGb: this.maxStorageGb,
-      usagePercent,
-      monthlyCostSky: this.monthlyCostSky,
+      usagePercent: +usagePercent.toFixed(1),
+      monthlyCostSky: +this.monthlyCostSky.toFixed(2),
     };
   }
 
-  // ---------- Mode veille ----------
+  // =====================================================
+  // ÉTAT & RAPPORT
+  // =====================================================
   enterSleepMode() {
-    this.currentState = NodeState.Sleeping;
+    this.currentState = 'Sleeping';
     console.info('[Storage] Nœud passé en mode veille');
   }
 
-  // ---------- Rapport ----------
   healthReport() {
-    return (
-      `StorageNode ${this.sovereignAlias} | ` +
-      `Used: ${this.usedStorageGb.toFixed(2)}GB / ${this.maxStorageGb}GB | ` +
-      `Shield: ${this.storageShieldEnabled ? 'ON' : 'OFF'} | ` +
-      `Files: ${this.totalFiles} | ` +
-      `Cost: ${this.monthlyCostSky.toFixed(2)} SKY/mois`
-    );
+    return `StorageNode ${this.sovereignAlias} | Used: ${this.usedStorageGb}GB / ${this.maxStorageGb}GB | Shield: ${this.storageShieldEnabled ? 'ON' : 'OFF'} | Files: ${this.totalFiles} | Cost: ${this.monthlyCostSky.toFixed(2)} SKY/mois`;
   }
 }
+
+export default StorageNode;
