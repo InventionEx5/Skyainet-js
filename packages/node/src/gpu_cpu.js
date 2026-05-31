@@ -1,6 +1,6 @@
 // packages/node/src/gpu_cpu.js
 // GpuCpuMarketplaceService — Backend complet du Marketplace (Production Ready)
-// Vérification hardware réelle + DB + Escrow + Notifications
+// Vérification hardware réelle + DB + Escrow + Notifications Temps Réel
 
 import Database from 'better-sqlite3';
 import { EventEmitter } from 'events';
@@ -10,8 +10,8 @@ import { PeerPool } from '../secure/src/roots/pool.js';
 import { randomUUID } from 'crypto';
 
 export class HardwareAvailabilityChecker {
-  #cache = new Map();           // nodeId → { available, lastCheck, details }
-  #cacheTTL = 20_000;           // 20 secondes
+  #cache = new Map();
+  #cacheTTL = 20_000;
 
   async checkAvailability(nodeId) {
     const now = Date.now();
@@ -24,21 +24,18 @@ export class HardwareAvailabilityChecker {
     let result;
 
     try {
-      // 1. NVIDIA (priorité)
       result = await this.#checkNvidia(nodeId);
       if (result.available) {
         this.#cache.set(nodeId, { ...result, lastCheck: now });
         return result;
       }
 
-      // 2. AMD (ROCm)
       result = await this.#checkAmd(nodeId);
       if (result.available) {
         this.#cache.set(nodeId, { ...result, lastCheck: now });
         return result;
       }
 
-      // 3. CPU fallback
       result = await this.#checkCpu();
       this.#cache.set(nodeId, { ...result, lastCheck: now });
       return result;
@@ -59,7 +56,6 @@ export class HardwareAvailabilityChecker {
       const lines = output.trim().split('\n');
       if (lines.length === 0) throw new Error('Aucun GPU NVIDIA détecté');
 
-      // On prend le GPU le moins utilisé
       let bestGpu = { utilization: 100, memoryUsed: 0, memoryTotal: 0 };
 
       for (const line of lines) {
@@ -89,7 +85,6 @@ export class HardwareAvailabilityChecker {
   async #checkAmd(nodeId) {
     try {
       const output = execSync('rocm-smi --showuse --showmeminfo vram', { encoding: 'utf8', timeout: 3000 });
-      // Parsing simplifié (à améliorer selon version ROCm)
       const available = !output.includes('100%') && !output.includes('utilization: 100');
 
       return {
@@ -106,16 +101,11 @@ export class HardwareAvailabilityChecker {
       const load = parseFloat(
         execSync('cat /proc/loadavg | awk \'{print $1}\'', { encoding: 'utf8', timeout: 1000 }).trim()
       );
-
-      const available = load < 4.0; // Charge moyenne < 4.0 (4 cœurs)
+      const available = load < 4.0;
 
       return {
         available,
-        details: {
-          type: 'CPU',
-          loadAverage: load,
-          threshold: 4.0
-        }
+        details: { type: 'CPU', loadAverage: load, threshold: 4.0 }
       };
     } catch {
       return { available: true, details: { type: 'CPU', note: 'Fallback - assume available' } };
@@ -140,6 +130,7 @@ export class GpuCpuMarketplaceService extends EventEmitter {
     this.#hardwareChecker = new HardwareAvailabilityChecker();
     this.#initDatabase();
     this.#loadCache();
+    this.#setupAutoNotifications();
   }
 
   #initDatabase() {
@@ -179,6 +170,35 @@ export class GpuCpuMarketplaceService extends EventEmitter {
     rentals.forEach(r => this.#activeRentalsCache.set(r.rental_id, r));
   }
 
+  #setupAutoNotifications() {
+    this.on('rental:created', (rental) => {
+      this.notifyUser(rental.renter, `Votre location a été confirmée (${rental.totalPrice} SKY)`, 'success');
+      this.notifyUser(rental.owner, `Nouvelle location sur votre nœud (${rental.totalPrice} SKY)`, 'info');
+    });
+
+    this.on('rental:completed', ({ rentalId, ownerReward }) => {
+      this.notifyUser(null, `Location ${rentalId} terminée. ${ownerReward} SKY versés`, 'success');
+    });
+  }
+
+  // =====================================================
+  // NOTIFICATIONS TEMPS RÉEL
+  // =====================================================
+  notifyUser(userId, message, type = 'info') {
+    const notification = {
+      userId: userId || 'system',
+      message,
+      type,
+      timestamp: Date.now()
+    };
+    this.emit('notification', notification);
+    console.debug(`[GpuCpuService] Notification → ${notification.userId}: ${message}`);
+  }
+
+  notifyUsers(userIds, message, type = 'info') {
+    userIds.forEach(userId => this.notifyUser(userId, message, type));
+  }
+
   // =====================================================
   // PUBLICATION D’OFFRE
   // =====================================================
@@ -216,7 +236,6 @@ export class GpuCpuMarketplaceService extends EventEmitter {
       throw new Error(`Réputation insuffisante (requis: ${offer.reputation_required})`);
     }
 
-    // === VÉRIFICATION HARDWARE RÉELLE ===
     const hardwareStatus = await this.#hardwareChecker.checkAvailability(offer.node_id);
     if (!hardwareStatus.available) {
       throw new Error(`Matériel indisponible (${hardwareStatus.details.type})`);
