@@ -1,6 +1,6 @@
 // packages/model/src/thevie/thevie.js
 // =====================================================
-// THEVIE v2.6 — Version Finale Unifiée + Multi-Backend (Production Ready)
+// THEVIE — Version Finale Unifiée + Multi-Backend (Production Ready)
 // SkyAInet - Intelligence Artificielle Vivante de Nouvelle Génération
 // =====================================================
 
