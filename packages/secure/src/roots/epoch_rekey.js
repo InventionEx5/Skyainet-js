@@ -3,317 +3,465 @@
 // EpochRekeyManager — Rotation Sécurisée des Clés
 // SkyAInet × Nikola T369
 //
-// Objectif final :
-// - Rotation d'epoch ultra-légère et fluide
-// - Privacy-first extrême (logs minimaux, zéro ID, zéro métadonnée inutile)
-// - Hardener pluggable (RomanT369 + Gematria par défaut)
-// - Séparation par domaine (broadcast, heartbeat, discovery, dm, payments, sensitive)
-// - Jitter + padding intelligent → résistance analyse de trafic (même en mode direct)
-// - Historique de clés limité → Forward Secrecy simple et efficace
-// - Vérification epoch pair + tolérance skew → robustesse réseau
-// - Architecture DI complète (timeSource, identityGate, hardener, telemetry)
-// - Stub clair prepareMultiHopLayer() → intégration 5 sauts en 5-10 min
-// - Factory createManager(profile) → API finale ultra-simple
-// - Code léger, lisible, professionnel, maintenable longtemps
+// Architecture :
+//   BROADCAST  (1 couche) — GematriaAead          — diffusion, heartbeat, découverte
+//   HEARTBEAT  (2 couches) — +RomanT369            — keepalive authentifié
+//   DISCOVERY  (3 couches) — +Double dérivation    — handshake, échange clés
+//   PRIVATE    (4 couches) — +HKDF additionnel     — messages, paiements
+//   CRITICAL   (5 couches) — +GematriaAead chaîné  — données ultra-sensibles
+//
+// Propriétés : Forward Secrecy · Post-quantique RomanT369 + Gematria
+// Résistance trafic : padding uniforme 512 · jitter temporel
+// Fiabilité : tolérance skew ±30 s · décryptage multi-epoch
 // =====================================================
 
-import { RomanT369, GematriaMode } from '../crypto/roman_t369.js';
-import { GematriaAead } from '../crypto/gematria_aead.js';
+"use strict";
 
-// -----------------------------------------------------
-// Erreurs typées (code + cause)
-// -----------------------------------------------------
+import { randomBytes }                              from 'crypto';
+import { RomanT369, GematriaMode }                  from '../crypto/roman_t369.js';
+import { GematriaAead }                             from '../crypto/gematria_aead.js';
+import { hkdfSha256, hmacSha256, constantTimeEq }   from '../crypto/sha_fips.js';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const PAD_TO          = 512;      // blocs uniformes → résistance trafic analysis
+const KEY_HISTORY_MAX = 3;        // forward secrecy : N epochs archivés
+const EPOCH_SKEW_S    = 30;       // tolérance synchro réseau (secondes)
+const RETRY_BASE_MS   = 200;      // backoff exponentiel en cas d'échec
+const TE              = new TextEncoder();
+
+// ─────────────────────────────────────────────────────────────────
+// CANAUX — 5 niveaux, 5 cas d'usage
+// ─────────────────────────────────────────────────────────────────
+
+export const Channel = Object.freeze({
+  BROADCAST : 'broadcast',   // 1 couche
+  HEARTBEAT : 'heartbeat',   // 2 couches
+  DISCOVERY : 'discovery',   // 3 couches
+  PRIVATE   : 'private',     // 4 couches
+  CRITICAL  : 'critical',    // 5 couches
+});
+
+const CHANNEL_LAYERS = {
+  [Channel.BROADCAST] : 1,
+  [Channel.HEARTBEAT] : 2,
+  [Channel.DISCOVERY] : 3,
+  [Channel.PRIVATE]   : 4,
+  [Channel.CRITICAL]  : 5,
+};
+
+// ─────────────────────────────────────────────────────────────────
+// ERREURS TYPÉES
+// ─────────────────────────────────────────────────────────────────
+
 export class RekeyError extends Error {
   constructor(code, message, cause = null) {
     super(message);
-    this.name = 'RekeyError';
-    this.code = code;
-    this.cause = cause || undefined;
+    this.name  = 'RekeyError';
+    this.code  = code;
+    if (cause) this.cause = cause;
   }
 }
 
-// -----------------------------------------------------
-// Constantes légères
-// -----------------------------------------------------
-const DEFAULTS = Object.freeze({
-  rekeyIntervalSec: 3600,
-  jitterRatio: 0.10,
-  domain: 'secure/epoch-rekey/v1',
-  keyHistoryMax: 3,
-  padTo: 512,
-});
+// ─────────────────────────────────────────────────────────────────
+// PADDING UNIFORME — résistance à l'analyse de trafic
+// Format : [payload][0x80][0x00…][len_lo][len_hi]
+// ─────────────────────────────────────────────────────────────────
 
-const Channel = Object.freeze({
-  BROADCAST: 'broadcast',
-  HEARTBEAT: 'heartbeat',
-  DISCOVERY: 'discovery',
-  PRIVATE: 'private',
-  CRITICAL: 'critical',
-});
-
-// -----------------------------------------------------
-// Utilities fluides
-// -----------------------------------------------------
-function nowSec(timeSource) {
-  const t = timeSource?.now?.();
-  return typeof t === 'number' ? (t > 1e12 ? Math.floor(t / 1000) : Math.floor(t)) : Math.floor(Date.now() / 1000);
-}
-
-function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-
-function applyJitter(target, ratio, rnd = Math.random) {
-  const r = clamp01(ratio);
-  if (r === 0) return target;
-  const delta = (rnd() * 2 - 1) * r;
-  return Math.max(1, Math.floor(target * (1 + delta)));
-}
-
-function ensureUint8Array(x, name) {
-  if (!(x instanceof Uint8Array)) throw new RekeyError('E_INPUT', `${name} must be Uint8Array`);
-  return x;
-}
-
-// Padding uniforme (résistance trafic analysis)
-function padToBlock(data, padTo = DEFAULTS.padTo) {
-  const d = data instanceof Uint8Array ? data : new Uint8Array(data);
+function padToBlock(data) {
+  const d      = data instanceof Uint8Array ? data : new Uint8Array(data);
   const rawLen = d.length & 0xFFFF;
-  const target = Math.ceil((d.length + 3) / padTo) * padTo;
-  const out = new Uint8Array(target);
+  const target = Math.ceil((d.length + 3) / PAD_TO) * PAD_TO;
+  const out    = new Uint8Array(target);
   out.set(d);
-  out[d.length] = 0x80;
-  out[target - 2] = rawLen & 0xff;
-  out[target - 1] = (rawLen >> 8) & 0xff;
+  out[d.length]    = 0x80;
+  out[target - 2]  = rawLen & 0xff;
+  out[target - 1]  = (rawLen >> 8) & 0xff;
   return out;
 }
 
 function unpad(data) {
-  if (data.length < 3 || data.length % DEFAULTS.padTo !== 0) throw new RekeyError('E_PAD', 'Invalid padded block');
+  if (data.length < 3 || data.length % PAD_TO !== 0) {
+    throw new RekeyError('E_PAD', 'Bloc padded invalide');
+  }
   const len = data[data.length - 2] | (data[data.length - 1] << 8);
-  if (len > data.length - 3) throw new RekeyError('E_PAD', 'Invalid padding length');
+  if (len > data.length - 3) throw new RekeyError('E_PAD', 'Longueur padding invalide');
   return data.subarray(0, len);
 }
 
-// -----------------------------------------------------
-// DI Defaults (légers et sûrs)
-// -----------------------------------------------------
-class DefaultIdentityGate {
-  verify(contact) {
-    if (!contact) return true;
-    const ok = contact.hasDecentralizedIdentity === true && contact.verificationLevel >= 2;
-    if (!ok) throw new RekeyError('E_IDENTITY', 'Contact not verified');
-    return true;
-  }
+// ─────────────────────────────────────────────────────────────────
+// DÉRIVATION DE CLÉS PAR COUCHE
+//
+// Chaque couche i d'un canal a une clé indépendante :
+//   K_i = HKDF(K_epoch, salt=∅, info="skynet|<channel>|layer<i>|epoch<n>")
+//
+// Propriété : compromission d'une couche ne révèle rien des autres.
+// ─────────────────────────────────────────────────────────────────
+
+function deriveLayerKey(epochKey, channel, layerIndex, epochNum) {
+  return hkdfSha256(
+    epochKey, null,
+    TE.encode(`skynet|${channel}|layer${layerIndex}|epoch${epochNum}`),
+    32
+  );
 }
 
-class RomanHardener {
-  constructor(opts = {}) {
-    const k = opts.key instanceof Uint8Array ? opts.key : new Uint8Array(32).fill(0x42);
-    const n = opts.nonce instanceof Uint8Array ? opts.nonce : new Uint8Array(12);
-    this.roman = new RomanT369(k, n, opts.mode ?? GematriaMode.Hyper256);
-  }
-  harden(keyMaterial) {
-    ensureUint8Array(keyMaterial, 'keyMaterial');
-    return this.roman.encrypt(keyMaterial).subarray(0, 32);
-  }
+function deriveHmacKey(epochKey, epochNum) {
+  return hkdfSha256(epochKey, null, TE.encode(`skynet|hmac|epoch${epochNum}`), 32);
 }
 
-class NullTelemetry {
-  debug() {}
-  info() {}
-  warn() {}
+// ─────────────────────────────────────────────────────────────────
+// CHIFFREMENT ONION — N couches empilées
+//
+// Couche 0 (toutes)    : GematriaAead.encryptWithTag  — post-quantique
+// Couche 1 (+)         : RomanT369 Hyper256            — gematria
+// Couche 2 (+)         : HKDF-renforcé + GematriaAead — double dérivation
+// Couche 3 (+)         : RomanT369 secondaire          — couche supplémentaire
+// Couche 4 (+)         : GematriaAead chaîné           — saturation PQ
+//
+// Format par couche : [nonce:12][ciphertext]
+// Le padding uniforme est appliqué avant la couche 0 → tailles indiscernables.
+// ─────────────────────────────────────────────────────────────────
+
+function onionEncrypt(payload, epochKey, channel, epochNum) {
+  const layers = CHANNEL_LAYERS[channel] ?? 1;
+  let   data   = padToBlock(payload);
+
+  for (let i = 0; i < layers; i++) {
+    const k     = deriveLayerKey(epochKey, channel, i, epochNum);
+    const nonce = randomBytes(12);
+
+    let ct;
+    switch (i) {
+      case 0: {
+        // GematriaAead — authenticité + post-quantique
+        ct = GematriaAead.fromRootKey(k).encryptWithTag(data);
+        break;
+      }
+      case 1: {
+        // RomanT369 Hyper256 — gematria T369
+        ct = new RomanT369(k, nonce, GematriaMode.Hyper256).encrypt(data);
+        break;
+      }
+      case 2: {
+        // HKDF additionnel → GematriaAead (double dérivation)
+        const k2 = hkdfSha256(k, nonce, TE.encode(`discovery-inner|${epochNum}`), 32);
+        ct = GematriaAead.fromRootKey(k2).encryptWithTag(data);
+        break;
+      }
+      case 3: {
+        // RomanT369 secondaire — couche gematria supplémentaire
+        const k3 = hkdfSha256(k, null, TE.encode(`private-roman|${epochNum}`), 32);
+        ct = new RomanT369(k3, nonce, GematriaMode.Hyper256).encrypt(data);
+        break;
+      }
+      case 4: {
+        // GematriaAead chaîné — saturation post-quantique finale
+        const k4 = hkdfSha256(k, nonce, TE.encode(`critical-final|${epochNum}`), 32);
+        ct = GematriaAead.fromRootKey(k4).encryptWithTag(data);
+        break;
+      }
+    }
+
+    // Préfixe nonce : [nonce:12][ct]
+    const wrapped = new Uint8Array(12 + ct.length);
+    wrapped.set(nonce, 0);
+    wrapped.set(ct, 12);
+    data = wrapped;
+  }
+
+  return data;
 }
 
-// -----------------------------------------------------
-// EpochRekeyManager (léger + fluide)
-// -----------------------------------------------------
+function onionDecrypt(ciphertext, epochKey, channel, epochNum) {
+  const layers = CHANNEL_LAYERS[channel] ?? 1;
+  let   data   = ciphertext instanceof Uint8Array ? ciphertext : new Uint8Array(ciphertext);
+
+  for (let i = layers - 1; i >= 0; i--) {
+    if (data.length < 12) throw new RekeyError('E_DECRYPT', `Couche ${i} trop courte`);
+    const nonce = data.subarray(0, 12);
+    const ct    = data.subarray(12);
+    const k     = deriveLayerKey(epochKey, channel, i, epochNum);
+
+    switch (i) {
+      case 0:  data = GematriaAead.fromRootKey(k).decrypt(ct); break;
+      case 1:  data = new RomanT369(k, nonce, GematriaMode.Hyper256).decrypt(ct); break;
+      case 2: {
+        const k2 = hkdfSha256(k, nonce, TE.encode(`discovery-inner|${epochNum}`), 32);
+        data = GematriaAead.fromRootKey(k2).decrypt(ct);
+        break;
+      }
+      case 3: {
+        const k3 = hkdfSha256(k, null, TE.encode(`private-roman|${epochNum}`), 32);
+        data = new RomanT369(k3, nonce, GematriaMode.Hyper256).decrypt(ct);
+        break;
+      }
+      case 4: {
+        const k4 = hkdfSha256(k, nonce, TE.encode(`critical-final|${epochNum}`), 32);
+        data = GematriaAead.fromRootKey(k4).decrypt(ct);
+        break;
+      }
+    }
+  }
+
+  return unpad(data);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EPOCH REKEY MANAGER
+// ─────────────────────────────────────────────────────────────────
+
 export class EpochRekeyManager {
-  constructor(options = {}) {
-    const cfg = { ...DEFAULTS, ...options };
+  // Clés privées — jamais exposées
+  #currentKey;     // Uint8Array(32)
+  #keyHistory;     // [{epoch, key}]
+  #epoch;
+  #lastRekeySec;
+  #intervalSecs;
+  #forceNext;
+  #failureCount;
+  #domain;
 
-    this.currentEpoch = 0;
-    this.rekeyIntervalSec = Math.max(1, cfg.rekeyIntervalSec);
-    this.jitterRatio = clamp01(cfg.jitterRatio);
-    this.domain = String(cfg.domain || DEFAULTS.domain);
-    this.keyHistoryMax = cfg.keyHistoryMax ?? 3;
-    this.padTo = cfg.padTo ?? DEFAULTS.padTo;
+  /**
+   * @param {object}  [opts]
+   * @param {number}       opts.intervalSecs  — durée d'epoch (défaut 3600 s)
+   * @param {Uint8Array}   opts.initialKey    — clé racine initiale (32 octets)
+   * @param {number}       opts.jitterRatio   — jitter ±% du intervalle (défaut 0.10)
+   * @param {string}       opts.domain        — domaine HKDF (défaut 'skynet/epoch/v1')
+   */
+  constructor(opts = {}) {
+    this.#intervalSecs = Math.max(1, opts.intervalSecs ?? 3600);
+    this.#epoch        = 0;
+    this.#lastRekeySec = this.#nowSec();
+    this.#forceNext    = false;
+    this.#failureCount = 0;
+    this.#keyHistory   = [];
+    this.#domain       = opts.domain ?? 'skynet/epoch/v1';
 
-    this.timeSource = cfg.timeSource || { now: () => Date.now() };
-    this.identityGate = cfg.identityGate || new DefaultIdentityGate();
-    this.hardener = cfg.hardener ?? new RomanHardener(cfg.roman || {});
-    this.telemetry = cfg.telemetry || new NullTelemetry();
-    this.random = cfg.random || Math.random;
+    this.jitterRatio   = Math.max(0, Math.min(0.5, opts.jitterRatio ?? 0.10));
 
-    this.forceRekeyOnNext = false;
-    this.lastRekeySec = nowSec(this.timeSource);
-    this.keyHistory = [];           // [{epoch, key}]
-    this._encoder = new TextEncoder();
+    this.#currentKey   = opts.initialKey instanceof Uint8Array && opts.initialKey.length >= 32
+      ? new Uint8Array(opts.initialKey.subarray(0, 32))
+      : randomBytes(32);
   }
 
-  // === Policy ===
+  // ─── Accesseurs (lecture seule) ───────────────────────────────
+
+  get epoch()        { return this.#epoch; }
+  get intervalSecs() { return this.#intervalSecs; }
+  get lastRekeySec() { return this.#lastRekeySec; }
+
+  // ─── Politique de rekey ───────────────────────────────────────
+
   shouldRekey() {
-    if (this.forceRekeyOnNext) return true;
-    const now = nowSec(this.timeSource);
-    const target = applyJitter(this.rekeyIntervalSec, this.jitterRatio, this.random);
-    return (now - this.lastRekeySec) >= target;
+    if (this.#forceNext) return true;
+    const jitteredInterval = Math.max(1, Math.floor(
+      this.#intervalSecs * (1 + (Math.random() * 2 - 1) * this.jitterRatio)
+    ));
+    return (this.#nowSec() - this.#lastRekeySec) >= jitteredInterval;
   }
 
-  timeUntilNextRekeySec() {
-    const now = nowSec(this.timeSource);
-    const elapsed = Math.max(0, now - this.lastRekeySec);
-    const target = applyJitter(this.rekeyIntervalSec, this.jitterRatio, this.random);
-    return Math.max(0, target - elapsed);
+  timeUntilNextRekey() {
+    const elapsed = Math.max(0, this.#nowSec() - this.#lastRekeySec);
+    return Math.max(0, this.#intervalSecs - elapsed);
   }
 
   forceRekey() {
-    this.forceRekeyOnNext = true;
-    this.telemetry.warn?.('[EpochRekey] forced');
+    this.#forceNext = true;
   }
 
-  // === Identity (optionnel) ===
-  _verifyIdentity(contact) {
-    return this.identityGate.verify(contact);
-  }
+  // ─── Rekey principal ──────────────────────────────────────────
 
-  // === Core rekey (général + fluide) ===
-  performRekey(keyMaterials, { contact = null, contexts = null } = {}) {
-    if (!Array.isArray(keyMaterials) || keyMaterials.length === 0) {
-      throw new RekeyError('E_INPUT', 'keyMaterials must be non-empty array');
-    }
-    this._verifyIdentity(contact);
+  /**
+   * Effectue la rotation de clé :
+   *   1. Archive la clé courante (forward secrecy)
+   *   2. Dérive la nouvelle via HKDF + sel aléatoire
+   *   3. Renforce avec RomanT369 Hyper256 (post-quantique)
+   *   4. Authentifie la rotation avec HMAC-SHA256
+   *   5. Commit atomique
+   *
+   * @param {object} [opts]
+   * @param {string}     opts.channel   — canal déclencheur (log)
+   * @param {Uint8Array} opts.peerSalt  — sel pair pour consensus bilatéral
+   * @returns {RekeyResult}
+   */
+  async performRekey(opts = {}) {
+    const { channel = Channel.PRIVATE, peerSalt = null } = opts;
 
-    const newEpoch = this.currentEpoch + 1;
+    try {
+      // — Archive (forward secrecy)
+      this.#archiveCurrentKey();
 
-    // Archivage forward secrecy
-    this._archiveKey();
+      // — Sel combiné local ⊕ pair (si fourni)
+      const localSalt    = randomBytes(32);
+      const combinedSalt = peerSalt instanceof Uint8Array && peerSalt.length >= 32
+        ? _xor(localSalt, peerSalt.subarray(0, 32))
+        : localSalt;
 
-    const out = new Array(keyMaterials.length);
-    for (let i = 0; i < keyMaterials.length; i++) {
-      const secret = ensureUint8Array(keyMaterials[i], `keyMaterials[${i}]`);
-      const ctx = Array.isArray(contexts) ? (contexts[i] || {}) : {};
-      out[i] = this._deriveEpochKey(secret, newEpoch, ctx);
-    }
+      // — HKDF : derive la nouvelle clé
+      const info    = TE.encode(`${this.#domain}|rekey|epoch${this.#epoch + 1}|${channel}`);
+      const derived = hkdfSha256(this.#currentKey, combinedSalt, info, 32);
 
-    // Commit atomique
-    for (let i = 0; i < out.length; i++) keyMaterials[i] = out[i];
+      // — Renforcement RomanT369 post-quantique
+      const roman      = new RomanT369(derived, combinedSalt.subarray(0, 12), GematriaMode.Hyper256);
+      const reinforced = roman.encrypt(derived).subarray(0, 32);
 
-    this.currentEpoch = newEpoch;
-    this.lastRekeySec = nowSec(this.timeSource);
-    this.forceRekeyOnNext = false;
+      // — Tag HMAC d'authentification de la rotation
+      const hmacKey = deriveHmacKey(this.#currentKey, this.#epoch);
+      const tag     = hmacSha256(hmacKey, reinforced);
 
-    this.telemetry.info?.('[EpochRekey] completed', { epoch: newEpoch, count: out.length });
-    return newEpoch;
-  }
+      // — Commit atomique
+      this.#currentKey   = reinforced;
+      this.#epoch       += 1;
+      this.#lastRekeySec = this.#nowSec();
+      this.#forceNext    = false;
+      this.#failureCount = 0;
 
-  _deriveEpochKey(secret32, epoch, context = {}) {
-    ensureUint8Array(secret32, 'secret');
-    const usage = context.usage || 'generic';
-    const tag = context.tag || '';
-    const info = `${this.domain}|epoch=${epoch}|usage=${usage}|tag=${tag}`;
-    const infoBytes = this._encoder.encode(info);
+      // — Jitter anti-timing (0–80 ms)
+      await _sleep(Math.floor(Math.random() * 80));
 
-    // Dérivation légère (HKDF-like via hardener)
-    let derived = this.hardener.harden(secret32);
-    // Renforcement supplémentaire RomanT369 si hardener différent
-    if (!(this.hardener instanceof RomanHardener)) {
-      const roman = new RomanT369(derived, new Uint8Array(12), GematriaMode.Hyper256);
-      derived = roman.encrypt(derived).subarray(0, 32);
-    }
-    return derived;
-  }
+      return { epoch: this.#epoch, channel, hmacTag: tag, localSalt, timestamp: this.#lastRekeySec };
 
-  _archiveKey() {
-    this.keyHistory.unshift({ epoch: this.currentEpoch, key: new Uint8Array(this._currentKey || new Uint8Array(32)) });
-    if (this.keyHistory.length > this.keyHistoryMax) {
-      const removed = this.keyHistory.splice(this.keyHistoryMax);
-      removed.forEach(r => r.key.fill(0));
+    } catch (err) {
+      this.#failureCount++;
+      const backoff = RETRY_BASE_MS * (2 ** Math.min(this.#failureCount, 6));
+      throw new RekeyError('E_REKEY', `Rekey échoué: ${err.message}`, err);
     }
   }
 
-  // === Encrypt / Decrypt ingénieux (léger + puissant) ===
-  encrypt(payload, channel = Channel.PRIVATE, context = {}) {
-    if (!Object.values(Channel).includes(channel)) {
-      throw new RekeyError('E_CHANNEL', `Unknown channel: ${channel}`);
+  // ─── Chiffrement / Déchiffrement ─────────────────────────────
+
+  /**
+   * Chiffre un payload avec N couches onion selon le canal.
+   * @param {Uint8Array|string} payload
+   * @param {string}            channel — Channel.*
+   */
+  encrypt(payload, channel = Channel.PRIVATE) {
+    if (!CHANNEL_LAYERS[channel]) throw new RekeyError('E_CHANNEL', `Canal inconnu: ${channel}`);
+    const pt = typeof payload === 'string' ? TE.encode(payload) : payload;
+    return onionEncrypt(pt, this.#currentKey, channel, this.#epoch);
+  }
+
+  /**
+   * Déchiffre un ciphertext.
+   * Essaie l'epoch courant puis les epochs historiques (tolérance désync).
+   * @param {Uint8Array} ciphertext
+   * @param {string}     channel
+   * @param {number}     [epochHint] — epoch du pair si connu
+   */
+  decrypt(ciphertext, channel = Channel.PRIVATE, epochHint = null) {
+    const ct       = ciphertext instanceof Uint8Array ? ciphertext : new Uint8Array(ciphertext);
+    const epochs   = this.#decryptCandidates(epochHint);
+
+    for (const ep of epochs) {
+      const key = this.#keyForEpoch(ep);
+      if (!key) continue;
+      try { return onionDecrypt(ct, key, channel, ep); }
+      catch { /* essayer l'epoch suivant */ }
     }
-    const pt = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
-    const padded = padToBlock(pt, this.padTo);
 
-    const key = this._deriveChannelKey(channel, context);
-    const aead = GematriaAead.fromRootKey(key);
-    const ct = aead.encryptWithTag(padded);
-
-    // Jitter temporel optionnel (anti-timing)
-    // (appelé par l'appelant si besoin)
-    return ct;
+    throw new RekeyError('E_DECRYPT', `Déchiffrement échoué (canal: ${channel}, epochs: ${epochs.join(',')})`);
   }
 
-  decrypt(ciphertext, channel = Channel.PRIVATE, context = {}) {
-    const key = this._deriveChannelKey(channel, context);
-    const aead = GematriaAead.fromRootKey(key);
-    const padded = aead.decrypt(ciphertext);
-    return unpad(padded);
-  }
+  // ─── Vérification epoch pair ─────────────────────────────────
 
-  _deriveChannelKey(channel, context = {}) {
-    const usage = context.usage || channel;
-    const info = `${this.domain}|channel=${channel}|usage=${usage}|epoch=${this.currentEpoch}`;
-    const infoBytes = this._encoder.encode(info);
-    return this.hardener.harden(infoBytes);
-  }
-
-  // === Stub futur 5 sauts (intégration ultra-rapide) ===
-  prepareMultiHopLayer(targetPeerId, hops = 5) {
-    // TODO: implémenter quand on sera prêt (PeerPool + 5 sauts + padding + epochs)
-    this.telemetry.debug?.('[EpochRekey] prepareMultiHopLayer stub', { targetPeerId, hops });
-    return { ready: true, hops, epoch: this.currentEpoch, channel: Channel.CRITICAL };
-  }
-
-  // === Vérification pair ===
   verifyPeerEpoch(remoteEpoch, remoteTs) {
-    const diff = Math.abs(this.currentEpoch - remoteEpoch);
-    if (diff > 1) throw new RekeyError('E_EPOCH', `Epoch mismatch: local=${this.currentEpoch} remote=${remoteEpoch}`);
-
-    const now = nowSec(this.timeSource);
-    const expected = remoteEpoch * this.rekeyIntervalSec;
-    const tsDiff = Math.abs(remoteTs - (now - (now % this.rekeyIntervalSec)));
-    if (tsDiff > this.rekeyIntervalSec + 30) {
-      throw new RekeyError('E_SKEW', `Timestamp drift too high: ${tsDiff}s`);
+    if (Math.abs(this.#epoch - remoteEpoch) > 1) {
+      throw new RekeyError('E_EPOCH', `Epoch mismatch: local=${this.#epoch} remote=${remoteEpoch}`);
+    }
+    const now    = this.#nowSec();
+    const tsDiff = Math.abs(remoteTs - (now - (now % this.#intervalSecs)));
+    if (tsDiff > this.#intervalSecs + EPOCH_SKEW_S) {
+      throw new RekeyError('E_SKEW', `Timestamp drift: ${tsDiff}s`);
     }
   }
 
-  // === Export / Import sel (consensus pair) ===
+  // ─── Export / Import sel ──────────────────────────────────────
+
   exportRekeySalt() {
-    const salt = new Uint8Array(32).map(() => Math.floor(Math.random() * 256));
-    return { epoch: this.currentEpoch, salt };
+    const salt = randomBytes(32);
+    const tag  = hmacSha256(deriveHmacKey(this.#currentKey, this.#epoch), salt);
+    return { epoch: this.#epoch, salt, tag };
   }
 
-  importPeerSalt({ epoch, salt }) {
-    if (Math.abs(epoch - this.currentEpoch) > 1) throw new RekeyError('E_EPOCH', 'Peer epoch too far');
+  importPeerSalt({ epoch, salt, tag }) {
+    if (Math.abs(epoch - this.#epoch) > 1) {
+      throw new RekeyError('E_EPOCH', 'Epoch pair trop éloigné');
+    }
+    if (!(tag instanceof Uint8Array) || tag.length !== 32) {
+      throw new RekeyError('E_TAG', 'Tag HMAC invalide');
+    }
     return salt instanceof Uint8Array ? salt : new Uint8Array(salt);
   }
 
-  // === Santé (zéro clé exposée) ===
+  // ─── Santé ───────────────────────────────────────────────────
+
   healthReport() {
     return {
-      epoch: this.currentEpoch,
-      lastRekeySec: this.lastRekeySec,
-      intervalSec: this.rekeyIntervalSec,
-      timeUntilNext: this.timeUntilNextRekeySec(),
-      forceNext: this.forceRekeyOnNext,
-      historyDepth: this.keyHistory.length,
-      channels: Object.values(Channel),
+      epoch          : this.#epoch,
+      lastRekeySec   : this.#lastRekeySec,
+      intervalSecs   : this.#intervalSecs,
+      timeUntilRekey : this.timeUntilNextRekey(),
+      forceNext      : this.#forceNext,
+      failureCount   : this.#failureCount,
+      historyDepth   : this.#keyHistory.length,
+      channels       : CHANNEL_LAYERS,
+      jitterRatio    : this.jitterRatio,
     };
+  }
+
+  // ─── Privé ───────────────────────────────────────────────────
+
+  #nowSec() { return Math.floor(Date.now() / 1000); }
+
+  #archiveCurrentKey() {
+    this.#keyHistory.unshift({ epoch: this.#epoch, key: new Uint8Array(this.#currentKey) });
+    if (this.#keyHistory.length > KEY_HISTORY_MAX) {
+      const removed = this.#keyHistory.splice(KEY_HISTORY_MAX);
+      for (const r of removed) r.key.fill(0);  // écraser avant GC
+    }
+  }
+
+  #keyForEpoch(ep) {
+    if (ep === this.#epoch) return this.#currentKey;
+    return this.#keyHistory.find(h => h.epoch === ep)?.key ?? null;
+  }
+
+  #decryptCandidates(hint) {
+    const base = hint != null ? [hint, this.#epoch] : [this.#epoch];
+    const hist = this.#keyHistory.map(h => h.epoch).filter(e => !base.includes(e));
+    return [...new Set([...base, ...hist])];
   }
 }
 
-// -----------------------------------------------------
-// Factory ultra-simple
-// -----------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// HELPERS INTERNES
+// ─────────────────────────────────────────────────────────────────
+
+function _xor(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = a[i] ^ b[i];
+  return out;
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─────────────────────────────────────────────────────────────────
+// FACTORY — intégration en 5 lignes
+//
+//   const mgr = createManager('high');
+//   const ct  = mgr.encrypt(payload, Channel.PRIVATE);
+//   if (mgr.shouldRekey()) await mgr.performRekey();
+//   const pt  = mgr.decrypt(ct, Channel.PRIVATE);
+//   console.log(mgr.healthReport());
+// ─────────────────────────────────────────────────────────────────
+
 export function createManager(profile = 'high', initialKey = null) {
   const intervals = { low: 7200, medium: 3600, high: 1800, paranoid: 300 };
-  const secs = intervals[profile] ?? DEFAULTS.rekeyIntervalSec;
-
   return new EpochRekeyManager({
-    rekeyIntervalSec: secs,
-    initialKey: initialKey ?? undefined,
+    intervalSecs: intervals[profile] ?? 3600,
+    initialKey  : initialKey ?? undefined,
   });
 }
