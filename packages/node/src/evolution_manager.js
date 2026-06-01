@@ -1,9 +1,7 @@
 // packages/node/src/evolution_manager.js
-// =====================================================
 // EvolutionManager — Apprentissage Continu Lourd (Production Ready)
 // Dream Cycle intensif + Entraînement LoRA réel + Adam + Checkpoint signé
 // SkyAInet × Thevie × Nikola T369
-// =====================================================
 
 "use strict";
 
@@ -21,15 +19,15 @@ export class EvolutionManager {
   #dreamCount;
   #trainingCount;
   #qualityThreshold;
-  #loraTrainer;           // Injecté : instance de LoRATrainer réel
-  #isTraining;            // Protection anti-concurrence
+  #loraTrainer;
+  #isTraining;
 
   constructor(node, opts = {}) {
     this.#node = node;
     this.#zipMemory = opts.zipMemory ?? new ZipMemory('./data/zip_memory');
     this.#signer = opts.signer ?? new Dilithium5Signer();
     this.#lastTraining = null;
-    this.#trainingIntervalDays = opts.trainingIntervalDays ?? 3; // Plus agressif
+    this.#trainingIntervalDays = opts.trainingIntervalDays ?? 3;
     this.#dreamCount = 0;
     this.#trainingCount = 0;
     this.#qualityThreshold = opts.qualityThreshold ?? 0.82;
@@ -38,12 +36,11 @@ export class EvolutionManager {
   }
 
   // ============================================================
-  // DREAM CYCLE INTENSIF (apprentissage continu lourd)
+  // DREAM CYCLE INTENSIF
   // ============================================================
   async runDreamCycle() {
     this.#dreamCount++;
 
-    // Collecte plus large + scoring de qualité
     const lessons = this.#collectRecentLessons(64);
     const highQualityLessons = lessons.filter(l => this.#scoreLessonQuality(l) >= this.#qualityThreshold);
 
@@ -52,7 +49,6 @@ export class EvolutionManager {
     for (const lesson of highQualityLessons) {
       let synthesis = null;
 
-      // Synthèse réelle via le moteur (si disponible)
       if (typeof this.#node.generateWithAI === 'function') {
         try {
           const result = await this.#node.generateWithAI({
@@ -66,9 +62,7 @@ export class EvolutionManager {
         } catch (_) {}
       }
 
-      // Renforcement mémoire compressée + indexation
       await this.#reinforceMemory(lesson, synthesis);
-
       processed.push({ lesson, synthesis, quality: this.#scoreLessonQuality(lesson) });
     }
 
@@ -97,10 +91,8 @@ export class EvolutionManager {
         return { trained: false, reason: 'Pas assez de leçons de qualité' };
       }
 
-      // 1. Préparation du dataset
       const dataset = this.#prepareDataset(lessons);
 
-      // 2. Entraînement réel via LoRA (si trainer injecté)
       let trainingResult = { loss: null, epochs: 0 };
       if (this.#loraTrainer && typeof this.#loraTrainer.train === 'function') {
         trainingResult = await this.#loraTrainer.train({
@@ -111,20 +103,16 @@ export class EvolutionManager {
           batchSize: 4,
         });
       } else {
-        // Fallback : on stocke quand même le dataset (mode dégradé mais propre)
         console.warn('[EvolutionManager] Aucun LoRATrainer injecté — dataset stocké seulement');
       }
 
-      // 3. Signature post-quantique des nouveaux poids
       const encoder = new TextEncoder();
       const weightsDigest = encoder.encode(
         `weights_v\( {this.#trainingCount}_ \){Date.now()}_${trainingResult.loss ?? 'na'}`
       );
       const signature = this.#signer.sign(weightsDigest);
 
-      // 4. Checkpoint signé
       await this.#saveCheckpoint(trainingResult, signature);
-
       this.#lastTraining = Date.now();
 
       return {
@@ -141,11 +129,10 @@ export class EvolutionManager {
   }
 
   // ============================================================
-  // MÉTHODES PRIVÉES ROBUSTES
+  // MÉTHODES PRIVÉES
   // ============================================================
 
   #scoreLessonQuality(lesson) {
-    // Scoring simple mais efficace (longueur + densité sémantique)
     const len = lesson.length;
     const words = lesson.split(/\s+/).length;
     return Math.min(1.0, (len / 800) * 0.6 + (words / 120) * 0.4);
