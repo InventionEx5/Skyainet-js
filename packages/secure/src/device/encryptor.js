@@ -1,4 +1,4 @@
-// packages/secure/src/media/encryptor.js
+// packages/secure/src/device/encryptor.js
 // =====================================================
 // Media Encryptor — Chiffrement Temps Réel (SRTP-like)
 // GematriaAead + Anti-replay + Contact ID
