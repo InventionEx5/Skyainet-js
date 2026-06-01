@@ -104,6 +104,21 @@ export class Contact {
   #verificationLevel; // 0 = non vérifié, 1 = partiel, 2 = complet
   #publicKey;         // Uint8Array | null — clé publique Dilithium5
 
+  /**
+   * @param {Uint8Array} nodeId   — identifiant 32 octets
+   * @param {object}    [opts]
+   * @param {number}       opts.verificationLevel
+   * @param {Uint8Array}   opts.publicKey
+   * @param {string}       opts.alias         — nom d'affichage
+   * @param {string}       opts.did           — DID complet (ex. "did:t369:…")
+   * @param {number}       opts.reputation    — score [0,100]
+   * @param {boolean}      opts.favorite
+   * @param {boolean}      opts.revoked
+   * @param {string}       opts.qrCodeHash    — SHA-256 hex de la clé publique
+   * @param {number}       opts.interactionCount
+   * @param {number}       opts.lastInteractionMs — timestamp ms
+   * @param {string}       opts.lastSeen      — chaîne affichable ("2m ago")
+   */
   constructor(nodeId, opts = {}) {
     if (!(nodeId instanceof Uint8Array) || nodeId.length !== 32) {
       throw new PeerPoolError('nodeId must be Uint8Array(32)', 'E_CONTACT');
@@ -111,20 +126,40 @@ export class Contact {
     this.#nodeId            = nodeId;
     this.#verificationLevel = opts.verificationLevel ?? 0;
     this.#publicKey         = opts.publicKey         ?? null;
-    this.alias              = opts.alias             ?? null;
+
+    // Champs UI — sérialisables, lisibles par le HTML
+    this.alias              = opts.alias            ?? null;
+    this.did                = opts.did              ?? null;
+    this.reputation         = Math.max(0, Math.min(100, opts.reputation ?? 50));
+    this.favorite           = opts.favorite         ?? false;
+    this.revoked            = opts.revoked          ?? false;
+    this.qrCodeHash         = opts.qrCodeHash       ?? null;
+    this.interactionCount   = opts.interactionCount ?? 0;
+    this.lastInteractionMs  = opts.lastInteractionMs ?? null;
+    this.lastSeen           = opts.lastSeen         ?? null;
     this.createdAt          = Date.now();
   }
+
+  // ─── Accesseurs ───────────────────────────────────────────────
 
   get nodeId()            { return this.#nodeId; }
   get verificationLevel() { return this.#verificationLevel; }
   get publicKey()         { return this.#publicKey; }
 
-  /** Retourne true si ce contact a une identité décentralisée vérifiée */
+  /** true si verificationLevel ≥ 2 et clé publique présente */
   hasDecentralizedIdentity() {
     return this.#verificationLevel >= 2 && this.#publicKey !== null;
   }
 
-  /** Élève le niveau de vérification (monotone — ne peut pas descendre) */
+  /** Compatibilité HTML : verified = level ≥ 1 */
+  get verified() { return this.#verificationLevel >= 1; }
+
+  /** Compatibilité HTML : name = alias */
+  get name() { return this.alias ?? ''; }
+
+  // ─── Mutation ────────────────────────────────────────────────
+
+  /** Élève le niveau de vérification (monotone) */
   upgrade(newLevel, publicKey = null) {
     if (newLevel > this.#verificationLevel) {
       this.#verificationLevel = newLevel;
@@ -134,13 +169,48 @@ export class Contact {
     }
   }
 
+  /** Met à jour la réputation par EMA (α = 0.15) */
+  updateReputation(delta) {
+    const alpha  = 0.15;
+    const target = Math.max(0, Math.min(100, this.reputation + delta));
+    this.reputation = +(this.reputation * (1 - alpha) + target * alpha).toFixed(1);
+  }
+
+  /** Enregistre une interaction et met à jour lastInteractionMs */
+  recordInteraction() {
+    this.interactionCount++;
+    this.lastInteractionMs = Date.now();
+  }
+
+  revoke(reason = 'Révoqué') {
+    this.revoked = true;
+    this._revocationReason = reason;
+  }
+
   nodeIdHex() {
     return Array.from(this.#nodeId).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  toJSON() {
+    return {
+      nodeId             : this.nodeIdHex(),
+      did                : this.did,
+      alias              : this.alias,
+      verificationLevel  : this.#verificationLevel,
+      reputation         : this.reputation,
+      favorite           : this.favorite,
+      revoked            : this.revoked,
+      qrCodeHash         : this.qrCodeHash,
+      interactionCount   : this.interactionCount,
+      lastInteractionMs  : this.lastInteractionMs,
+      lastSeen           : this.lastSeen,
+      hasPublicKey       : this.#publicKey !== null,
+    };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────
-// CONTACT MANAGER — registre simple Map<hex, Contact>
+// CONTACT MANAGER — registre Map<hex, Contact> avec requêtes
 // ─────────────────────────────────────────────────────────────────
 
 export class ContactManager {
@@ -148,25 +218,59 @@ export class ContactManager {
 
   add(contact) {
     if (!(contact instanceof Contact)) throw new PeerPoolError('Expected Contact instance', 'E_CONTACT');
+    if (contact.revoked) throw new PeerPoolError('Contact révoqué — ajout refusé', 'E_REVOKED');
     this.#contacts.set(contact.nodeIdHex(), contact);
     return this;
   }
 
   get(nodeId) {
-    const hex = nodeId instanceof Uint8Array
-      ? Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('')
-      : String(nodeId);
+    const hex = _toHex(nodeId);
     return this.#contacts.get(hex) ?? null;
   }
 
   remove(nodeId) {
-    const hex = nodeId instanceof Uint8Array
-      ? Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('')
-      : String(nodeId);
-    return this.#contacts.delete(hex);
+    return this.#contacts.delete(_toHex(nodeId));
   }
 
-  size() { return this.#contacts.size; }
+  /** Liste tous les contacts (non révoqués par défaut) */
+  list(includeRevoked = false) {
+    return [...this.#contacts.values()].filter(c => includeRevoked || !c.revoked);
+  }
+
+  /** Contacts vérifiés (niveau ≥ minLevel) */
+  getVerified(minLevel = 1) {
+    return this.list().filter(c => c.verificationLevel >= minLevel);
+  }
+
+  /** Contacts favoris */
+  getFavorites() {
+    return this.list().filter(c => c.favorite);
+  }
+
+  /** Recherche par alias ou DID (insensible à la casse) */
+  search(query) {
+    const q = query.toLowerCase();
+    return this.list().filter(c =>
+      c.alias?.toLowerCase().includes(q) ||
+      c.did?.toLowerCase().includes(q)
+    );
+  }
+
+  /** Applique un prédicat */
+  find(fn) {
+    return this.list().find(fn) ?? null;
+  }
+
+  size(includeRevoked = false) {
+    return includeRevoked ? this.#contacts.size : this.list().length;
+  }
+
+  has(nodeId) { return this.#contacts.has(_toHex(nodeId)); }
+}
+
+function _toHex(nodeId) {
+  if (typeof nodeId === 'string') return nodeId;
+  return Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─────────────────────────────────────────────────────────────────
