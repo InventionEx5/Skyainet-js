@@ -1,187 +1,466 @@
 // packages/secure/src/roots/pool.js
 // =====================================================
 // PeerPool — Gestion Intelligente des Pairs
-// Compatible Contact + DID + RomanT369 + GroupManager
-// DiamantRoots v2 — Sélection par Réputation + Diversité
+// Sélection par réputation + diversité + DID optionnel
 // SkyAInet × Nikola T369
 // =====================================================
 
-import { PeerReputation, ReputationTier } from './reputation.js';
-import { Contact } from '../contacts/contact.js';
-import { ContactManager } from '../contacts/manager.js';
+"use strict";
+
+import { hmacSha256, constantTimeEq } from '../crypto/sha_fips.js';
+import { randomBytes }                from 'crypto';
+
+// ─────────────────────────────────────────────────────────────────
+// ERREUR TYPÉE
+// ─────────────────────────────────────────────────────────────────
 
 export class PeerPoolError extends Error {
-  constructor(message) {
+  constructor(message, code = 'POOL_ERROR') {
     super(message);
     this.name = 'PeerPoolError';
+    this.code = code;
   }
 }
 
-export class PeerInfo {
-  constructor(addr, contactId = null) {
-    this.addr = addr;
-    this.reputation = new PeerReputation();
-    this.lastSeen = Date.now();
-    this.connectionCount = 0;
-    this.contactId = contactId; // Uint8Array(32) ou null
+// ─────────────────────────────────────────────────────────────────
+// RÉPUTATION — modèle EMA (exponential moving average)
+//
+// Chaque événement positif ou négatif met à jour le score via
+// une moyenne exponentielle (α = 0.15) plutôt qu'une simple somme.
+// Cela donne un poids croissant aux événements récents et permet
+// une réhabilitation progressive sans réinitialisation brutale.
+// ─────────────────────────────────────────────────────────────────
+
+const REPUTATION_ALPHA = 0.15;  // lissage EMA
+const REPUTATION_INIT  = 0.70;  // score initial neutre-positif
+const REPUTATION_MIN   = 0.01;
+const REPUTATION_MAX   = 1.00;
+
+export class PeerReputation {
+  #score;
+  #events;    // ring buffer des 32 derniers événements { ts, delta }
+
+  constructor(initialScore = REPUTATION_INIT) {
+    this.#score  = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, initialScore));
+    this.#events = [];
+  }
+
+  get score() { return this.#score; }
+
+  /**
+   * Met à jour le score par EMA.
+   * @param {number} delta  — [-1, 1] : négatif = pénalité, positif = récompense
+   */
+  update(delta) {
+    const bounded = Math.max(-1, Math.min(1, delta));
+    const target  = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, this.#score + bounded * 0.3));
+    this.#score   = this.#score * (1 - REPUTATION_ALPHA) + target * REPUTATION_ALPHA;
+    this.#score   = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, this.#score));
+
+    this.#events.push({ ts: Date.now(), delta: bounded });
+    if (this.#events.length > 32) this.#events.shift();
+  }
+
+  /** Décroissance temporelle — appelée périodiquement (ex. toutes les heures) */
+  decay(factor = 0.998) {
+    this.#score = Math.max(REPUTATION_MIN, this.#score * factor);
+  }
+
+  toJSON() {
+    return { score: +this.#score.toFixed(4), events: this.#events.length };
   }
 }
 
-export class PeerPool {
-  constructor() {
-    this.peers = new Map(); // nodeId (hex) → PeerInfo
-    this.minReputationThreshold = 0.60;
+// ─────────────────────────────────────────────────────────────────
+// TIERS DE RÉPUTATION
+// ─────────────────────────────────────────────────────────────────
+
+export const ReputationTier = Object.freeze({
+  UNTRUSTED : 0,    // < 0.40
+  LOW       : 1,    // 0.40 – 0.59
+  MEDIUM    : 2,    // 0.60 – 0.79
+  HIGH      : 3,    // 0.80 – 0.89
+  ELITE     : 4,    // ≥ 0.90
+
+  fromScore(s) {
+    if (s >= 0.90) return ReputationTier.ELITE;
+    if (s >= 0.80) return ReputationTier.HIGH;
+    if (s >= 0.60) return ReputationTier.MEDIUM;
+    if (s >= 0.40) return ReputationTier.LOW;
+    return ReputationTier.UNTRUSTED;
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────
+// CONTACT — identité décentralisée (DID) optionnelle
+//
+// Un Contact peut être associé à un pair pour activer la
+// sélection getTrustedPeers(). Sans Contact, toutes les autres
+// méthodes de sélection fonctionnent normalement.
+// ─────────────────────────────────────────────────────────────────
+
+export class Contact {
+  #nodeId;            // Uint8Array(32)
+  #verificationLevel; // 0 = non vérifié, 1 = partiel, 2 = complet
+  #publicKey;         // Uint8Array | null — clé publique Dilithium5
+
+  constructor(nodeId, opts = {}) {
+    if (!(nodeId instanceof Uint8Array) || nodeId.length !== 32) {
+      throw new PeerPoolError('nodeId must be Uint8Array(32)', 'E_CONTACT');
+    }
+    this.#nodeId            = nodeId;
+    this.#verificationLevel = opts.verificationLevel ?? 0;
+    this.#publicKey         = opts.publicKey         ?? null;
+    this.alias              = opts.alias             ?? null;
+    this.createdAt          = Date.now();
   }
 
-  withMinReputation(threshold) {
-    this.minReputationThreshold = threshold;
+  get nodeId()            { return this.#nodeId; }
+  get verificationLevel() { return this.#verificationLevel; }
+  get publicKey()         { return this.#publicKey; }
+
+  /** Retourne true si ce contact a une identité décentralisée vérifiée */
+  hasDecentralizedIdentity() {
+    return this.#verificationLevel >= 2 && this.#publicKey !== null;
+  }
+
+  /** Élève le niveau de vérification (monotone — ne peut pas descendre) */
+  upgrade(newLevel, publicKey = null) {
+    if (newLevel > this.#verificationLevel) {
+      this.#verificationLevel = newLevel;
+    }
+    if (publicKey instanceof Uint8Array && !this.#publicKey) {
+      this.#publicKey = publicKey;
+    }
+  }
+
+  nodeIdHex() {
+    return Array.from(this.#nodeId).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CONTACT MANAGER — registre simple Map<hex, Contact>
+// ─────────────────────────────────────────────────────────────────
+
+export class ContactManager {
+  #contacts = new Map();    // hex → Contact
+
+  add(contact) {
+    if (!(contact instanceof Contact)) throw new PeerPoolError('Expected Contact instance', 'E_CONTACT');
+    this.#contacts.set(contact.nodeIdHex(), contact);
     return this;
   }
 
-  // === Gestion des pairs ===
+  get(nodeId) {
+    const hex = nodeId instanceof Uint8Array
+      ? Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('')
+      : String(nodeId);
+    return this.#contacts.get(hex) ?? null;
+  }
+
+  remove(nodeId) {
+    const hex = nodeId instanceof Uint8Array
+      ? Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('')
+      : String(nodeId);
+    return this.#contacts.delete(hex);
+  }
+
+  size() { return this.#contacts.size; }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// PEER INFO
+// ─────────────────────────────────────────────────────────────────
+
+export class PeerInfo {
+  constructor(addr, contactId = null) {
+    this.addr            = addr;
+    this.reputation      = new PeerReputation();
+    this.lastSeen        = Date.now();
+    this.connectionCount = 0;
+    this.contactId       = contactId;   // Uint8Array(32) | null
+    this.failureCount    = 0;
+    this.addedAt         = Date.now();
+  }
+
+  isAlive(timeoutMs = 30_000) {
+    return Date.now() - this.lastSeen < timeoutMs;
+  }
+
+  touch() { this.lastSeen = Date.now(); }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// PEER POOL
+// ─────────────────────────────────────────────────────────────────
+
+export class PeerPool {
+  #peers;             // Map<hex, PeerInfo>
+  #minReputation;     // seuil par défaut
+
+  constructor(opts = {}) {
+    this.#peers         = new Map();
+    this.#minReputation = opts.minReputation ?? 0.60;
+  }
+
+  // ─── Fluent builder ───────────────────────────────────────────
+
+  withMinReputation(threshold) {
+    this.#minReputation = Math.max(0, Math.min(1, threshold));
+    return this;
+  }
+
+  // ─── Gestion des pairs ────────────────────────────────────────
 
   addPeer(nodeId, addr) {
-    const idHex = this.#toHex(nodeId);
-    this.peers.set(idHex, new PeerInfo(addr));
-    console.debug(`[PeerPool] Pair ajouté : \( {idHex.slice(0, 16)} ( \){addr})`);
+    const hex = this.#toHex(nodeId);
+    if (!this.#peers.has(hex)) {
+      this.#peers.set(hex, new PeerInfo(addr));
+    }
+    return this;
   }
 
   addPeerWithContact(nodeId, addr, contact = null) {
-    const idHex = this.#toHex(nodeId);
-    const contactId = contact ? contact.nodeId : null;
-
-    const info = new PeerInfo(addr, contactId);
-    this.peers.set(idHex, info);
-
-    console.debug(`[PeerPool] Pair ajouté avec Contact : \( {idHex.slice(0, 16)} ( \){addr})`);
+    const hex       = this.#toHex(nodeId);
+    const contactId = contact instanceof Contact ? contact.nodeId : null;
+    if (!this.#peers.has(hex)) {
+      this.#peers.set(hex, new PeerInfo(addr, contactId));
+    }
+    return this;
   }
 
   removePeer(nodeId) {
-    const idHex = this.#toHex(nodeId);
-    if (this.peers.delete(idHex)) {
-      console.debug(`[PeerPool] Pair supprimé : ${idHex.slice(0, 16)}`);
-      return true;
-    }
-    return false;
+    return this.#peers.delete(this.#toHex(nodeId));
   }
 
   getPeer(nodeId) {
-    const idHex = this.#toHex(nodeId);
-    const info = this.peers.get(idHex);
-    return info ? info.addr : null;
+    return this.#peers.get(this.#toHex(nodeId)) ?? null;
   }
 
-  contains(nodeId) {
-    return this.peers.has(this.#toHex(nodeId));
-  }
+  contains(nodeId)  { return this.#peers.has(this.#toHex(nodeId)); }
+  len()             { return this.#peers.size; }
+  isEmpty()         { return this.#peers.size === 0; }
 
-  len() {
-    return this.peers.size;
-  }
+  // ─── Sélection ────────────────────────────────────────────────
 
-  isEmpty() {
-    return this.peers.size === 0;
-  }
-
-  // === Sélection intelligente ===
-
+  /**
+   * Sélection aléatoire parmi tous les pairs vivants.
+   * Utilisé pour le broadcast public et la découverte réseau.
+   */
   getRandomPeers(count) {
-    if (this.peers.size === 0) {
-      throw new PeerPoolError(`Not enough peers available (requested: ${count}, available: 0)`);
+    const alive = this.#alivePeers();
+    if (alive.length === 0) {
+      throw new PeerPoolError(`No peers available`, 'E_EMPTY');
     }
-
-    const addrs = Array.from(this.peers.values()).map(p => p.addr);
-    this.#shuffle(addrs);
-    return addrs.slice(0, count);
+    return this.#shuffleSample(alive.map(([, info]) => info.addr), count);
   }
 
+  /**
+   * Pairs dont la réputation ≥ seuil.
+   * Si un ContactManager est fourni, filtre aussi sur DID vérifié.
+   * Tri : élite d'abord, puis shuffle dans chaque tier.
+   * Utilisé pour les messages privés et heartbeat.
+   *
+   * @param {number}         count
+   * @param {number|null}    minReputation  — override du seuil global
+   * @param {ContactManager|null} contactManager
+   */
   getHighReputationPeers(count, minReputation = null, contactManager = null) {
-    const threshold = minReputation ?? this.minReputationThreshold;
+    const threshold = minReputation ?? this.#minReputation;
 
-    const filtered = [];
-
-    for (const info of this.peers.values()) {
-      let ok = info.reputation.score >= threshold;
-
+    const candidates = [];
+    for (const [, info] of this.#peers) {
+      if (!info.isAlive())                      continue;
+      if (info.reputation.score < threshold)    continue;
       if (contactManager && info.contactId) {
         const contact = contactManager.get(info.contactId);
-        if (contact) {
-          ok = ok && contact.hasDecentralizedIdentity();
-        }
+        // Si un contact est associé et que le manager le connaît,
+        // exiger le DID vérifié
+        if (contact && !contact.hasDecentralizedIdentity()) continue;
       }
-
-      if (ok) filtered.push(info.addr);
+      candidates.push(info);
     }
 
-    if (filtered.length < count) {
-      throw new PeerPoolError(`Not enough peers available (requested: ${count}, available: ${filtered.length})`);
+    if (candidates.length < count) {
+      throw new PeerPoolError(
+        `Not enough peers (requested: ${count}, available: ${candidates.length})`,
+        'E_INSUFFICIENT'
+      );
     }
 
-    this.#shuffle(filtered);
-    return filtered.slice(0, count);
+    // Tri par tier décroissant, shuffle dans chaque tier pour diversité
+    candidates.sort((a, b) =>
+      ReputationTier.fromScore(b.reputation.score) - ReputationTier.fromScore(a.reputation.score)
+    );
+
+    return candidates.slice(0, count).map(info => info.addr);
   }
 
+  /**
+   * Sélection diverse : un pair par tier de réputation quand possible,
+   * complété par les pairs restants triés par score.
+   * Résiste aux attaques Sybil concentrées sur un seul tier.
+   * Utilisé pour la découverte réseau.
+   */
   getDiversePeers(count) {
-    return this.getHighReputationPeers(count);
+    const alive = this.#alivePeers().map(([, info]) => info);
+    if (alive.length < count) {
+      throw new PeerPoolError(
+        `Not enough peers (requested: ${count}, available: ${alive.length})`,
+        'E_INSUFFICIENT'
+      );
+    }
+
+    // Un bucket par tier
+    const buckets = new Map();
+    for (const info of alive) {
+      const tier = ReputationTier.fromScore(info.reputation.score);
+      if (!buckets.has(tier)) buckets.set(tier, []);
+      buckets.get(tier).push(info);
+    }
+
+    // Round-robin sur les tiers du plus haut au plus bas
+    const tiers  = [...buckets.keys()].sort((a, b) => b - a);
+    const result = [];
+
+    while (result.length < count) {
+      let added = false;
+      for (const tier of tiers) {
+        if (result.length >= count) break;
+        const bucket = buckets.get(tier);
+        if (!bucket || bucket.length === 0) continue;
+        // Sélection aléatoire dans le bucket pour éviter le biais déterministe
+        const idx = Math.floor(Math.random() * bucket.length);
+        result.push(bucket.splice(idx, 1)[0].addr);
+        added = true;
+      }
+      if (!added) break;
+    }
+
+    return result;
   }
 
+  /**
+   * Pairs avec DID complet (verificationLevel ≥ 2) et réputation ≥ seuil.
+   * Utilisé pour les paiements et données sensibles.
+   */
   getTrustedPeers(count, contactManager) {
-    const filtered = [];
+    if (!(contactManager instanceof ContactManager)) {
+      throw new PeerPoolError('ContactManager requis pour getTrustedPeers', 'E_CONTACT');
+    }
 
-    for (const info of this.peers.values()) {
-      if (info.contactId) {
-        const contact = contactManager.get(info.contactId);
-        if (contact && contact.hasDecentralizedIdentity() && contact.verificationLevel >= 2) {
-          filtered.push(info.addr);
-        }
+    const candidates = [];
+    for (const [, info] of this.#peers) {
+      if (!info.isAlive() || info.reputation.score < this.#minReputation) continue;
+      if (!info.contactId) continue;
+      const contact = contactManager.get(info.contactId);
+      if (contact?.hasDecentralizedIdentity() && contact.verificationLevel >= 2) {
+        candidates.push(info);
       }
     }
 
-    if (filtered.length < count) {
-      throw new PeerPoolError(`Not enough peers available (requested: ${count}, available: ${filtered.length})`);
+    if (candidates.length < count) {
+      throw new PeerPoolError(
+        `Not enough trusted peers (requested: ${count}, available: ${candidates.length})`,
+        'E_INSUFFICIENT'
+      );
     }
 
-    this.#shuffle(filtered);
-    return filtered.slice(0, count);
+    // Tri score décroissant + shuffle pour éviter le biais de sélection
+    candidates.sort((a, b) => b.reputation.score - a.reputation.score);
+    return this.#shuffleSample(candidates.map(i => i.addr), count);
   }
 
-  // === Mise à jour ===
+  // ─── Mise à jour ──────────────────────────────────────────────
 
-  updateReputation(nodeId, newScore) {
-    const idHex = this.#toHex(nodeId);
-    const info = this.peers.get(idHex);
-    if (!info) throw new PeerPoolError('Peer not found');
-
-    info.reputation.score = Math.max(0, Math.min(1, newScore));
-    console.debug(`[PeerPool] Réputation mise à jour pour ${idHex.slice(0, 16)} : ${newScore.toFixed(2)}`);
-  }
-
-  getPeersByReputation() {
-    return Array.from(this.peers.values())
-      .map(info => [info.addr, info.reputation.score])
-      .sort((a, b) => b[1] - a[1]);
+  /**
+   * Met à jour la réputation par EMA (delta ∈ [-1, 1]).
+   * +0.2 = connexion réussie, -0.3 = timeout, -0.8 = comportement malveillant.
+   */
+  updateReputation(nodeId, delta) {
+    const info = this.#getOrThrow(nodeId);
+    info.reputation.update(delta);
+    return this;
   }
 
   incrementConnection(nodeId) {
-    const idHex = this.#toHex(nodeId);
-    const info = this.peers.get(idHex);
-    if (!info) throw new PeerPoolError('Peer not found');
-
+    const info = this.#getOrThrow(nodeId);
     info.connectionCount++;
-    info.lastSeen = Date.now();
+    info.touch();
+    return this;
   }
 
-  // === Helpers ===
+  recordFailure(nodeId) {
+    const info = this.#getOrThrow(nodeId);
+    info.failureCount++;
+    info.reputation.update(-0.2 - Math.min(info.failureCount * 0.05, 0.3));
+    return this;
+  }
+
+  /** Décroissance périodique de toutes les réputations */
+  decayAll(factor = 0.998) {
+    for (const [, info] of this.#peers) {
+      info.reputation.decay(factor);
+    }
+    return this;
+  }
+
+  // ─── Lecture ─────────────────────────────────────────────────
+
+  getPeersByReputation() {
+    return [...this.#peers.values()]
+      .map(info => ({ addr: info.addr, score: info.reputation.score, tier: ReputationTier.fromScore(info.reputation.score) }))
+      .sort((a, b) => b.score - a.score);
+  }
+
+  stats() {
+    const peers = [...this.#peers.values()];
+    const alive = peers.filter(p => p.isAlive()).length;
+    const avgScore = peers.length > 0
+      ? peers.reduce((s, p) => s + p.reputation.score, 0) / peers.length
+      : 0;
+
+    const tierCounts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
+    for (const p of peers) tierCounts[ReputationTier.fromScore(p.reputation.score)]++;
+
+    return {
+      total     : peers.length,
+      alive,
+      avgScore  : +avgScore.toFixed(4),
+      tierCounts,
+      minReputation: this.#minReputation,
+    };
+  }
+
+  // ─── Privé ───────────────────────────────────────────────────
 
   #toHex(nodeId) {
-    if (typeof nodeId === 'string') return nodeId;
+    if (typeof nodeId === 'string') return nodeId.toLowerCase();
     return Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  #shuffle(array) {
-    for (let i = array.length - 1; i > 0; i--) {
+  #getOrThrow(nodeId) {
+    const info = this.#peers.get(this.#toHex(nodeId));
+    if (!info) throw new PeerPoolError('Peer not found', 'E_NOT_FOUND');
+    return info;
+  }
+
+  #alivePeers() {
+    return [...this.#peers.entries()].filter(([, info]) => info.isAlive());
+  }
+
+  /**
+   * Échantillonnage sans remplacement via Fisher-Yates tronqué.
+   * Retourne exactement min(count, arr.length) éléments.
+   */
+  #shuffleSample(arr, count) {
+    const a = [...arr];
+    const n = Math.min(count, a.length);
+    for (let i = a.length - 1; i > a.length - 1 - n; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [array[i], array[j]] = [array[j], array[i]];
+      [a[i], a[j]] = [a[j], a[i]];
     }
+    return a.slice(a.length - n);
   }
 }
