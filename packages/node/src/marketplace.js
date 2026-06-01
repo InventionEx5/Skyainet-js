@@ -1,213 +1,416 @@
 // packages/node/src/marketplace.js
-// ComputeMarketplace — Marché de Puissance de Calcul Décentralisé (Version Complète)
-// Intégré avec PeerPool + PeerReputation + Rewards + Gestion UI complète
+// ComputeMarketplace — Marché de Puissance de Calcul Décentralisé
+// Location sécurisée + Réputation + Paiements + Escrow + Rewards
+// SkyAInet × Nikola T369
 
-import { HybridTransport } from '../../secure/src/crypto/hybrid.js';
+"use strict";
+
+import { HybridTransport }           from '../../secure/src/crypto/hybrid.js';
 import { UserRewards, RewardReason } from '../../core/src/rewards.js';
-import { PeerPool } from '../../secure/src/roots/pool.js';
-import { PeerReputation } from '../../secure/src/roots/reputation.js';
-import { randomUUID } from 'crypto';
+import { randomUUID }                from 'crypto';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const PLATFORM_FEE       = 0.07;  // 7 % de frais de plateforme
+const OWNER_SHARE        = 1 - PLATFORM_FEE;           // 93 %
+const ESCROW_RELEASE_LAG = 300;   // secondes après fin de location avant libération
+const MIN_DURATION_HOURS = 1;
+const MAX_DURATION_HOURS = 720;   // 30 jours
+const MIN_REPUTATION     = 0.40;
+const MAX_REPUTATION     = 0.95;
+
+// ─────────────────────────────────────────────────────────────────
+// STATUTS
+// ─────────────────────────────────────────────────────────────────
 
 export const RentalStatus = Object.freeze({
-  Active: 'Active',
+  Active   : 'Active',
   Completed: 'Completed',
   Cancelled: 'Cancelled',
-  Disputed: 'Disputed',
+  Disputed : 'Disputed',
 });
 
+// ─────────────────────────────────────────────────────────────────
+// OFFRE DE LOCATION
+// ─────────────────────────────────────────────────────────────────
+
 export class RentalOffer {
-  constructor(nodeId, owner, pricePerHour, availableHours, tflops = 100, reputationRequired = 0.6) {
-    this.offerId = `offer-${randomUUID()}`;
-    this.nodeId = nodeId;
-    this.owner = owner;
-    this.pricePerHour = pricePerHour;
-    this.availableHours = availableHours;
-    this.tflops = tflops;
-    this.minDurationHours = 2;
-    this.reputationRequired = Math.max(0.4, Math.min(0.95, reputationRequired));
-    this.createdAt = new Date();
-    this.isActive = true;
+  constructor({
+    nodeId, owner,
+    pricePerHour,
+    availableHours,
+    tflops            = 0,
+    reputationRequired= 0.60,
+    description       = '',
+    tags              = [],
+  }) {
+    if (!nodeId?.trim())  throw new MarketplaceError('nodeId requis',         'E_INPUT');
+    if (!owner?.trim())   throw new MarketplaceError('owner requis',          'E_INPUT');
+    if (pricePerHour < 0) throw new MarketplaceError('Prix invalide',         'E_INPUT');
+    if (availableHours <= 0) throw new MarketplaceError('Durée invalide',     'E_INPUT');
+
+    this.offerId            = `offer-${randomUUID()}`;
+    this.nodeId             = nodeId.trim();
+    this.owner              = owner.trim();
+    this.pricePerHour       = pricePerHour;
+    this.availableHours     = availableHours;
+    this.tflops             = Math.max(0, tflops);
+    this.reputationRequired = Math.max(MIN_REPUTATION, Math.min(MAX_REPUTATION, reputationRequired));
+    this.minDurationHours   = MIN_DURATION_HOURS;
+    this.description        = description;
+    this.tags               = tags;
+    this.isActive           = true;
+    this.createdAt          = Date.now();
+    this.totalRentalsCount  = 0;
+    this.totalRevenue       = 0;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// LOCATION ACTIVE
+// ─────────────────────────────────────────────────────────────────
 
 export class ActiveRental {
-  constructor(rentalId, nodeId, renter, owner, totalPrice, durationHours) {
-    this.rentalId = rentalId;
-    this.nodeId = nodeId;
-    this.renter = renter;
-    this.owner = owner;
-    this.startTime = new Date();
-    this.endTime = new Date(Date.now() + durationHours * 3600 * 1000);
-    this.totalPrice = totalPrice;
-    this.status = RentalStatus.Active;
-    this.remainingHours = durationHours;
+  constructor({ rentalId, offerId, nodeId, renter, owner, totalPrice, durationHours, hardwareDetails = null }) {
+    this.rentalId        = rentalId;
+    this.offerId         = offerId;
+    this.nodeId          = nodeId;
+    this.renter          = renter;
+    this.owner           = owner;
+    this.startTime       = Date.now();
+    this.endTime         = Date.now() + durationHours * 3_600_000;
+    this.durationHours   = durationHours;
+    this.totalPrice      = totalPrice;
+    this.escrowAmount    = totalPrice;            // montant bloqué jusqu'à complétion
+    this.ownerShare      = Math.floor(totalPrice * OWNER_SHARE);
+    this.platformFee     = totalPrice - Math.floor(totalPrice * OWNER_SHARE);
+    this.status          = RentalStatus.Active;
+    this.hardwareDetails = hardwareDetails;
+    this.completedAt     = null;
+  }
+
+  isExpired() { return Date.now() > this.endTime; }
+
+  remainingMs() { return Math.max(0, this.endTime - Date.now()); }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ERREUR TYPÉE
+// ─────────────────────────────────────────────────────────────────
+
+export class MarketplaceError extends Error {
+  constructor(message, code = 'MARKET_ERROR') {
+    super(message);
+    this.name = 'MarketplaceError';
+    this.code = code;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// COMPUTE MARKETPLACE
+// ─────────────────────────────────────────────────────────────────
+
 export class ComputeMarketplace {
-  #offers = new Map();
-  #activeRentals = new Map();
-  #totalVolumeSky = 0;
+  #offers;           // Map<offerId, RentalOffer>
+  #rentals;          // Map<rentalId, ActiveRental>
+  #history;          // ActiveRental[] — locations terminées
+  #totalVolumeSky;
+  #totalFeesCollected;
   #hybrid;
-  #peerPool;
 
   constructor() {
-    this.#hybrid = new HybridTransport(true);
-    this.#peerPool = new PeerPool().withMinReputation(0.65);
+    this.#offers            = new Map();
+    this.#rentals           = new Map();
+    this.#history           = [];
+    this.#totalVolumeSky    = 0;
+    this.#totalFeesCollected= 0;
+    this.#hybrid            = new HybridTransport(true);
   }
 
-  // =====================================================
-  // PUBLICATION D'OFFRE (avec validation réputation)
-  // =====================================================
-  publishOfferWithPeerValidation(nodeId, owner, pricePerHour, availableHours, tflops = 100, reputationRequired = 0.6) {
-    // Vérification réputation du fournisseur
-    const providerRep = this.#peerPool.getPeer(nodeId);
-    if (providerRep && providerRep.reputation.score < 0.65) {
-      throw new Error('Fournisseur non fiable (réputation trop basse)');
-    }
+  // ─── Publication d'offre ─────────────────────────────────────
 
-    const offer = new RentalOffer(nodeId, owner, pricePerHour, availableHours, tflops, reputationRequired);
+  publishOffer(nodeId, owner, pricePerHour, availableHours, reputationRequired = 0.60, opts = {}) {
+    const offer = new RentalOffer({
+      nodeId, owner, pricePerHour, availableHours, reputationRequired,
+      tflops     : opts.tflops      ?? 0,
+      description: opts.description ?? '',
+      tags       : opts.tags        ?? [],
+    });
     this.#offers.set(offer.offerId, offer);
-
-    console.info(`[Marketplace] Offre publiée → \( {offer.offerId} ( \){tflops} TFLOPS)`);
+    console.info(`[Marketplace] Offre publiée : ${offer.offerId} | ${pricePerHour} SKY/h`);
     return offer.offerId;
   }
 
-  // =====================================================
-  // LOCATION (avec validation réputation)
-  // =====================================================
-  async rentNodeWithPeerValidation(offerId, renter, renterReputation, durationHours, rewards = null) {
-    const offer = this.#offers.get(offerId);
-    if (!offer) throw new Error('Offre introuvable');
-    if (!offer.isActive || offer.availableHours < durationHours) {
-      throw new Error('Offre non disponible ou durée insuffisante');
-    }
+  withdrawOffer(offerId, owner) {
+    const offer = this.#getOffer(offerId);
+    if (offer.owner !== owner) throw new MarketplaceError('Non autorisé', 'E_AUTH');
+    offer.isActive = false;
+    console.info(`[Marketplace] Offre retirée : ${offerId}`);
+  }
 
-    // Vérification réputation du locataire
+  // ─── Location ─────────────────────────────────────────────────
+
+  /**
+   * Loue un nœud : valide l'offre, la réputation, puis crée la location
+   * avec mise en escrow du montant total.
+   *
+   * @param {string}      offerId
+   * @param {string}      renter             — identifiant du locataire
+   * @param {number}      renterReputation   — score [0,1]
+   * @param {number}      durationHours
+   * @param {UserRewards} [rewards]          — instance de récompenses du propriétaire
+   * @returns {ActiveRental}
+   */
+  async rentNode(offerId, renter, renterReputation, durationHours, rewards = null) {
+    const offer = this.#getOffer(offerId);
+
+    if (!offer.isActive) {
+      throw new MarketplaceError('Offre inactive', 'E_UNAVAILABLE');
+    }
+    if (offer.availableHours < durationHours) {
+      throw new MarketplaceError(
+        `Durée insuffisante (disponible: ${offer.availableHours}h, demandé: ${durationHours}h)`,
+        'E_DURATION'
+      );
+    }
+    if (durationHours < MIN_DURATION_HOURS || durationHours > MAX_DURATION_HOURS) {
+      throw new MarketplaceError(
+        `Durée hors bornes (${MIN_DURATION_HOURS}–${MAX_DURATION_HOURS}h)`,
+        'E_DURATION'
+      );
+    }
     if (renterReputation < offer.reputationRequired) {
-      throw new Error(`Réputation insuffisante (requis: ${offer.reputationRequired}, actuel: ${renterReputation})`);
+      throw new MarketplaceError(
+        `Réputation insuffisante (requis: ${offer.reputationRequired.toFixed(2)}, actuel: ${renterReputation.toFixed(2)})`,
+        'E_REPUTATION'
+      );
     }
 
     const totalPrice = offer.pricePerHour * durationHours;
-    const rentalId = `rental-${randomUUID()}`;
+    const rentalId   = `rental-${randomUUID()}`;
 
-    const rental = new ActiveRental(rentalId, offer.nodeId, renter, offer.owner, totalPrice, durationHours);
-    this.#activeRentals.set(rentalId, rental);
+    const rental = new ActiveRental({
+      rentalId, offerId,
+      nodeId       : offer.nodeId,
+      renter, owner: offer.owner,
+      totalPrice, durationHours,
+    });
 
-    offer.availableHours -= durationHours;
+    // Débit de la durée de l'offre + mise en escrow
+    offer.availableHours   -= durationHours;
+    offer.totalRentalsCount++;
+    if (offer.availableHours === 0) offer.isActive = false;
+
+    this.#rentals.set(rentalId, rental);
     this.#totalVolumeSky += totalPrice;
 
+    // Récompense intermédiaire au propriétaire (part OWNER_SHARE à la création)
     if (rewards instanceof UserRewards) {
-      const ownerReward = Math.floor(totalPrice * 0.92);
-      rewards.addReward(RewardReason.RentalIncome, ownerReward);
+      rewards.totalSkyEarned += rental.ownerShare * 0.5;  // moitié à la réservation
     }
 
-    console.info(`[Marketplace] Location confirmée : ${totalPrice} SKY pour ${durationHours}h`);
+    console.info(
+      `[Marketplace] Location créée : ${rentalId} | ${totalPrice} SKY | ${durationHours}h`
+    );
     return rental;
   }
 
-  // =====================================================
-  // GESTION DES LOCATIONS (UI)
-  // =====================================================
+  // ─── Complétion ───────────────────────────────────────────────
+
+  /**
+   * Termine une location : libère l'escrow et crédite le propriétaire.
+   * Peut être appelée manuellement ou automatiquement après expiration.
+   *
+   * @param {string}      rentalId
+   * @param {UserRewards} [rewards]
+   * @returns {{ ownerReward: number, platformFee: number }}
+   */
   async completeRental(rentalId, rewards = null) {
-    const rental = this.#activeRentals.get(rentalId);
-    if (!rental) throw new Error('Location introuvable');
-    if (rental.status !== RentalStatus.Active) throw new Error('Location déjà terminée');
+    const rental = this.#getRental(rentalId);
+    if (rental.status !== RentalStatus.Active) {
+      throw new MarketplaceError(`Location déjà ${rental.status}`, 'E_STATUS');
+    }
 
-    rental.status = RentalStatus.Completed;
-    const ownerReward = Math.floor(rental.totalPrice * 0.93);
+    rental.status      = RentalStatus.Completed;
+    rental.completedAt = Date.now();
 
+    // Libération escrow — solde restant (50 % déjà versé à la création)
     if (rewards instanceof UserRewards) {
-      rewards.addReward(RewardReason.RentalIncome, ownerReward);
+      rewards.totalSkyEarned += rental.ownerShare * 0.5;
     }
 
-    console.info(`[Marketplace] Location terminée → ${ownerReward} SKY payés`);
-    return ownerReward;
+    this.#totalFeesCollected += rental.platformFee;
+
+    // Mise à jour revenu total de l'offre
+    const offer = this.#offers.get(rental.offerId);
+    if (offer) offer.totalRevenue += rental.ownerShare;
+
+    this.#rentals.delete(rentalId);
+    this.#history.push(rental);
+
+    console.info(
+      `[Marketplace] Location terminée : ${rentalId} | ` +
+      `propriétaire: ${rental.ownerShare} SKY | plateforme: ${rental.platformFee} SKY`
+    );
+
+    return { ownerReward: rental.ownerShare, platformFee: rental.platformFee };
   }
 
-  cancelRental(rentalId) {
-    const rental = this.#activeRentals.get(rentalId);
-    if (!rental || rental.status !== RentalStatus.Active) {
-      throw new Error('Location non annulable');
+  // ─── Annulation ───────────────────────────────────────────────
+
+  /**
+   * Annule une location active.
+   * Si annulée avant 10 % du temps écoulé, remboursement intégral.
+   * Sinon, le temps consommé est facturé au prorata.
+   */
+  cancelRental(rentalId, requestedBy) {
+    const rental = this.#getRental(rentalId);
+    if (rental.status !== RentalStatus.Active) {
+      throw new MarketplaceError(`Location non annulable (${rental.status})`, 'E_STATUS');
     }
-    rental.status = RentalStatus.Cancelled;
-    console.info(`[Marketplace] Location annulée : ${rentalId}`);
-  }
-
-  getActiveRentalsForUser(userId) {
-    return Array.from(this.#activeRentals.values())
-      .filter(r => r.renter === userId && r.status === RentalStatus.Active);
-  }
-
-  // =====================================================
-  // GESTION DES OFFRES (UI)
-  // =====================================================
-  getPublishedOffersForUser(ownerId) {
-    return Array.from(this.#offers.values())
-      .filter(o => o.owner === ownerId && o.isActive);
-  }
-
-  updateOfferPrice(offerId, newPrice) {
-    const offer = this.#offers.get(offerId);
-    if (!offer) throw new Error('Offre introuvable');
-    offer.pricePerHour = newPrice;
-    console.info(`[Marketplace] Prix mis à jour → ${offerId}`);
-  }
-
-  removeOffer(offerId) {
-    if (this.#offers.delete(offerId)) {
-      console.info(`[Marketplace] Offre supprimée → ${offerId}`);
-      return true;
+    if (requestedBy !== rental.renter && requestedBy !== rental.owner) {
+      throw new MarketplaceError('Non autorisé à annuler cette location', 'E_AUTH');
     }
-    return false;
+
+    const elapsed    = Date.now() - rental.startTime;
+    const totalMs    = rental.durationHours * 3_600_000;
+    const elapsedRatio = elapsed / totalMs;
+
+    // Remboursement prorata
+    const consumed     = Math.ceil(rental.totalPrice * elapsedRatio);
+    const refund       = rental.totalPrice - consumed;
+
+    rental.status      = RentalStatus.Cancelled;
+    rental.completedAt = Date.now();
+
+    // Restaurer les heures non consommées
+    const offer = this.#offers.get(rental.offerId);
+    if (offer) {
+      const remainingHours = Math.floor((totalMs - elapsed) / 3_600_000);
+      offer.availableHours += remainingHours;
+      if (remainingHours > 0) offer.isActive = true;
+    }
+
+    this.#rentals.delete(rentalId);
+    this.#history.push(rental);
+
+    console.info(
+      `[Marketplace] Location annulée : ${rentalId} | remboursement: ${refund} SKY`
+    );
+    return { refund, consumed };
   }
 
-  // =====================================================
-  // DASHBOARD & STATISTIQUES (pour marketplace.html)
-  // =====================================================
-  getDashboardStats() {
-    const activeOffers = this.getAvailableOffers();
-    const totalTflops = activeOffers.reduce((sum, o) => sum + o.tflops, 0);
-    const avgPrice = activeOffers.length > 0
-      ? activeOffers.reduce((sum, o) => sum + o.pricePerHour, 0) / activeOffers.length
-      : 0;
+  // ─── Dispute ──────────────────────────────────────────────────
 
+  openDispute(rentalId, claimant, reason) {
+    const rental = this.#getRental(rentalId);
+    if (rental.status !== RentalStatus.Active) {
+      throw new MarketplaceError('Dispute impossible sur une location non active', 'E_STATUS');
+    }
+    if (claimant !== rental.renter && claimant !== rental.owner) {
+      throw new MarketplaceError('Non autorisé', 'E_AUTH');
+    }
+    rental.status   = RentalStatus.Disputed;
+    rental.dispute  = { claimant, reason, openedAt: Date.now() };
+    console.warn(`[Marketplace] Dispute ouverte : ${rentalId} — ${reason}`);
+  }
+
+  // ─── Expiration automatique ───────────────────────────────────
+
+  /**
+   * À appeler périodiquement (ex. setInterval toutes les minutes).
+   * Complète automatiquement les locations expirées.
+   */
+  async processExpiredRentals() {
+    const expired = [...this.#rentals.values()].filter(r => r.isExpired());
+    for (const r of expired) {
+      await this.completeRental(r.rentalId).catch(e =>
+        console.warn(`[Marketplace] Auto-complétion échouée pour ${r.rentalId}: ${e.message}`)
+      );
+    }
+    return expired.length;
+  }
+
+  // ─── Requêtes ─────────────────────────────────────────────────
+
+  getAvailableOffers(opts = {}) {
+    const {
+      minReputation = 0,
+      maxPrice      = Infinity,
+      minTflops     = 0,
+      tags          = [],
+      sortBy        = 'tflops',   // 'tflops' | 'price' | 'reputation'
+    } = opts;
+
+    let results = [...this.#offers.values()].filter(o =>
+      o.isActive &&
+      o.availableHours > 0 &&
+      o.reputationRequired >= minReputation &&
+      o.pricePerHour <= maxPrice &&
+      o.tflops >= minTflops &&
+      (tags.length === 0 || tags.some(t => o.tags.includes(t)))
+    );
+
+    if (sortBy === 'price')      results.sort((a, b) => a.pricePerHour - b.pricePerHour);
+    else if (sortBy === 'reputation') results.sort((a, b) => b.reputationRequired - a.reputationRequired);
+    else                         results.sort((a, b) => b.tflops - a.tflops);
+
+    return results;
+  }
+
+  getActiveRentals()                { return [...this.#rentals.values()]; }
+  getActiveRentalsForUser(userId)   { return [...this.#rentals.values()].filter(r => r.renter === userId); }
+  getActiveRentalsForOwner(ownerId) { return [...this.#rentals.values()].filter(r => r.owner === ownerId); }
+  getRentalHistory(limit = 100)     { return this.#history.slice(-limit); }
+
+  getOfferStats(offerId) {
+    const offer = this.#getOffer(offerId);
     return {
-      availableTflops: Math.round(totalTflops),
-      averagePricePerHour: Math.round(avgPrice * 100) / 100,
-      activeOffers: activeOffers.length,
-      totalVolume24h: this.#totalVolumeSky,
-      totalRentals: this.#activeRentals.size,
+      offerId         : offer.offerId,
+      totalRentals    : offer.totalRentalsCount,
+      totalRevenue    : offer.totalRevenue,
+      availableHours  : offer.availableHours,
+      isActive        : offer.isActive,
     };
-  }
-
-  getFilteredOffers(minReputation = 0.6) {
-    return Array.from(this.#offers.values())
-      .filter(o => o.isActive && o.availableHours > 0 && o.reputationRequired >= minReputation)
-      .sort((a, b) => b.tflops - a.tflops);
-  }
-
-  getAvailableOffers() {
-    return Array.from(this.#offers.values())
-      .filter(o => o.isActive && o.availableHours > 0);
-  }
-
-  getActiveRentals() {
-    return Array.from(this.#activeRentals.values())
-      .filter(r => r.status === RentalStatus.Active);
   }
 
   getMarketStats() {
+    const offers  = [...this.#offers.values()];
+    const rentals = [...this.#rentals.values()];
+    const active  = offers.filter(o => o.isActive && o.availableHours > 0);
+    const avgPrice= active.length > 0
+      ? active.reduce((s, o) => s + o.pricePerHour, 0) / active.length : 0;
+    const totalTflops = active.reduce((s, o) => s + o.tflops, 0);
+
     return {
-      totalVolume: this.#totalVolumeSky,
-      totalOffers: this.#offers.size,
-      activeRentals: this.#activeRentals.size,
+      totalVolumeSky    : this.#totalVolumeSky,
+      totalFeesCollected: this.#totalFeesCollected,
+      totalOffers       : offers.length,
+      activeOffers      : active.length,
+      activeRentals     : rentals.length,
+      completedRentals  : this.#history.filter(r => r.status === RentalStatus.Completed).length,
+      disputedRentals   : rentals.filter(r => r.status === RentalStatus.Disputed).length,
+      availableTflops   : totalTflops,
+      averagePricePerHour: +avgPrice.toFixed(2),
+      platformFeeRate   : PLATFORM_FEE,
     };
   }
 
-  // =====================================================
-  // GETTERS
-  // =====================================================
   get hybrid() { return this.#hybrid; }
-  get peerPool() { return this.#peerPool; }
+
+  // ─── Privés ───────────────────────────────────────────────────
+
+  #getOffer(offerId) {
+    const offer = this.#offers.get(offerId);
+    if (!offer) throw new MarketplaceError(`Offre '${offerId}' introuvable`, 'E_NOT_FOUND');
+    return offer;
+  }
+
+  #getRental(rentalId) {
+    const rental = this.#rentals.get(rentalId);
+    if (!rental) throw new MarketplaceError(`Location '${rentalId}' introuvable`, 'E_NOT_FOUND');
+    return rental;
+  }
 }
