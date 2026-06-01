@@ -1,4 +1,4 @@
-// packages/secure/src/metrics/red_team.js
+// packages/secure/src/device/red_team.js
 // =====================================================
 // Red Team Classifier — Métriques de Discrétion Avancées
 // SkyAInet × Nikola T369
