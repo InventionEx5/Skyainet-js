@@ -1,7 +1,7 @@
 // packages/node/src/server.js
-// SkyNode HTTP Server — Production Grade
+// SkyNode HTTP Server — Production Grade (Version Finale Propre)
 // Conversion complète du serveur Rust + JWT réel + sliding window + métriques avancées
-// Compatible 100% avec SkyNode (skynode.js) + toutes les routes originales
+// Compatible 100% avec SkyNode (skynode.js) — Plus de stubs intelligents
 
 import express from 'express';
 import cors from 'cors';
@@ -14,7 +14,7 @@ import { SkyNode } from './skynode.js';
 import { createManager, Channel } from '../../secure/src/roots/epoch_rekey.js';
 
 // =====================================================
-// RATE LIMITER — Sliding Window (anti-burst optimal)
+// RATE LIMITER — Sliding Window
 // =====================================================
 class RateLimiter {
   constructor(maxRequests = 60, windowSecs = 60) {
@@ -49,7 +49,7 @@ class RateLimiter {
 }
 
 // =====================================================
-// MÉTRIQUES SERVEUR — Fenêtre glissante + req/min
+// MÉTRIQUES SERVEUR
 // =====================================================
 class ServerMetrics {
   constructor() {
@@ -91,7 +91,7 @@ class ServerMetrics {
 }
 
 // =====================================================
-// PAGINATION — Identique au Rust (max 100 items/page)
+// PAGINATION
 // =====================================================
 class PaginationParams {
   constructor(page = 1, perPage = 20) {
@@ -135,9 +135,9 @@ function apiError(res, status, error, message) {
 // =====================================================
 const state = {
   node: (() => {
-    const n = new SkyNode();           // ← Vrai SkyNode avec toute la logique réelle
+    const n = new SkyNode();   // ← Vrai SkyNode avec vraie logique
 
-    // Shims de compatibilité (champs attendus par les routes)
+    // Aliases légers de compatibilité
     n.id = n.id;
     n.is_running = n.isRunning;
     n.wisdom_score = n.wisdomScore;
@@ -148,15 +148,11 @@ const state = {
     n.evolution_cycles = n.evolutionCycles;
     n.last_dream_cycle = n.lastDreamCycle;
 
-    // =====================================================
-    // VRAIES LOGIQUES (plus de stubs)
-    // =====================================================
+    // Vraies méthodes (binding réel)
     n.run_real_dream_cycle = n.runDreamCycle.bind(n);
     n.generate_with_ai = n.generateWithAI.bind(n);
     n.send_message = n.sendMessage.bind(n);
     n.enable_external_ai = n.enableExternalAI.bind(n);
-
-    // Stockage (vrai)
     n.upload_file = n.uploadFile.bind(n);
     n.list_files = n.listFiles.bind(n);
     n.download_file = n.downloadFile.bind(n);
@@ -345,7 +341,8 @@ app.post('/api/storage/upload', async (req, res) => {
   }
   try {
     const id = await state.node.upload_file(name, data);
-    const file = (await state.node.list_files()).find(f => f.id === id);
+    const files = await state.node.list_files();
+    const file = files.find(f => f.id === id);
     res.status(201).json({ success: true, file_id: id, name, size_bytes: file?.size_bytes || 0 });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
@@ -450,4 +447,4 @@ const server = app.listen(PORT, () => {
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws) => handle_ws(ws));
 
-console.log('🚀 Migration Rust → JavaScript terminée — VRAIE LOGIQUE SkyNode activée.');
+console.log('🚀 Migration Rust → JavaScript terminée — Version Propre (sans stubs)');
