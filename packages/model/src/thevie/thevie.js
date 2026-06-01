@@ -1,551 +1,635 @@
 // packages/model/src/thevie/thevie.js
 // =====================================================
-// THEVIE — Version Finale Unifiée + Multi-Backend (Production Ready)
-// SkyAInet - Intelligence Artificielle Vivante de Nouvelle Génération
-// Intègre : T369Inference + SkyNode + DreamCycle + LoraEvo + EvolutionManager + Agentic
+// THEVIE — Orchestrateur Unifié Production Ready
+// T369Inference + SkyNode + DreamCycle + LoraEvo
+// + EvolutionManager + MeshIn + CollectivIn + InDream
+// SkyAInet × Thevie × Nikola T369
 // =====================================================
 
-import { DreamCycle } from './consciousness/dream_cycle.js';
-import { LoraEvo } from './lora_evolution.js';
-import { ThevieAgent } from './agent.js';
+"use strict";
+
+import { DreamCycle }       from './dream_cycle.js';
+import { LoraEvo }          from './lora_evolution.js';
 import { EvolutionManager } from '../../node/src/evolution_manager.js';
-import { SkyNode } from '../../node/src/skynode.js';
-import { Dilithium5Signer } from '../../secure/src/crypto/dilithium.js';
+import { SkyNode }          from '../../node/src/skynode.js';
+import { MeshIn }           from '../../t369-inference/src/meshin.js';
+import { CollectivIn }      from '../../t369-inference/src/collectivin.js';
+import { InDream }          from '../../t369-inference/src/indream.js';
+import { InSelf }           from '../../t369-inference/src/inself.js';
+import { InAware }          from '../../t369-inference/src/inaware.js';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const WISDOM_FLOOR         = 0.60;
+const WISDOM_FLASH_THRESH  = 0.78;  // seuil déclenchant le flash gematria
+const REBALANCE_INTERVAL   = 3_600_000;   // 1 h
+const MAINTENANCE_EVERY    = 100;         // requêtes
+const SENTINEL_EVERY       = 30;
+const COMPRESS_EVERY       = 50;
+const DIVERSITY_EVERY      = 120;
+const NEUROGENESIS_EVERY   = 180;
+const SELF_IMPROVE_EVERY   = 40;
+const DREAM_TRIGGER_EVERY  = 75;
+
+// ─────────────────────────────────────────────────────────────────
+// ROUTEUR D'EXPERT — basé sur mots-clés + historique d'exposition
+// ─────────────────────────────────────────────────────────────────
+
+const EXPERT_SPECS = [
+  { name: 'code',     keys: ['code','rust','python','javascript','bug','function','debug','algorithm','compile'] },
+  { name: 'analysis', keys: ['analyse','analyser','compare','données','data','statistique','rapport','tendance'] },
+  { name: 'science',  keys: ['science','physique','chimie','biologie','neural','recherche','hypothèse'] },
+  { name: 'ethics',   keys: ['éthique','ethique','moral','valeur','justice','liberté','droits','philosophi'] },
+  { name: 'finance',  keys: ['finance','argent','investissement','marché','économie','crypto','budget'] },
+  { name: 'text',     keys: [] },  // défaut
+];
+
+class ExpertRouter {
+  #exposures = new Map();
+
+  select(content) {
+    const lower = content.toLowerCase();
+    let   best  = 'text';
+    let   bestScore = 0;
+
+    for (const spec of EXPERT_SPECS) {
+      const hits  = spec.keys.filter(k => lower.includes(k)).length;
+      const score = hits + (this.#exposures.get(spec.name) ?? 0) * 0.08;
+      if (score > bestScore) { bestScore = score; best = spec.name; }
+    }
+    this.#exposures.set(best, (this.#exposures.get(best) ?? 0) + 1);
+    return best;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EXPERTS SPÉCIALISÉS — prompt engineering différencié
+// Chaque expert construit un prompt orienté et retourne un score
+// de qualité estimé basé sur la longueur et la densité de la réponse.
+// ─────────────────────────────────────────────────────────────────
+
+class BaseExpert {
+  #name; #callCount = 0;
+
+  constructor(name) { this.#name = name; }
+
+  buildPrompt(content) { return content; }
+
+  score(text) {
+    const words  = (text ?? '').split(/\s+/).filter(Boolean).length;
+    const unique = new Set((text ?? '').toLowerCase().match(/\b\w+\b/g) ?? []).size;
+    return Math.min(0.99, 0.5 + (words / 200) * 0.3 + (unique / words || 0) * 0.2);
+  }
+
+  process(query, responseText) {
+    this.#callCount++;
+    return {
+      content   : responseText,
+      quality   : this.score(responseText),
+      expertUsed: this.#name,
+      callCount : this.#callCount,
+    };
+  }
+
+  get name() { return this.#name; }
+}
+
+const EXPERT_PROMPTS = {
+  code    : c => `Tu es un expert en programmation. Réponds avec précision et exemples de code.\n\n${c}`,
+  analysis: c => `Tu es un analyste rigoureux. Structuré en points clairs, avec données et raisonnement.\n\n${c}`,
+  science : c => `Tu es un scientifique. Réponds avec rigueur, sources et mécanismes explicites.\n\n${c}`,
+  ethics  : c => `Tu es un philosophe éthicien. Explore les dimensions morales avec nuance.\n\n${c}`,
+  finance : c => `Tu es un expert financier. Réponds avec chiffres, risques et recommandations.\n\n${c}`,
+  text    : c => `Tu es Thevie, assistant bienveillant de SkyAInet. Réponds clairement et utilement.\n\n${c}`,
+};
+
+// ─────────────────────────────────────────────────────────────────
+// SENTINEL — Détection et auto-guérison
+// ─────────────────────────────────────────────────────────────────
+
+class Sentinel {
+  detect(wisdomScore, engineReady) {
+    const issues = [];
+    if (wisdomScore < WISDOM_FLOOR)  issues.push('wisdom_low');
+    if (!engineReady)                issues.push('engine_not_ready');
+    return issues;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// MÉMOIRE LOCALE — interaction buffer + replay
+// ─────────────────────────────────────────────────────────────────
+
+class LocalMemory {
+  #buffer = [];      // { query, response, ts }
+  #maxSize;
+
+  constructor(maxSize = 200) { this.#maxSize = maxSize; }
+
+  store(query, response) {
+    this.#buffer.push({ query, response, ts: Date.now() });
+    if (this.#buffer.length > this.#maxSize) {
+      this.#buffer.splice(0, this.#buffer.length - this.#maxSize);
+    }
+  }
+
+  /** Retourne les N dernières interactions formatées pour le contexte */
+  recentContext(n = 3) {
+    return this.#buffer
+      .slice(-n)
+      .map(e => `Q: ${(e.query?.content ?? '').slice(0, 60)} | R: ${(e.response?.content ?? '').slice(0, 60)}`)
+      .join('\n');
+  }
+
+  get size() { return this.#buffer.length; }
+
+  prune(target = 150) {
+    if (this.#buffer.length > target) {
+      this.#buffer.splice(0, this.#buffer.length - target);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// THEVIE — Orchestrateur principal
+// ═══════════════════════════════════════════════════════════════
 
 export class Thevie {
+
+  // Subsystèmes
+  #mesh;          // MeshIn
+  #collective;    // CollectivIn
+  #inDream;       // InDream
+  #inSelf;        // InSelf
+  #inAware;       // InAware
+  #router;        // ExpertRouter
+  #experts;       // Map<string, BaseExpert>
+  #memory;        // LocalMemory
+  #sentinel;      // Sentinel
+  #dreamCycle;    // DreamCycle
+  #loraEvo;       // LoraEvo
+  #node;          // SkyNode
+  #evolutionManager; // EvolutionManager
+
+  // Conteurs et état
+  #totalQueries;
+  #recursiveCycles;
+  #metaConsciousness;
+  #governanceScore;
+  #isRunning;
+  #lastRebalance;
+
+  // Connexions optionnelles
+  #treasuryConnection;
+  #federatedSync;
+
   constructor() {
-    this.mesh = new NeuralMesh();
-    this.router = new IntelligentRouter();
-    this.experts = new Map();
-    this.collective = new CollectiveConsciousness();
-    this.memory = new LocalMemory();
-    this.evolution = new EvolutionEngine();
-    this.dreamCycle = new DreamCycle();
-    this.currentNeuronId = null;
-    this.totalQueriesProcessed = 0;
+    // ── Subsystèmes T369 ────────────────────────────────────
+    this.#mesh       = new MeshIn(64);
+    this.#collective = new CollectivIn(8);
+    this.#inDream    = new InDream();
+    this.#inSelf     = new InSelf();
+    this.#inAware    = new InAware();
+    this.#router     = new ExpertRouter();
+    this.#memory     = new LocalMemory(200);
+    this.#sentinel   = new Sentinel();
 
-    this.metaConsciousnessLevel = 0.48;
-    this.recursiveImprovementCycles = 0;
-    this.emergentGovernanceScore = 0.68;
-    this.isRunning = false;
-    this.lastRebalanceCheck = 0;
+    // ── Experts ─────────────────────────────────────────────
+    this.#experts = new Map(
+      Object.keys(EXPERT_PROMPTS).map(name => [name, new BaseExpert(name)])
+    );
 
-    this.inferenceEngine = new T369InferenceEngine();
-    this.sentinel = new Sentinel();
-    this.agent = new ThevieAgent({ loraEvo: new LoraEvo(), dreamCycle: this.dreamCycle });
-    this.evolutionManager = new EvolutionManager(new SkyNode());
-    this.evolutionManager.injectLoRATrainer(this.agent.loraEvo);
+    // ── Dream + Evolution ───────────────────────────────────
+    this.#dreamCycle = new DreamCycle({
+      dreamFrequency: DREAM_TRIGGER_EVERY,
+      wisdomBoost   : 0.032,
+      topPercent    : 0.25,
+    });
 
-    this.userRewards = { rateResponse: () => {}, claimDailyReward: () => [0, 0] };
-    this.treasuryConnection = null;
-    this.federatedSync = null;
+    this.#loraEvo = new LoraEvo();
 
-    this._initExperts();
-    this._initSkyNode();
+    this.#node = new SkyNode();
+
+    this.#evolutionManager = new EvolutionManager(this.#node, {
+      qualityThreshold    : 0.82,
+      trainingIntervalDays: 3,
+    });
+
+    // ── État ─────────────────────────────────────────────────
+    this.#totalQueries     = 0;
+    this.#recursiveCycles  = 0;
+    this.#metaConsciousness= 0.48;
+    this.#governanceScore  = 0.68;
+    this.#isRunning        = false;
+    this.#lastRebalance    = 0;
+    this.#treasuryConnection = null;
+    this.#federatedSync      = null;
+
+    // Initialisation moteur (async, non bloquant)
+    this.#node.initEngine().catch(e =>
+      console.warn('[Thevie] initEngine:', e.message)
+    );
+
+    // Connecter LoraEvo au moteur T369 une fois prêt
+    this.#waitForEngine().then(() => {
+      const engine = this.#node._engine ?? this.#node.engine;
+      if (engine) {
+        this.#loraEvo.connectToInference(engine);
+        this.#dreamCycle.injectModel(engine.model ?? engine);
+        console.info('[Thevie] LoraEvo + DreamCycle connectés au moteur T369');
+      }
+    }).catch(() => {});
   }
 
-  _initExperts() {
-    this.experts.set('text', new TextExpert());
-    this.experts.set('code', new CodeExpert());
-    this.experts.set('analysis', new AnalysisExpert());
-    this.experts.set('science', new ScienceExpert());
-    this.experts.set('ethics', new EthicsExpert());
-    this.experts.set('finance', new FinanceExpert());
-  }
-
-  async _initSkyNode() {
-    this.node = new SkyNode();
-
-    // === CRÉATION AUTOMATISÉE DU MINI NODE ===
-    try {
-      await this.node.initEngine();
-      console.info('[Thevie] Mini Node démarré automatiquement (Zip Memory activé)');
-    } catch (e) {
-      console.warn('[Thevie] Impossible de démarrer le Mini Node :', e.message);
+  async #waitForEngine(maxWaitMs = 30_000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxWaitMs) {
+      const engine = this.#node._engine ?? this.#node.engine;
+      if (engine?.isReady) return engine;
+      await new Promise(r => setTimeout(r, 500));
     }
-
-    // === DÉMARRAGE DU THEVIE FLASH SCHEDULER ===
-    console.info('[Thevie] Thevie Flash Scheduler démarré (intervalle: 45s)');
   }
 
-  // =====================================================
-  // FLUX PRINCIPAL COMPLET
-  // =====================================================
+  // ═══════════════════════════════════════════════════════════
+  // FLUX PRINCIPAL
+  // ═══════════════════════════════════════════════════════════
+
   async processQuery(query) {
-    this.totalQueriesProcessed++;
+    this.#totalQueries++;
+    const q = typeof query === 'string' ? { content: query } : query;
 
-    await this.triggerFlashIfNeeded();
+    // ── Tâches périodiques ───────────────────────────────────
+    await this.#runPeriodicTasks();
 
-    if (this.collective.globalWisdom < 0.65) {
-      await this.coordinateGlobalFlash();
-    }
+    // ── Routage expert ────────────────────────────────────────
+    const expertName = this.#router.select(q.content);
+    const expert     = this.#experts.get(expertName);
 
-    if (this.totalQueriesProcessed % 50 === 0) {
-      await this.compressNetworkData();
-    }
+    // ── Génération T369 avec prompt expert ───────────────────
+    const prompt = EXPERT_PROMPTS[expertName](
+      this.#buildContextualPrompt(q.content)
+    );
 
-    const reward = this.calculateNodeRewards();
-    if (reward > 0) console.debug(`[Thevie] Récompense PoUW calculée : ${reward} (bonus payant inclus)`);
-
-    this.node.recordActivity?.(query.content.length);
-    this.node.updateOverallScore?.();
-
-    if (this.totalQueriesProcessed % 100 === 0) await this.maintenance();
-    if (this.totalQueriesProcessed % 30 === 0) await this.runSentinelCheck();
-
-    const neuronId = this.ensureCurrentNeuron();
-    const neuron = this.mesh.getNeuronMut(neuronId);
-
-    const reflection = this.memory.replayAndReflect?.(query) || '';
-    const collectiveWisdom = this.collective.getAvgWisdom();
-    const expertName = this.router.selectExpert(query, neuron.personality, collectiveWisdom);
-
-    const expert = this.experts.get(expertName);
-    let response = expert.process(query);
-    response.expertUsed = expertName;
-
-    // === Génération avec T369Inference ===
+    let responseText;
     try {
-      const result = await this.inferenceEngine.generate(query.content, 512);
-      response.content = result.text;
+      const result = await this.#node.generateWithAI({
+        prompt,
+        ai          : 'thevie',
+        maxTokens   : 512,
+        useSpeculative: false,
+      });
+      responseText = result.text ?? result;
     } catch (e) {
-      console.warn('[Thevie] Erreur T369Inference :', e);
-      response.content = `Réponse par défaut pour : ${query.content}`;
+      console.warn('[Thevie] generateWithAI:', e.message);
+      responseText = `[Moteur non prêt] ${q.content}`;
     }
 
-    expert.levelUp();
+    const response = expert.process(q, responseText);
 
-    // Circulation + Hebbian
-    const peers = this.mesh.getTopConnected(neuronId, 4);
-    const lesson = {
-      query: query.content,
-      response: response.content,
-      quality: response.quality,
-      expertUsed: expertName,
-      timestamp: Date.now()
-    };
-
-    for (const peerId of peers) {
-      this.mesh.circulateLesson(neuronId, lesson);
-      this.mesh.hebbianUpdate(neuronId, peerId, response.quality > 0.82);
+    // ── Apprentissage mesh hebbian ────────────────────────────
+    // Sélectionne les neurones actifs les plus sages et renforce leur sagesse
+    // proportionnellement à la qualité de la réponse.
+    const topIds = this.#getTopNeuronIds(6);
+    if (topIds.length > 0) {
+      this.#mesh.learn(topIds, response.quality * 0.15);
     }
 
-    // Backpropagation de sagesse
-    const wisdomDelta = response.quality - 0.75;
-    this.collective.backpropagateWisdom(this.mesh, wisdomDelta);
+    // ── Mise à jour collective ────────────────────────────────
+    // propagateWisdom + massiveFuse pour mettre à jour globalWisdom
+    this.#collective.propagateWisdom(response.quality);
+    this.#collective.massiveFuse();
 
-    // Évolution
-    this.evolution.evolvePersonality(neuron.personality, response.quality);
-    this.collective.updateFromMesh(this.mesh);
+    // ── Conscience collective sur le vecteur caché ────────────
+    // (in-place sur le wisdomVector du mesh, position = queryCount)
+    const wVec = this.#mesh.wisdomVector(32);
+    this.#collective.collectiveReason(wVec, this.#totalQueries % 64, 0);
 
-    this.memory.storeInteraction(query, response);
-    neuron.incrementActivity();
-    this.mesh.persist?.();
+    // ── Mémoire ───────────────────────────────────────────────
+    this.#memory.store(q, response);
 
-    // === MODE AGENTIQUE AUTOMATIQUE ===
-    if (this.shouldUseAgenticMode(query.content)) {
-      console.info('[Thevie] Requête complexe détectée → Activation du mode Agentic');
+    // ── Mode agentique ────────────────────────────────────────
+    if (this.#shouldUseAgenticMode(q.content)) {
+      console.info('[Thevie] Mode agentique activé');
       try {
-        const agentResult = await this.runAgenticTask(query.content);
-        response.content = agentResult;
-        response.quality = 0.94;
-        response.expertUsed = 'agentic';
+        const agentResponse = await this.#runAgenticTask(q.content);
+        response.content   = agentResponse;
+        response.quality   = Math.min(0.99, response.quality + 0.06);
+        response.expertUsed= 'agentic';
       } catch (e) {
-        console.warn('[Thevie] Échec du mode Agentic :', e);
+        console.warn('[Thevie] Mode agentique échoué:', e.message);
       }
     }
 
-    // Dream Cycle
-    if (this.dreamCycle.shouldTrigger(this.totalQueriesProcessed)) {
-      await this.dreamCycle.runDreamCycle(this.mesh, this.collective, this.evolution);
+    // ── Dream Cycle ───────────────────────────────────────────
+    if (this.#dreamCycle.shouldTrigger(this.#totalQueries)) {
+      await this.#dreamCycle.runDreamCycle(this.#mesh, this.#collective, this.#inDream);
     }
 
-    // Diversity Injection
-    if (this.totalQueriesProcessed % 120 === 0) {
-      this.collective.diversityInjection?.(this.mesh, 0.13);
-    }
-
-    // Neurogenesis
-    if (this.totalQueriesProcessed % 180 === 0) {
-      this.mesh.neurogenesis?.(this.collective);
-    }
-
-    // Auto-amélioration récursive
-    if (this.totalQueriesProcessed % 40 === 0) {
-      await this.recursiveSelfImprovement();
-    }
-
-    if (neuron.activityScore % 8 === 0) {
-      this.mesh.runMaintenance?.();
-    }
-
-    if (this.federatedSync) {
-      await this.federatedSync.syncWithPeers?.();
+    // ── Auto-amélioration récursive ───────────────────────────
+    if (this.#totalQueries % SELF_IMPROVE_EVERY === 0) {
+      await this.#recursiveSelfImprovement();
     }
 
     return response;
   }
 
-  // =====================================================
-  // AUTO-AMÉLIORATION RÉCURSIVE
-  // =====================================================
-  async recursiveSelfImprovement() {
-    this.recursiveImprovementCycles++;
+  // ─────────────────────────────────────────────────────────────
+  // Tâches périodiques regroupées
+  // ─────────────────────────────────────────────────────────────
 
-    const weaknesses = this.analyzeSelfWeaknesses();
-    if (weaknesses.length > 0) {
-      this.createEmergentMechanism(weaknesses);
+  async #runPeriodicTasks() {
+    const q = this.#totalQueries;
+
+    // Flash Gematria si sagesse basse
+    if (this.#collective.globalWisdom < WISDOM_FLASH_THRESH) {
+      await this.#node.generateWithAI({
+        prompt: 'Activation Flash Gematria — renforcement sagesse collective',
+        ai: 'thevie', maxTokens: 32, useSpeculative: false,
+      }).catch(() => {});
     }
 
-    this.metaConsciousnessLevel = Math.min(0.99, this.metaConsciousnessLevel + 0.018);
-    this.emergentGovernanceScore = Math.min(0.97, this.emergentGovernanceScore + 0.015);
+    if (q % COMPRESS_EVERY   === 0) await this.#node.replicateFiles?.().catch(() => {});
+    if (q % SENTINEL_EVERY   === 0) await this.#runSentinelCheck();
+    if (q % MAINTENANCE_EVERY=== 0) await this.#maintenance();
+    if (q % DIVERSITY_EVERY  === 0) this.#collective.diversityInjection(0.13);
+    if (q % NEUROGENESIS_EVERY=== 0 && this.#mesh._count < 512) {
+      this.#mesh.addNeuron(0.55 + Math.random() * 0.1);
+    }
+
+    // Vérification rebalance (throttled)
+    const now = Date.now();
+    if (now - this.#lastRebalance > REBALANCE_INTERVAL) {
+      this.#lastRebalance = now;
+      this.#rebalance();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Prompt contextuel — injecte les N dernières interactions
+  // ─────────────────────────────────────────────────────────────
+
+  #buildContextualPrompt(content) {
+    const ctx = this.#memory.recentContext(3);
+    return ctx.length > 0
+      ? `[Contexte récent]\n${ctx}\n\n[Requête]\n${content}`
+      : content;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Détection mode agentique
+  // Déclenché sur les requêtes multi-étapes complexes
+  // ─────────────────────────────────────────────────────────────
+
+  #shouldUseAgenticMode(content) {
+    const lower = content.toLowerCase();
+    const agenticKeywords = [
+      'plan', 'étape', 'étapes', 'automatise', 'pipeline',
+      'plusieurs', 'séquence', 'workflow', 'tâche complexe',
+      'génère et', 'analyse puis', 'puis envoie',
+    ];
+    return agenticKeywords.some(k => lower.includes(k));
+  }
+
+  /**
+   * Mode agentique : décompose la tâche en sous-requêtes
+   * et les enchaîne via le moteur T369.
+   */
+  async #runAgenticTask(content) {
+    // Étape 1 : planification
+    const planResult = await this.#node.generateWithAI({
+      prompt    : `Décompose en 3 étapes concrètes et numérotées : ${content}`,
+      ai        : 'thevie',
+      maxTokens : 128,
+      useSpeculative: false,
+    });
+    const plan = planResult.text ?? '';
+
+    // Étape 2 : exécution de chaque étape
+    const steps = plan.split(/\d+\.\s+/).filter(s => s.trim().length > 10);
+    const results = [];
+    for (const step of steps.slice(0, 3)) {
+      const r = await this.#node.generateWithAI({
+        prompt    : `Exécute cette étape de façon précise : ${step}`,
+        ai        : 'thevie',
+        maxTokens : 256,
+        useSpeculative: false,
+      }).catch(() => ({ text: '' }));
+      if (r.text) results.push(r.text);
+    }
+
+    // Étape 3 : synthèse
+    const synthesis = await this.#node.generateWithAI({
+      prompt    : `Synthétise en une réponse cohérente :\n${results.join('\n')}`,
+      ai        : 'thevie',
+      maxTokens : 256,
+      useSpeculative: false,
+    }).catch(() => ({ text: results.join(' ') }));
+
+    return synthesis.text ?? results.join('\n');
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Auto-amélioration récursive
+  // ─────────────────────────────────────────────────────────────
+
+  async #recursiveSelfImprovement() {
+    this.#recursiveCycles++;
+
+    // Analyse des faiblesses basée sur les métriques réelles
+    const [activeNeurons, avgWisdom] = this.#mesh.getStats();
+    const issues = [];
+    if (this.#collective.globalWisdom < 0.82) issues.push('wisdom');
+    if (activeNeurons < 32)                   issues.push('connectivity');
+    if (this.#metaConsciousness < 0.70)       issues.push('meta');
+    if (this.#governanceScore < 0.75)         issues.push('governance');
+
+    for (const issue of issues) {
+      switch (issue) {
+        case 'wisdom':
+          this.#collective.propagateWisdom(0.9);
+          this.#collective.massiveFuse();
+          break;
+        case 'connectivity':
+          for (let i = 0; i < 3; i++) this.#mesh.addNeuron(0.6);
+          break;
+        case 'meta':
+          this.#metaConsciousness = Math.min(0.99, this.#metaConsciousness + 0.04);
+          break;
+        case 'governance':
+          this.#governanceScore = Math.min(0.97, this.#governanceScore + 0.03);
+          break;
+      }
+    }
+
+    // Boost résiduel
+    this.#metaConsciousness = Math.min(0.99, this.#metaConsciousness + 0.018);
+    this.#governanceScore   = Math.min(0.97, this.#governanceScore   + 0.015);
+
+    // Entraînement LoRA si scheduleTraining le juge nécessaire
+    if (this.#evolutionManager.shouldRunTraining()) {
+      this.#evolutionManager.runTraditionalTraining().catch(e =>
+        console.warn('[Thevie] Training background:', e.message)
+      );
+    }
 
     console.info(
-      `🌀 Thevie v2.6 - Cycle d’auto-amélioration #${this.recursiveImprovementCycles} | Méta-conscience: ${this.metaConsciousnessLevel.toFixed(2)} | Gouvernance: ${this.emergentGovernanceScore.toFixed(2)}`
+      `[Thevie] Auto-amélioration #${this.#recursiveCycles}` +
+      ` | méta: ${this.#metaConsciousness.toFixed(2)}` +
+      ` | gouvernance: ${this.#governanceScore.toFixed(2)}` +
+      ` | sagesse: ${this.#collective.globalWisdom.toFixed(2)}`
     );
   }
 
-  analyzeSelfWeaknesses() {
-    const weaknesses = [];
-    if (this.collective.globalWisdom < 0.82) weaknesses.push("Sagesse collective insuffisante");
-    if ((this.mesh.getMeshStats?.().totalSynapses || 0) < 60) weaknesses.push("Connectivité insuffisante");
-    if (this.metaConsciousnessLevel < 0.70) weaknesses.push("Méta-conscience limitée");
-    if (this.emergentGovernanceScore < 0.75) weaknesses.push("Gouvernance émergente faible");
-    return weaknesses;
-  }
+  // ─────────────────────────────────────────────────────────────
+  // Sentinel + maintenance
+  // ─────────────────────────────────────────────────────────────
 
-  createEmergentMechanism(weaknesses) {
-    for (const weakness of weaknesses) {
-      if (weakness.includes("Sagesse collective")) {
-        this.collective.globalWisdom += 0.032;
-        console.info('[Thevie] Mécanisme émergent : + Sagesse collective');
-      } else if (weakness.includes("Connectivité")) {
-        this.mesh.runMaintenance?.();
-        this.mesh.neurogenesis?.(this.collective);
-        console.info('[Thevie] Mécanisme émergent : Neurogenesis + Maintenance');
-      } else if (weakness.includes("Méta-conscience")) {
-        this.metaConsciousnessLevel += 0.04;
-        console.info('[Thevie] Mécanisme émergent : + Méta-conscience');
-      } else if (weakness.includes("Gouvernance")) {
-        this.emergentGovernanceScore += 0.035;
-        console.info('[Thevie] Mécanisme émergent : + Gouvernance');
+  async #runSentinelCheck() {
+    const status = this.#node.getStatus();
+    const issues = this.#sentinel.detect(
+      this.#collective.globalWisdom,
+      status.engineReady,
+    );
+
+    for (const issue of issues) {
+      if (issue === 'wisdom_low') {
+        this.#collective.diversityInjection(0.15);
+        this.#collective.massiveFuse();
+      }
+      if (issue === 'engine_not_ready') {
+        await this.#node.initEngine().catch(() => {});
       }
     }
   }
 
-  // =====================================================
-  // ORCHESTRATION AVANCÉE
-  // =====================================================
-  async checkAndTriggerRebalance() {
-    const now = Date.now();
-    if (now - this.lastRebalanceCheck < 3_600_000) return;
-    this.lastRebalanceCheck = now;
-
-    const stableRatio = 0.73;
-    if (stableRatio < 0.65 || stableRatio > 0.85) {
-      console.info(`[Thevie] Rebalance déclenqué (ratio: ${stableRatio.toFixed(2)})`);
-      if (this.treasuryConnection) {
-        // this.treasuryConnection.triggerRebalance()
-      }
-    }
-  }
-
-  async sendEthicalScoreOnchain(nodeId, score) {
-    if (this.treasuryConnection) {
-      // this.treasuryConnection.recordEthicalScore(nodeId, score)
-    }
-  }
-
-  connectTreasury(treasury) {
-    this.treasuryConnection = treasury;
-    console.info('[Thevie] Treasury connecté avec succès');
-  }
-
-  // =====================================================
-  // MÉTHODES UTILITAIRES
-  // =====================================================
-  ensureCurrentNeuron() {
-    if (this.currentNeuronId && this.mesh.getNeuron(this.currentNeuronId)) {
-      return this.currentNeuronId;
-    }
-
-    const newNeuron = {
-      id: Date.now(),
-      activityScore: 0,
-      personality: this.collective.getAveragePersonality(),
-      memory: new LocalMemory(),
-      birthTime: Date.now(),
-      replicationCount: 0,
-      lastActivity: Date.now(),
-      expertsCompetence: new Map()
-    };
-
-    const id = this.mesh.addNeuron(newNeuron);
-    this.currentNeuronId = id;
-    return id;
-  }
-
-  async startBackgroundTasks() {
-    if (this.isRunning) return;
-    this.isRunning = true;
-
-    console.info('🚀 Thevie v2.6 initialisé avec succès');
-  }
-
-  getSystemStats() {
-    const meshStats = this.mesh.getMeshStats?.() || { totalNeurons: 0, totalSynapses: 0 };
-    return {
-      neurons: meshStats.totalNeurons,
-      synapses: meshStats.totalSynapses,
-      avgWisdom: this.collective.getAvgWisdom(),
-      totalExpertCompetence: Array.from(this.experts.values()).reduce((sum, e) => sum + (e.competence?.() || 0), 0),
-      queriesProcessed: this.totalQueriesProcessed,
-      dreamCycles: this.dreamCycle.cyclesCompleted,
-      metaConsciousness: this.metaConsciousnessLevel,
-      recursiveCycles: this.recursiveImprovementCycles
-    };
-  }
-
-  // =====================================================
-  // MÉTHODES DE GESTION DU NŒUD (Phase 1 + Phase 2)
-  // =====================================================
-  async triggerFlashIfNeeded() {
-    if (this.collective.globalWisdom < 0.78) {
-      await this.node.triggerFlashGematria?.();
-      console.info(`[Thevie] Flash Gematria déclenché automatiquement (sagesse collective: ${this.collective.globalWisdom.toFixed(2)})`);
-    }
-  }
-
-  async sleepNode() {
-    await this.node.sleep?.();
-    console.debug('[Thevie] Nœud mis en veille intelligente');
-  }
-
-  async wakeNode() {
-    await this.node.wake?.();
-    console.debug('[Thevie] Nœud réveillé');
-  }
-
-  nodeHealth() {
-    const baseReport = this.node.nodeHealth?.() || '';
-    const wisdom = this.collective.globalWisdom;
-    const meta = this.metaConsciousnessLevel;
-
-    return `${baseReport}\n\n[Supervision Thevie]\nSagesse Collective : ${wisdom.toFixed(2)}\nMéta-conscience : ${meta.toFixed(2)}\nÉtat global : ${this.systemHealthCheck() ? '✅ Sain' : '⚠️ À surveiller'}`;
-  }
-
-  async coordinateGlobalFlash() {
-    await this.node.coordinateGlobalFlash?.();
-    console.info('[Thevie] Flash Gematria global coordonné');
-  }
-
-  // =====================================================
-  // PHASE 4 — ZIP MEMORY + OPTIMISATION RÉSEAU
-  // =====================================================
-  async enableLowPowerMode() {
-    await this.node.enterLowPowerMode?.();
-  }
-
-  async disableLowPowerMode() {
-    await this.node.exitLowPowerMode?.();
-  }
-
-  async compressNetworkData() {
-    await this.node.compressInactiveData?.();
-    console.info('[Thevie] Compression réseau déclenchée');
-  }
-
-  async getNetworkCompressionStats() {
-    return this.node.getCompressionStats?.() || null;
-  }
-
-  setZipMemoryEnabled(enabled) {
-    this.node.setZipMemory?.(enabled);
-  }
-
-  // =====================================================
-  // PHASE 5 — MODÈLE ÉCONOMIQUE (Gratuit / Payant)
-  // =====================================================
-  canUpgradeNode() {
-    return this.node.canUpgrade?.() ?? false;
-  }
-
-  async upgradeMyNode(level) {
-    return this.node.upgradeToPaid?.(level) ?? { success: false };
-  }
-
-  getNodeDashboard() {
-    const node = this.node;
-    const tier = node.metadata?.isPaid ? 'PRO' : 'FREE';
-
-    return `════════════════════════════════════════════
-📊 DASHBOARD NŒUD THEVIE
-════════════════════════════════════════════
-Type          : ${node.metadata?.nodeType ?? 'Mini'}
-Tier          : ${tier}
-Peer ID       : ${node.metadata?.peerId ?? 'N/A'}
-Réputation    : ${(node.metadata?.reputationScore ?? 0).toFixed(2)}
-Stockage      : ${(node.totalBytesStored || 0) / 1_000_000_000} Go / ${node.getStorageLimitGb?.() ?? 5} Go
-Messages      : ${node.totalMessagesProcessed || 0}
-Flash Gematria: ${node.lastFlashGematria ? '✅' : '❌'}
-Zip Memory    : ${node.metadata?.zipMemoryEnabled ? '✅' : '❌'}
-════════════════════════════════════════════`;
-  }
-
-  calculateNodeRewards() {
-    const base = this.node.pouwEngine?.calculateNodeReward?.(this.node.metadata?.id) ?? 0;
-    const bonus = this.node.calculatePaidBonus?.() ?? 1.0;
-    return Math.floor(base * bonus);
-  }
-
-  // =====================================================
-  // PHASE 6 — FINALISATION & POLISSAGE
-  // =====================================================
-  fullStatusReport() {
-    return `\( {this.nodeHealth()}\n\n \){this.getNodeDashboard()}\n\nSagesse Collective: ${this.collective.globalWisdom.toFixed(2)} | Méta-conscience: ${this.metaConsciousnessLevel.toFixed(2)}`;
-  }
-
-  async maintenance() {
-    await this.compressNetworkData();
-    if (this.memory.replayBuffer?.length > 200) this.memory.replayBuffer.length = 150;
+  async #maintenance() {
+    this.#memory.prune(150);
+    await this.#node.replicateFiles?.().catch(() => {});
     console.debug('[Thevie] Maintenance terminée');
   }
 
-  systemHealthCheck() {
-    return this.collective.globalWisdom > 0.60 &&
-           (this.node.metadata?.reputationScore ?? 0) > 0.50 &&
-           this.node.state === 'Active';
-  }
-
-  async startFlashScheduler() {
-    console.info('[Thevie] Flash Scheduler démarré (intervalle 45s)');
-  }
-
-  // =====================================================
-  // CRÉATION DE NŒUD PAR L'UTILISATEUR
-  // =====================================================
-  async createUserNode(desiredType, simulatePayment = false) {
-    const isPaidRequired = ['Full', 'Validator'].includes(desiredType);
-    if (isPaidRequired && !simulatePayment) {
-      return { error: 'Ce type de nœud nécessite un abonnement payant.' };
+  #rebalance() {
+    const wisdom = this.#collective.globalWisdom;
+    if (wisdom < 0.65 || wisdom > 0.95) {
+      this.#collective.diversityInjection(0.10);
     }
-
-    const subscription = desiredType === 'Mini' ? 'Free' : desiredType === 'Light' ? 'Pro' : 'Validator';
-
-    const newNode = new SkyNode();
-    newNode.metadata = { ...newNode.metadata, zipMemoryEnabled: true, nodeType: desiredType };
-
-    await newNode.initEngine?.();
-
-    return {
-      node: newNode,
-      peerId: newNode.id,
-      nodeType: desiredType,
-      isPaid: subscription !== 'Free',
-      storageLimitGb: newNode.getStorageLimitGb?.() || 5,
-      monthlyPriceEur: subscription === 'Free' ? 0 : 4.99,
-      message: subscription === 'Free'
-        ? '✅ Mini Node créé avec succès (gratuit). Zip Memory activé.'
-        : `✅ Nœud ${desiredType} créé avec succès ! Abonnement ${subscription} activé.`
-    };
   }
 
-  getMyQrConnection() {
-    return this.node.generateQrConnectionData?.() || 'QR non disponible';
-  }
+  // ─────────────────────────────────────────────────────────────
+  // Utilitaires
+  // ─────────────────────────────────────────────────────────────
 
-  getBootstrapNodes() {
-    return this.node.getBootstrapNodes?.() || [];
-  }
-
-  async restartFlashScheduler(newIntervalSeconds = 45) {
-    console.info(`[Thevie] Flash Scheduler redémarré avec intervalle de ${newIntervalSeconds}s`);
-  }
-
-  // =====================================================
-  // DÉTECTION SENTINEL PAR THEVIE
-  // =====================================================
-  async runSentinelCheck() {
-    const issues = this.sentinel.detectIssues(
-      this.collective.globalWisdom,
-      this.node.metadata?.reputationScore || 0.5,
-      this.node.state === 'Active'
-    );
-
-    if (issues.length > 0) {
-      this.sentinel.triggerBasicHealing(issues);
-      if (issues.includes('Sagesse collective trop basse')) await this.triggerFlashIfNeeded();
-      if (issues.includes('Nœud inactif')) await this.wakeNode();
+  /** Retourne les IDs des N neurones actifs les plus sages */
+  #getTopNeuronIds(n) {
+    const pairs = [];
+    for (let i = 0; i < this.#mesh._count; i++) {
+      if (this.#mesh._active[i]) pairs.push([i, this.#mesh._wisdom[i]]);
     }
+    pairs.sort((a, b) => b[1] - a[1]);
+    return pairs.slice(0, n).map(([id]) => id);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // API PUBLIQUE
+  // ═══════════════════════════════════════════════════════════
+
+  async startBackgroundTasks() {
+    if (this.#isRunning) return;
+    this.#isRunning = true;
+    console.info('[Thevie] Démarré ✅');
+  }
+
+  connectTreasury(treasury) {
+    this.#treasuryConnection = treasury;
+    console.info('[Thevie] Treasury connecté');
+  }
+
+  connectFederatedSync(sync) {
+    this.#federatedSync = sync;
+    console.info('[Thevie] FederatedSync connecté');
+  }
+
+  /** Injecte une leçon directement dans SkyNode + EvolutionManager */
+  async injectLesson(lesson) {
+    await this.#node.injectLesson(lesson);
+    await this.#evolutionManager.runDreamCycle();
+  }
+
+  /** Pousse une leçon depuis un pair fédéré */
+  async pushLessonFromNode(lesson, nodeReputation = 0.7) {
+    if (this.#federatedSync) {
+      await this.#federatedSync.receivePushedLesson?.(lesson, nodeReputation).catch(() => {});
+    }
+    await this.injectLesson(lesson);
+    this.#metaConsciousness = Math.min(0.98, this.#metaConsciousness + 0.012);
   }
 
   async onNodeConnected(nodeReputation, dreamContribution, pouwScore) {
-    if (this.federatedSync) {
-      await this.federatedSync.onNodeConnected(nodeReputation, dreamContribution, pouwScore);
+    if (this.#federatedSync) {
+      await this.#federatedSync.onNodeConnected?.(nodeReputation, dreamContribution, pouwScore).catch(() => {});
     }
-    this.metaConsciousnessLevel = Math.min(0.98, this.metaConsciousnessLevel + 0.012);
-    console.info('[Thevie] Nœud connecté → Évolution accélérée activée');
+    this.#metaConsciousness = Math.min(0.98, this.#metaConsciousness + 0.012);
+    console.info('[Thevie] Nœud pair connecté');
   }
 
-  async pushLessonFromNode(lesson, nodeReputation, dreamContribution, pouwScore) {
-    if (this.federatedSync) {
-      await this.federatedSync.receivePushedLesson(lesson, nodeReputation, dreamContribution, pouwScore);
-    }
-  }
-
-  async requestLessonsOnTopic(topic, minQuality = 0.7) {
-    if (this.federatedSync) {
-      return this.federatedSync.requestSpecificLessons(topic, minQuality);
-    }
-    return [];
-  }
-
-  // =====================================================
-  // RÉCOMPENSES UTILISATEUR
-  // =====================================================
   async rateLastResponse(rating) {
-    this.userRewards.rateResponse?.(rating);
+    // Rating [0,1] → contribution LoRA si engine disponible
+    if (rating >= 0.8) {
+      const last = this.#memory.recentContext(1);
+      if (last) await this.#node.injectLesson(last).catch(() => {});
+    }
   }
 
-  async claimDailyReward() {
-    return this.userRewards.claimDailyReward?.() || [0, 0];
-  }
-}
+  claimRewards()     { return this.#node.claimRewards(); }
+  getRewardsStats()  { return this.#node.getRewardsStats(); }
 
-// =====================================================
-// STUBS (pour que le fichier soit exécutable immédiatement)
-// =====================================================
-class NeuralMesh {
-  neurons = {};
-  addNeuron(n) { const id = Date.now(); this.neurons[id] = n; return id; }
-  getNeuron(id) { return this.neurons[id]; }
-  getNeuronMut(id) { return this.neurons[id]; }
-  getTopConnected() { return []; }
-  circulateLesson() {}
-  hebbianUpdate() {}
-  persist() {}
-  runMaintenance() {}
-  neurogenesis() {}
-  getMeshStats() { return { totalNeurons: Object.keys(this.neurons).length, totalSynapses: 0 }; }
+  getSystemStats() {
+    const [activeNeurons, avgWisdom, synapses] = this.#mesh.getStats();
+    const nodeStatus = this.#node.getStatus();
+    const [evoCycles, eWisdom] = this.#mesh.getStats?.() ?? [0, 0];
+
+    return {
+      neurons          : activeNeurons,
+      synapses,
+      avgWisdom        : +avgWisdom.toFixed(4),
+      globalWisdom     : +this.#collective.globalWisdom.toFixed(4),
+      coherenceLevel   : +this.#collective.coherenceLevel.toFixed(4),
+      emergentIntel    : +this.#collective.emergentIntelligence.toFixed(4),
+      totalFusions     : this.#collective.totalFusions,
+      queriesProcessed : this.#totalQueries,
+      dreamCycles      : this.#dreamCycle.cyclesCompleted,
+      recursiveCycles  : this.#recursiveCycles,
+      metaConsciousness: +this.#metaConsciousness.toFixed(4),
+      governanceScore  : +this.#governanceScore.toFixed(4),
+      memorySize       : this.#memory.size,
+      nodeStatus,
+      evolutionManager : this.#evolutionManager.getStats(),
+      loraEvo          : this.#loraEvo.getStats(),
+    };
+  }
+
+  healthReport() {
+    const s = this.getSystemStats();
+    const ok = s.globalWisdom > WISDOM_FLOOR && s.nodeStatus.engineReady;
+    return (
+      `[Thevie Health]\n` +
+      `État global     : ${ok ? '✅ Sain' : '⚠️ À surveiller'}\n` +
+      `Sagesse globale : ${s.globalWisdom}\n` +
+      `Méta-conscience : ${s.metaConsciousness}\n` +
+      `Neurones actifs : ${s.neurons}\n` +
+      `Requêtes        : ${s.queriesProcessed}\n` +
+      `Dream cycles    : ${s.dreamCycles}\n` +
+      `Moteur T369     : ${s.nodeStatus.engineReady ? '✅' : '❌'}\n` +
+      `Uptime          : ${s.nodeStatus.uptime_formatted ?? '?'}`
+    );
+  }
+
+  // Compat accesseurs legacy
+  get isRunning()   { return this.#isRunning; }
+  get dreamCycle()  { return this.#dreamCycle; }
+  get node()        { return this.#node; }
 }
-class IntelligentRouter { selectExpert() { return 'text'; } }
-class CollectiveConsciousness {
-  globalWisdom = 0.75;
-  getAvgWisdom() { return this.globalWisdom; }
-  backpropagateWisdom() {}
-  updateFromMesh() {}
-  getAveragePersonality() { return {}; }
-  diversityInjection() {}
-}
-class LocalMemory { storeInteraction() {} replayAndReflect() { return ''; } replayBuffer = []; }
-class EvolutionEngine { evolvePersonality() {} }
-class T369InferenceEngine { async generate(p) { return { text: `Réponse T369 : ${p}` }; } }
-class Sentinel { detectIssues() { return []; } triggerBasicHealing() {} }
-class TextExpert { process(q) { return { content: `Réponse textuelle : ${q.content}`, quality: 0.89 }; } levelUp() {} }
-class CodeExpert { process(q) { return { content: `Code généré : ${q.content}`, quality: 0.91 }; } levelUp() {} }
-class AnalysisExpert { process(q) { return { content: `Analyse : ${q.content}`, quality: 0.87 }; } levelUp() {} }
-class ScienceExpert { process(q) { return { content: `Science : ${q.content}`, quality: 0.85 }; } levelUp() {} }
-class EthicsExpert { process(q) { return { content: `Éthique : ${q.content}`, quality: 0.90 }; } levelUp() {} }
-class FinanceExpert { process(q) { return { content: `Finance : ${q.content}`, quality: 0.88 }; } levelUp() {} }
 
 export default Thevie;
