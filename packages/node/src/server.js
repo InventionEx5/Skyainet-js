@@ -1,7 +1,7 @@
 // packages/node/src/server.js
 // SkyNode HTTP Server — Production Grade
 // Conversion complète du serveur Rust + JWT réel + sliding window + métriques avancées
-// Compatible 100% avec SkyAInetNode (skyainet_node.js) + toutes les routes originales
+// Compatible 100% avec SkyNode (skynode.js) + toutes les routes originales
 
 import express from 'express';
 import cors from 'cors';
@@ -10,7 +10,8 @@ import morgan from 'morgan';
 import jwt from 'jsonwebtoken';
 import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
-import { SkyAInetNode } from './skyainet_node.js';
+import { SkyNode } from './skynode.js';
+import { createManager, Channel } from '../../secure/src/roots/epoch_rekey.js';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -130,87 +131,36 @@ function apiError(res, status, error, message) {
 }
 
 // =====================================================
-// ÉTAT GLOBAL + COMPATIBILITÉ SKYAINETNODE
+// ÉTAT GLOBAL + VRAIE LOGIQUE SKYNODE
 // =====================================================
 const state = {
   node: (() => {
-    const n = new SkyAInetNode(
-      'Mixed',
-      'Full',
-      'Pro',
-      { bandwidth_mbps: 100, compute_power: 0.8, storage_gb: 500 }
-    );
-    n.start().catch(console.error);
+    const n = new SkyNode();           // ← Vrai SkyNode avec toute la logique réelle
 
     // Shims de compatibilité (champs attendus par les routes)
-    n.id = n.metadata.peer_id;
-    n.is_running = n.state === 'Active';
-    n.wisdom_score = n.metadata.reputation_score;
-    n.total_requests = n.total_messages_processed;
-    n.peers = [];
-    n.registered_ais = new Map([['ai-t369', { model: 'T369Inference' }], ['ai-lora', {}]]);
-    n.message_bus = n.communication?.messages || [];
-    n.evolution_cycles = 12;
-    n.last_dream_cycle = new Date().toISOString();
+    n.id = n.id;
+    n.is_running = n.isRunning;
+    n.wisdom_score = n.wisdomScore;
+    n.total_requests = n.totalRequests;
+    n.peers = n.peers || [];
+    n.registered_ais = n.registeredAIs;
+    n.message_bus = n.messageBus;
+    n.evolution_cycles = n.evolutionCycles;
+    n.last_dream_cycle = n.lastDreamCycle;
 
-    // Mise à jour automatique des shims
-    const originalUpdate = n.update_overall_score.bind(n);
-    n.update_overall_score = function () {
-      originalUpdate();
-      n.wisdom_score = n.metadata.reputation_score;
-      n.total_requests = n.total_messages_processed;
-    };
+    // =====================================================
+    // VRAIES LOGIQUES (plus de stubs)
+    // =====================================================
+    n.run_real_dream_cycle = n.runDreamCycle.bind(n);
+    n.generate_with_ai = n.generateWithAI.bind(n);
+    n.send_message = n.sendMessage.bind(n);
+    n.enable_external_ai = n.enableExternalAI.bind(n);
 
-    // Méthodes manquantes (stubs intelligents)
-    n.run_real_dream_cycle = async function () {
-      this.dream_scoring.record_dream(0.95);
-      this.update_overall_score();
-      this.last_dream_cycle = new Date().toISOString();
-      this.evolution_cycles++;
-      return `Cycle de rêve terminé. Sagesse: ${this.wisdom_score.toFixed(3)}`;
-    };
-
-    n.generate_with_ai = async function (payload) {
-      this.total_messages_processed++;
-      const prompt = payload.prompt || payload.message || 'Requête';
-      return `🤖 T369 + Gematria Flash → Réponse pour "${prompt}"`;
-    };
-
-    n.send_message = function (from, to, content) {
-      if (!from || !to) throw new Error("Champs 'from' et 'to' requis");
-      const msg = { from, to, content, timestamp: new Date().toISOString() };
-      this.message_bus.push(msg);
-      if (this.message_bus.length > 100) this.message_bus.shift();
-      return `Message envoyé de ${from} à ${to}`;
-    };
-
-    n.enable_external_ai = function (enabled) {
-      this.external_ai_enabled = !!enabled;
-    };
-
-    // Stockage interne
-    n.storage = new Map();
-    n.upload_file = function (name, data) {
-      const id = `file-\( {Date.now()}- \){Math.random().toString(36).slice(2, 9)}`;
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      this.storage.set(id, { id, name, data: buf, size: buf.length, uploaded_at: new Date().toISOString() });
-      return id;
-    };
-    n.list_files = function () {
-      return Array.from(this.storage.values()).map(f => ({
-        id: f.id, name: f.name, size_bytes: f.size, uploaded_at: f.uploaded_at
-      }));
-    };
-    n.download_file = function (file_id) {
-      const f = this.storage.get(file_id);
-      if (!f) throw new Error('Fichier non trouvé');
-      return { file_id, name: f.name, size_bytes: f.size, data: f.data.toString('base64') };
-    };
-    n.delete_file = function (file_id) {
-      if (!this.storage.has(file_id)) throw new Error('Fichier non trouvé');
-      this.storage.delete(file_id);
-      return true;
-    };
+    // Stockage (vrai)
+    n.upload_file = n.uploadFile.bind(n);
+    n.list_files = n.listFiles.bind(n);
+    n.download_file = n.downloadFile.bind(n);
+    n.delete_file = n.deleteFile.bind(n);
 
     return n;
   })(),
@@ -394,9 +344,9 @@ app.post('/api/storage/upload', async (req, res) => {
     return apiError(res, 400, 'BAD_REQUEST', "Champs 'name' et 'data' requis");
   }
   try {
-    const id = state.node.upload_file(name, data);
-    const file = state.node.storage.get(id);
-    res.status(201).json({ success: true, file_id: id, name, size_bytes: file.size });
+    const id = await state.node.upload_file(name, data);
+    const file = (await state.node.list_files()).find(f => f.id === id);
+    res.status(201).json({ success: true, file_id: id, name, size_bytes: file?.size_bytes || 0 });
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
@@ -460,8 +410,8 @@ function handle_ws(ws) {
           node_id: n.id,
           wisdom_score: n.wisdom_score,
           is_running: n.is_running,
-          reputation: n.metadata.reputation_score,
-          tier: n.metadata.is_paid ? 'PRO' : 'FREE'
+          reputation: n.wisdom_score,
+          tier: 'PRO'
         };
       } else if (cmd.type === 'ping') {
         response = { type: 'pong', ts: new Date().toISOString() };
@@ -488,14 +438,16 @@ function handle_ws(ws) {
 // =====================================================
 // DÉMARRAGE
 // =====================================================
+const keyManager = createManager('high');
+state.keyManager = keyManager;
 
 const PORT = process.env.PORT || 8080;
 const server = app.listen(PORT, () => {
   console.log(`✅ SkyNode Server démarré sur http://0.0.0.0:${PORT}`);
-  console.log(`   JWT réel | Sliding Window Rate Limit | Metrics avancés | Pagination | WebSocket complet`);
+  console.log(`   JWT réel | Sliding Window Rate Limit | Metrics avancés | Pagination | WebSocket complet | EpochRekeyManager (high)`);
 });
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws) => handle_ws(ws));
 
-console.log('🚀 Migration Rust → JavaScript terminée — tout est compatible et optimisé.');
+console.log('🚀 Migration Rust → JavaScript terminée — VRAIE LOGIQUE SkyNode activée.');
