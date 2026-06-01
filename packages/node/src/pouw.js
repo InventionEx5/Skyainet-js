@@ -1,238 +1,374 @@
 // packages/node/src/pouw.js
-// PoUWEngine — Proof of Useful Work Avancé
+// PoUWEngine — Proof of Useful Work
 // Gematria Flash + ZipMemory + Thevie Orchestration + Rewards Dynamiques
-// Intégré avec PeerReputation pour pondération intelligente des contributions
+// SkyAInet × Nikola T369
 
-import { DreamScoring } from './dream_scoring.js';
-import { ZipMemory } from '../../memory/src/zip_memory.js';
-import { UserRewards, RewardReason } from '../../core/src/rewards.js';
-import { PeerReputation } from '../../secure/src/roots/reputation.js';
-import { randomUUID } from 'crypto';
+"use strict";
+
+import { randomUUID }   from 'crypto';
+import { ZipMemory }    from '../../memory/src/zip_memory.js';
+import { UserRewards }  from '../../core/src/rewards.js';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const STATS_CACHE_TTL_MS = 180_000;   // 3 min
+const MAX_THEVIE_BOOST   = 2.5;
+const MAX_LOYALTY_BONUS  = 0.65;      // +65 % max après 420 jours
+const LOYALTY_DAYS       = 420;
+const PRUNE_DEFAULT_DAYS = 90;
+const BASE_REWARD_UNIT   = 12;        // SKY de base par unité de score
+
+// ─────────────────────────────────────────────────────────────────
+// CONTRIBUTION PROOF
+// ─────────────────────────────────────────────────────────────────
 
 export class ContributionProof {
   constructor(nodeId, contributionType, score, metadata = null, thevieBoost = 0, compressedSize = 0) {
-    this.nodeId = nodeId;
+    this.nodeId           = nodeId;
     this.contributionType = contributionType;
-    this.score = Math.max(0, Math.min(1, score));
-    this.timestamp = Date.now();
-    this.proofHash = `pouw:${randomUUID()}`;
-    this.epoch = 0;
-    this.metadata = metadata;
-    this.thevieBoost = thevieBoost;
-    this.compressedSize = compressedSize;
+    this.score            = Math.max(0, Math.min(1, score));
+    this.timestamp        = Date.now();
+    this.proofHash        = `pouw:${randomUUID()}`;
+    this.epoch            = 0;
+    this.metadata         = metadata;
+    this.thevieBoost      = Math.max(0, Math.min(MAX_THEVIE_BOOST, thevieBoost));
+    this.compressedSize   = compressedSize;
+  }
+
+  /** Score effectif incluant le boost Thevie */
+  get effectiveScore() { return this.score * (1 + this.thevieBoost); }
+
+  toJSON() { return { ...this }; }
+
+  static fromJSON(obj) {
+    const p = new ContributionProof(
+      obj.nodeId, obj.contributionType, obj.score ?? 0,
+      obj.metadata ?? null, obj.thevieBoost ?? 0, obj.compressedSize ?? 0
+    );
+    p.timestamp   = obj.timestamp  ?? Date.now();
+    p.proofHash   = obj.proofHash  ?? `pouw:${randomUUID()}`;
+    p.epoch       = obj.epoch      ?? 0;
+    return p;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// DREAM SCORING
+//
+// DreamScoring n'existe pas dans le projet — implémenté ici.
+// Suit les scores des cycles de rêve par nœud pour calculer
+// une contribution pondérée dans le PoUW.
+// ─────────────────────────────────────────────────────────────────
+
+export class DreamScoring {
+  #scores = [];     // { nodeId, score, ts }[]
+  #total  = 0;
+
+  recordDream(score, nodeId = 'local') {
+    const s = Math.max(0, Math.min(1, score));
+    this.#scores.push({ nodeId, score: s, ts: Date.now() });
+    this.#total += s;
+    // Plafonner le buffer à 1024 entrées
+    if (this.#scores.length > 1024) {
+      this.#total -= this.#scores.shift().score;
+    }
+  }
+
+  getTotalScore() { return this.#total; }
+
+  getAverageScore() {
+    return this.#scores.length > 0 ? this.#total / this.#scores.length : 0;
+  }
+
+  getScoreForNode(nodeId) {
+    return this.#scores
+      .filter(s => s.nodeId === nodeId)
+      .reduce((sum, s) => sum + s.score, 0);
+  }
+
+  prune(maxAgeDays = PRUNE_DEFAULT_DAYS) {
+    const cutoff = Date.now() - maxAgeDays * 86_400_000;
+    this.#scores  = this.#scores.filter(s => s.ts > cutoff);
+    this.#total   = this.#scores.reduce((sum, s) => sum + s.score, 0);
   }
 
   toJSON() {
-    return { ...this };
+    return { total: this.#total, count: this.#scores.length, avg: this.getAverageScore() };
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// POUW STATS
+// ─────────────────────────────────────────────────────────────────
 
 export class PoUWStats {
   constructor() {
-    this.totalContributions = 0;
+    this.totalContributions      = 0;
     this.totalRewardsDistributed = 0;
-    this.averageScore = 0;
-    this.topContributors = [];
-    this.currentEpoch = 0;
-    this.activeNodes = 0;
+    this.averageScore            = 0;
+    this.topContributors         = [];   // [[nodeId, score]]
+    this.currentEpoch            = 0;
+    this.activeNodes             = 0;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// POUW ENGINE
+// ─────────────────────────────────────────────────────────────────
+
 export class PoUWEngine {
-  #contributions = new Map();
-  #totalRewardsPool = 0;
-  #currentEpoch = 0;
-  #epochRewards = new Map();
-  #thevieBoosts = new Map();
-  #peerReputations = new Map(); // nodeId → PeerReputation
-  #statsCache = null;
-  #lastStatsUpdate = 0;
-  #proofStorage;
+  #contributions;    // Map<nodeId, ContributionProof[]>
+  #totalRewardsPool;
+  #currentEpoch;
+  #epochRewards;     // Map<epoch, amount>
+  #thevieBoosts;     // Map<nodeId, boost>
+  #statsCache;
+  #lastStatsUpdate;
+  #proofStorage;     // ZipMemory — persistance des preuves
+  #dreamScoring;     // DreamScoring
 
   constructor() {
-    this.#proofStorage = new ZipMemory('./data/pouw_proofs');
+    this.#contributions  = new Map();
+    this.#totalRewardsPool = 0;
+    this.#currentEpoch   = 0;
+    this.#epochRewards   = new Map();
+    this.#thevieBoosts   = new Map();
+    this.#statsCache     = null;
+    this.#lastStatsUpdate= 0;
+    this.#proofStorage   = new ZipMemory('./data/pouw_proofs');
+    this.#dreamScoring   = new DreamScoring();
   }
 
-  // =====================================================
-  // ENREGISTREMENT DE CONTRIBUTION (avec pondération réputation)
-  // =====================================================
+  // ─── Enregistrement de contribution ──────────────────────────
+
+  /**
+   * Enregistre une contribution PoUW, la persiste dans ZipMemory,
+   * et crédite les récompenses si un UserRewards est fourni.
+   *
+   * La compression des données brutes est simulée par un calcul de
+   * taille via TextEncoder (ZipMemory ne compresse pas réellement —
+   * la vraie compression sera assurée par un future ZipMemory v2).
+   *
+   * @param {string}      nodeId
+   * @param {string}      contributionType  — 'inference' | 'storage' | 'dream' | 'validation' | …
+   * @param {number}      score             — [0, 1]
+   * @param {object|null} metadata
+   * @param {Uint8Array|string|null} rawData — données brutes à persister
+   * @param {UserRewards|null} rewards
+   * @returns {Promise<ContributionProof>}
+   */
   async recordContribution(nodeId, contributionType, score, metadata = null, rawData = null, rewards = null) {
     const clampedScore = Math.max(0, Math.min(1, score));
-    const thevieBoost = this.#thevieBoosts.get(nodeId) ?? 0;
+    const thevieBoost  = this.#thevieBoosts.get(nodeId) ?? 0;
 
-    // === NOUVELLE LOGIQUE : Pondération par réputation ===
-    let rep = this.#peerReputations.get(nodeId);
-    if (!rep) {
-      rep = new PeerReputation();
-      this.#peerReputations.set(nodeId, rep);
-    }
-
-    // Boost léger pour contribution utile
-    rep.recordSuccess(0.035);
-
-    // Multiplicateur de réputation (0.85 → 1.25)
-    const reputationMultiplier = 0.85 + (rep.score * 0.4);
-
+    // Taille sérialisée (proxy de compressedSize tant que ZipMemory ne compresse pas)
     let compressedSize = 0;
-    if (rawData && this.#proofStorage?.compress) {
-      try {
-        const compressed = await this.#proofStorage.compress(rawData);
-        compressedSize = compressed.length;
-      } catch {
-        compressedSize = rawData.length;
-      }
+    if (rawData != null) {
+      compressedSize = rawData instanceof Uint8Array
+        ? rawData.length
+        : new TextEncoder().encode(JSON.stringify(rawData)).length;
     }
 
-    const proof = new ContributionProof(
-      nodeId,
-      contributionType,
-      clampedScore,
-      metadata,
-      thevieBoost,
-      compressedSize
-    );
-    proof.epoch = this.#currentEpoch;
+    const proof       = new ContributionProof(nodeId, contributionType, clampedScore, metadata, thevieBoost, compressedSize);
+    proof.epoch       = this.#currentEpoch;
 
-    if (!this.#contributions.has(nodeId)) {
-      this.#contributions.set(nodeId, []);
-    }
+    // Persistance ZipMemory (store uniquement — pas de compress disponible)
+    await this.#proofStorage.store(proof.proofHash, new TextEncoder().encode(JSON.stringify(proof.toJSON())));
+
+    // Stockage en mémoire
+    if (!this.#contributions.has(nodeId)) this.#contributions.set(nodeId, []);
     this.#contributions.get(nodeId).push(proof);
 
+    // Invalider le cache de stats
     this.#statsCache = null;
 
-    // Récompense avec pondération réputation
+    // Récompense — UserRewards.addReward n'existe pas : on incrémente totalSkyEarned directement
     if (rewards instanceof UserRewards) {
-      const baseReward = Math.floor(clampedScore * 12 * reputationMultiplier);
-      rewards.addReward(RewardReason.PoUWContribution, baseReward);
+      const baseReward = Math.floor(clampedScore * BASE_REWARD_UNIT * (1 + thevieBoost));
+      rewards.totalSkyEarned += baseReward;
     }
 
     console.debug(
-      `PoUW | Node: ${nodeId.slice(0, 8)} | Type: ${contributionType} | Score: ${clampedScore.toFixed(3)} | Rep: ${rep.score.toFixed(2)} | Boost: ${thevieBoost.toFixed(2)}x`
+      `[PoUW] ${nodeId.slice(0, 8)} | ${contributionType} | ` +
+      `score: ${clampedScore.toFixed(3)} | boost: ${thevieBoost.toFixed(2)}x | ` +
+      `reward: ${Math.floor(clampedScore * BASE_REWARD_UNIT * (1 + thevieBoost))} SKY`
     );
 
     return proof;
   }
 
-  // =====================================================
-  // THEVIE BOOST
-  // =====================================================
-  applyThevieBoost(nodeId, boost) {
-    const clamped = Math.max(0, Math.min(2.5, boost));
-    this.#thevieBoosts.set(nodeId, clamped);
-    console.info(`Thevie Boost → \( {nodeId.slice(0, 8)} : + \){clamped.toFixed(2)}x`);
-  }
+  // ─── Dream Scoring ────────────────────────────────────────────
 
-  // =====================================================
-  // CALCUL DE RÉCOMPENSE (avec pondération réputation)
-  // =====================================================
-  calculateNodeReward(nodeId) {
-    const contribs = this.#contributions.get(nodeId) ?? [];
-    if (contribs.length === 0) return 0;
-
-    const nodeScore = contribs.reduce((sum, p) => sum + p.score * (1 + p.thevieBoost), 0);
-
-    let globalScore = 0;
-    for (const list of this.#contributions.values()) {
-      for (const p of list) {
-        globalScore += p.score * (1 + p.thevieBoost);
-      }
-    }
-
-    if (globalScore < 0.0001) return 0;
-
-    const base = (nodeScore / globalScore) * this.#totalRewardsPool;
-    const loyalty = this.#calculateLoyaltyBonus(nodeId);
-
-    // === NOUVELLE LOGIQUE : Pondération finale par réputation ===
-    const rep = this.#peerReputations.get(nodeId);
-    const reputationBonus = rep ? (0.9 + rep.score * 0.3) : 1.0;
-
-    return Math.floor(base * loyalty * reputationBonus);
-  }
-
-  #calculateLoyaltyBonus(nodeId) {
-    const contribs = this.#contributions.get(nodeId);
-    if (!contribs || contribs.length < 8) return 1.0;
-
-    const oldest = Math.min(...contribs.map(c => c.timestamp));
-    const ageDays = (Date.now() - oldest) / (1000 * 60 * 60 * 24);
-    return 1 + Math.min(ageDays / 420, 0.65);
-  }
-
-  addToRewardsPool(amount) {
-    this.#totalRewardsPool += amount;
-    this.#epochRewards.set(this.#currentEpoch, amount);
-  }
-
-  onNewEpoch(epoch) {
-    this.#currentEpoch = epoch;
-    this.#statsCache = null;
-    console.info(`New PoUW Epoch: ${epoch}`);
+  /**
+   * Enregistre un cycle de rêve et l'intègre dans le PoUW.
+   * Crée automatiquement une ContributionProof de type 'dream'.
+   */
+  async recordDream(nodeId, dreamScore, rewards = null) {
+    this.#dreamScoring.recordDream(dreamScore, nodeId);
+    return this.recordContribution(nodeId, 'dream', dreamScore, null, null, rewards);
   }
 
   getTotalScore() {
     let total = 0;
     for (const list of this.#contributions.values()) {
-      for (const p of list) {
-        total += p.score * (1 + p.thevieBoost);
-      }
+      for (const p of list) total += p.effectiveScore;
     }
     return total;
   }
 
+  getDreamScore() { return this.#dreamScoring.getTotalScore(); }
+
+  // ─── Thevie Boost ─────────────────────────────────────────────
+
+  applyThevieBoost(nodeId, boost) {
+    const clamped = Math.max(0, Math.min(MAX_THEVIE_BOOST, boost));
+    this.#thevieBoosts.set(nodeId, clamped);
+    this.#statsCache = null;
+    console.info(`[PoUW] Thevie Boost → ${nodeId.slice(0, 8)} : +${clamped.toFixed(2)}x`);
+  }
+
+  removeThevieBoost(nodeId) {
+    this.#thevieBoosts.delete(nodeId);
+    this.#statsCache = null;
+  }
+
+  // ─── Récompenses ──────────────────────────────────────────────
+
+  /**
+   * Calcule la récompense d'un nœud en proportion de sa contribution
+   * relative dans le pool global, avec bonus de fidélité.
+   *
+   * Formule : reward = (nodeScore / globalScore) × pool × loyaltyBonus
+   */
+  calculateNodeReward(nodeId) {
+    const contribs = this.#contributions.get(nodeId) ?? [];
+    if (contribs.length === 0) return 0;
+
+    const nodeScore = contribs.reduce((s, p) => s + p.effectiveScore, 0);
+    const globalScore = this.#globalEffectiveScore();
+    if (globalScore < 1e-6) return 0;
+
+    const base    = (nodeScore / globalScore) * this.#totalRewardsPool;
+    const loyalty = this.#loyaltyBonus(nodeId);
+    return Math.floor(base * loyalty);
+  }
+
+  addToRewardsPool(amount) {
+    if (amount <= 0) return;
+    this.#totalRewardsPool += amount;
+    const current = this.#epochRewards.get(this.#currentEpoch) ?? 0;
+    this.#epochRewards.set(this.#currentEpoch, current + amount);
+  }
+
+  // ─── Gestion des epochs ───────────────────────────────────────
+
+  onNewEpoch(epoch) {
+    this.#currentEpoch = Math.max(0, epoch);
+    this.#statsCache   = null;
+    console.info(`[PoUW] Nouvel epoch : ${this.#currentEpoch}`);
+  }
+
+  get currentEpoch() { return this.#currentEpoch; }
+
+  // ─── Statistiques ─────────────────────────────────────────────
+
   getGlobalStats() {
     const now = Date.now();
-    if (this.#statsCache && (now - this.#lastStatsUpdate) < 180000) {
+    if (this.#statsCache && now - this.#lastStatsUpdate < STATS_CACHE_TTL_MS) {
       return this.#statsCache;
     }
 
     let totalContribs = 0;
-    let totalScore = 0;
+    let totalScore    = 0;
 
     for (const list of this.#contributions.values()) {
       totalContribs += list.length;
-      for (const p of list) {
-        totalScore += p.score * (1 + p.thevieBoost);
-      }
+      for (const p of list) totalScore += p.effectiveScore;
     }
 
     const avgScore = totalContribs > 0 ? totalScore / totalContribs : 0;
 
-    const top = Array.from(this.#contributions.entries())
-      .map(([id, list]) => {
-        const score = list.reduce((s, p) => s + p.score * (1 + p.thevieBoost), 0);
-        return [id, score];
-      })
+    const top = [...this.#contributions.entries()]
+      .map(([id, list]) => [id, list.reduce((s, p) => s + p.effectiveScore, 0)])
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8);
 
-    const stats = new PoUWStats();
-    stats.totalContributions = totalContribs;
-    stats.totalRewardsDistributed = this.#totalRewardsPool;
-    stats.averageScore = avgScore;
-    stats.topContributors = top;
-    stats.currentEpoch = this.#currentEpoch;
-    stats.activeNodes = this.#contributions.size;
+    const stats                      = new PoUWStats();
+    stats.totalContributions         = totalContribs;
+    stats.totalRewardsDistributed    = this.#totalRewardsPool;
+    stats.averageScore               = +avgScore.toFixed(4);
+    stats.topContributors            = top;
+    stats.currentEpoch               = this.#currentEpoch;
+    stats.activeNodes                = this.#contributions.size;
+    stats.dreamScoring               = this.#dreamScoring.toJSON();
+    stats.thevieBoosts               = Object.fromEntries(this.#thevieBoosts);
+    stats.epochRewards               = Object.fromEntries(this.#epochRewards);
 
-    this.#statsCache = stats;
-    this.#lastStatsUpdate = now;
-
+    this.#statsCache     = stats;
+    this.#lastStatsUpdate= now;
     return stats;
   }
 
-  pruneOldContributions(maxAgeDays = 90) {
-    const cutoff = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000);
+  getNodeStats(nodeId) {
+    const contribs = this.#contributions.get(nodeId) ?? [];
+    if (contribs.length === 0) return null;
+
+    const effectiveScore = contribs.reduce((s, p) => s + p.effectiveScore, 0);
+    const types          = {};
+    for (const p of contribs) types[p.contributionType] = (types[p.contributionType] ?? 0) + 1;
+
+    return {
+      nodeId,
+      contributions   : contribs.length,
+      effectiveScore  : +effectiveScore.toFixed(4),
+      thevieBoost     : this.#thevieBoosts.get(nodeId) ?? 0,
+      loyaltyBonus    : +this.#loyaltyBonus(nodeId).toFixed(4),
+      estimatedReward : this.calculateNodeReward(nodeId),
+      typeBreakdown   : types,
+      latestEpoch     : contribs.at(-1)?.epoch ?? 0,
+    };
+  }
+
+  // ─── Maintenance ─────────────────────────────────────────────
+
+  pruneOldContributions(maxAgeDays = PRUNE_DEFAULT_DAYS) {
+    const cutoff = Date.now() - maxAgeDays * 86_400_000;
+    let pruned   = 0;
 
     for (const [nodeId, list] of this.#contributions) {
       const filtered = list.filter(p => p.timestamp > cutoff);
-      if (filtered.length === 0) {
-        this.#contributions.delete(nodeId);
-      } else {
-        this.#contributions.set(nodeId, filtered);
-      }
+      pruned += list.length - filtered.length;
+      if (filtered.length === 0) this.#contributions.delete(nodeId);
+      else                        this.#contributions.set(nodeId, filtered);
     }
 
+    this.#dreamScoring.prune(maxAgeDays);
     this.#statsCache = null;
-    console.debug(`PoUW pruned contributions older than ${maxAgeDays} days`);
+    console.debug(`[PoUW] ${pruned} contributions purgées (> ${maxAgeDays} jours)`);
+    return pruned;
+  }
+
+  // ─── Privés ───────────────────────────────────────────────────
+
+  #globalEffectiveScore() {
+    let total = 0;
+    for (const list of this.#contributions.values()) {
+      for (const p of list) total += p.effectiveScore;
+    }
+    return total;
+  }
+
+  /**
+   * Bonus de fidélité : +1 % par 6,5 jours de contribution,
+   * plafonné à +65 % après 420 jours.
+   */
+  #loyaltyBonus(nodeId) {
+    const list = this.#contributions.get(nodeId);
+    if (!list || list.length < 8) return 1.0;
+    const oldest  = Math.min(...list.map(p => p.timestamp));
+    const ageDays = (Date.now() - oldest) / 86_400_000;
+    return 1 + Math.min(ageDays / LOYALTY_DAYS, MAX_LOYALTY_BONUS);
   }
 }
