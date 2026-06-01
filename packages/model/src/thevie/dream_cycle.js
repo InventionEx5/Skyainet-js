@@ -1,4 +1,4 @@
-// packages/model/src/thevie/consciousness/dream_cycle.js
+// packages/model/src/thevie/dream_cycle.js
 // Dream Cycle — Consolidation Créative & Émergence + Heavy Training
 // Version Production Ready (Light Dream + Real LoRA Training)
 // SkyAInet × Thevie × Nikola T369
