@@ -1,210 +1,117 @@
-// packages/node/src/node_types.js
-// Node Types — Architecture des Nœuds SkyAInet × Thevie
+// packages/sentinel/src/node_identity.js
+// NodeIdentity — Identité Souveraine & Attestation Post-Quantique
+// Dilithium5 + HybridTransport + Réputation Dynamique + Peer Trust
 
-export const NodeType = Object.freeze({
-  Mini: 'Mini',
-  Light: 'Light',
-  Full: 'Full',
-  Validator: 'Validator',
-  Sentinel: 'Sentinel',
-  DreamWeaver: 'DreamWeaver',
-});
+import { Dilithium5Signer } from '../../secure/src/crypto/dilithium.js';
+import { HybridTransport } from '../../secure/src/crypto/hybrid.js';
+import { randomBytes } from 'crypto';
 
-export const NodeRole = Object.freeze({
-  Core: 'Core',
-  Edge: 'Edge',
-  Validator: 'Validator',
-  Sentinel: 'Sentinel',
-  DreamWeaver: 'DreamWeaver',
-});
+export class Attestation {
+  constructor(timestamp, signature, issuer, valid = true) {
+    this.timestamp = timestamp;
+    this.signature = signature;
+    this.issuer = issuer;
+    this.valid = valid;
+  }
+}
 
-export const NodeState = Object.freeze({
-  Active: 'Active',
-  Sleeping: 'Sleeping',
-  Syncing: 'Syncing',
-  DreamMode: 'DreamMode',
-  Evolving: 'Evolving',
-  Gateway: 'Gateway',
-  Maintenance: 'Maintenance',
-});
+export class NodeIdentity {
+  #signer;
+  #hybrid;
 
-export const SubscriptionLevel = Object.freeze({
-  Free: 'Free',
-  Pro: 'Pro',
-  Validator: 'Validator',
-});
+  constructor(sovereignAlias) {
+    if (!sovereignAlias || typeof sovereignAlias !== 'string') {
+      throw new Error('Alias souverain requis');
+    }
 
-export const ReputationTier = Object.freeze({
-  Newcomer: 'Newcomer',
-  Reliable: 'Reliable',
-  Trusted: 'Trusted',
-  Sovereign: 'Sovereign',
-  Legend: 'Legend',
-});
+    this.#signer = new Dilithium5Signer();
+    this.#hybrid = new HybridTransport(true);
 
-// =====================================================
-// NODE CAPABILITIES (classe optimisée)
-// =====================================================
-export class NodeCapabilities {
-  constructor(level = SubscriptionLevel.Free) {
-    const cfg = this._getConfig(level);
-    this.storage_gb = cfg.storage_gb;
-    this.compute_power = cfg.compute_power;
-    this.max_concurrent_tasks = cfg.max_concurrent_tasks;
-    this.supports_gpu = cfg.supports_gpu;
-    this.supports_flash_gematria = cfg.supports_flash_gematria;
-    this.zip_memory_enabled = cfg.zip_memory_enabled;
-    this.custom_features = { ...cfg.custom_features };
+    this.nodeId = randomBytes(32);
+    this.sovereignAlias = sovereignAlias;
+    this.publicKey = this.#signer.publicKeyBytes();
+    this.reputation = 0.82;
+    this.attestations = [];
+    this.registeredPeers = new Map(); // peerId (hex) → reputation
   }
 
-  _getConfig(level) {
-    switch (level) {
-      case SubscriptionLevel.Free:
-        return {
-          storage_gb: 8,
-          compute_power: 1.0,
-          max_concurrent_tasks: 2,
-          supports_gpu: false,
-          supports_flash_gematria: true,
-          zip_memory_enabled: true,
-          custom_features: {},
-        };
-      case SubscriptionLevel.Pro:
-        return {
-          storage_gb: 128,
-          compute_power: 6.0,
-          max_concurrent_tasks: 16,
-          supports_gpu: true,
-          supports_flash_gematria: true,
-          zip_memory_enabled: true,
-          custom_features: {
-            dynamic_site_generation: true,
-            api_gateway: true,
-          },
-        };
-      case SubscriptionLevel.Validator:
-        return {
-          storage_gb: 512,
-          compute_power: 12.0,
-          max_concurrent_tasks: 64,
-          supports_gpu: true,
-          supports_flash_gematria: true,
-          zip_memory_enabled: true,
-          custom_features: {
-            consensus_participation: true,
-            governance_voting: true,
-          },
-        };
-      default:
-        return this._getConfig(SubscriptionLevel.Free);
+  // =====================================================
+  // ATTESTATION CRYPTOGRAPHIQUE
+  // =====================================================
+  generateAttestation() {
+    const timestamp = Date.now();
+    const message = `attest:\( {this.sovereignAlias}: \){timestamp}`;
+    const signature = this.#signer.sign(Buffer.from(message));
+
+    const attestation = new Attestation(timestamp, signature, this.sovereignAlias);
+    this.attestations.push(attestation);
+
+    return attestation;
+  }
+
+  verifyAttestation(attestation) {
+    if (!attestation?.signature || !attestation.issuer) return false;
+
+    const message = `attest:\( {attestation.issuer}: \){attestation.timestamp}`;
+    const isValidSig = this.#signer.verify(Buffer.from(message), attestation.signature);
+    const isRecent = (Date.now() - attestation.timestamp) < 300_000; // 5 minutes
+
+    return isValidSig && attestation.valid && isRecent;
+  }
+
+  attest() {
+    if (this.attestations.length === 0) return false;
+    const last = this.attestations[this.attestations.length - 1];
+    return this.verifyAttestation(last) && this.reputation > 0.65;
+  }
+
+  // =====================================================
+  // RÉPUTATION & PEERS
+  // =====================================================
+  updateReputation(delta) {
+    this.reputation = Math.max(0, Math.min(1, this.reputation + delta));
+  }
+
+  registerPeer(peerId, initialReputation = 0.5) {
+    const key = Buffer.isBuffer(peerId) ? peerId.toString('hex') : peerId;
+    this.registeredPeers.set(key, Math.max(0, Math.min(1, initialReputation)));
+  }
+
+  updatePeerReputation(peerId, delta) {
+    const key = Buffer.isBuffer(peerId) ? peerId.toString('hex') : peerId;
+    if (this.registeredPeers.has(key)) {
+      const current = this.registeredPeers.get(key);
+      this.registeredPeers.set(key, Math.max(0, Math.min(1, current + delta)));
     }
   }
 
-  adjustForState(state) {
-    switch (state) {
-      case NodeState.Sleeping:
-        this.compute_power *= 0.2;
-        this.max_concurrent_tasks = 1;
-        break;
-      case NodeState.DreamMode:
-        this.compute_power *= 0.6;
-        break;
-    }
+  isPeerTrusted(peerId) {
+    const key = Buffer.isBuffer(peerId) ? peerId.toString('hex') : peerId;
+    return (this.registeredPeers.get(key) ?? 0) > 0.68;
+  }
+
+  trustScore() {
+    const base = this.reputation;
+    const bonus = this.attest() ? 0.12 : 0;
+    return Math.min(1, base + bonus);
+  }
+
+  // =====================================================
+  // UTILITAIRES
+  // =====================================================
+  healthReport() {
+    return `NodeIdentity ${this.sovereignAlias} | Reputation: ${this.reputation.toFixed(3)} | Attestations: ${this.attestations.length} | Trusted Peers: ${this.registeredPeers.size}`;
   }
 
   toJSON() {
-    return { ...this };
+    return {
+      nodeId: this.nodeId.toString('hex'),
+      sovereignAlias: this.sovereignAlias,
+      publicKey: this.publicKey.toString('hex'),
+      reputation: this.reputation,
+      attestations: this.attestations.length,
+      trustedPeers: this.registeredPeers.size,
+      trustScore: this.trustScore(),
+    };
   }
 }
-
-// =====================================================
-// MÉTHODES UTILITAIRES SUR LES ENUMS
-// =====================================================
-
-export function isPaidNodeType(type) {
-  return [NodeType.Full, NodeType.Validator, NodeType.DreamWeaver].includes(type);
-}
-
-export function monthlyPriceEur(type) {
-  const prices = {
-    [NodeType.Mini]: 0,
-    [NodeType.Light]: 6,
-    [NodeType.Full]: 18,
-    [NodeType.Validator]: 55,
-    [NodeType.Sentinel]: 32,
-    [NodeType.DreamWeaver]: 45,
-  };
-  return prices[type] ?? 0;
-}
-
-export function computeMultiplier(type) {
-  const multipliers = {
-    [NodeType.Mini]: 1.0,
-    [NodeType.Light]: 2.5,
-    [NodeType.Full]: 6.0,
-    [NodeType.Validator]: 12.0,
-    [NodeType.Sentinel]: 4.0,
-    [NodeType.DreamWeaver]: 8.5,
-  };
-  return multipliers[type] ?? 1.0;
-}
-
-export function isOperationalState(state) {
-  return [NodeState.Active, NodeState.Gateway, NodeState.DreamMode].includes(state);
-}
-
-export function isPaidSubscription(level) {
-  return level !== SubscriptionLevel.Free;
-}
-
-export function reputationTierFromScore(score) {
-  if (score >= 0.95) return ReputationTier.Legend;
-  if (score >= 0.85) return ReputationTier.Sovereign;
-  if (score >= 0.70) return ReputationTier.Trusted;
-  if (score >= 0.50) return ReputationTier.Reliable;
-  return ReputationTier.Newcomer;
-}
-
-export function reputationTierName(tier) {
-  return tier;
-}
-
-export function defaultCapabilitiesForType(nodeType) {
-  if (nodeType === NodeType.Mini) {
-    return new NodeCapabilities(SubscriptionLevel.Free);
-  }
-  if (nodeType === NodeType.Light || nodeType === NodeType.Full) {
-    return new NodeCapabilities(SubscriptionLevel.Pro);
-  }
-  return new NodeCapabilities(SubscriptionLevel.Validator);
-}
-
-export function isEdgeNode(role) {
-  return role === NodeRole.Edge;
-}
-
-export function requiresPaidSubscription(nodeType) {
-  return isPaidNodeType(nodeType);
-}
-
-// =====================================================
-// EXPORT GLOBAL (pour compatibilité)
-// =====================================================
-export default {
-  NodeType,
-  NodeRole,
-  NodeState,
-  SubscriptionLevel,
-  ReputationTier,
-  NodeCapabilities,
-  isPaidNodeType,
-  monthlyPriceEur,
-  computeMultiplier,
-  isOperationalState,
-  isPaidSubscription,
-  reputationTierFromScore,
-  reputationTierName,
-  defaultCapabilitiesForType,
-  isEdgeNode,
-  requiresPaidSubscription,
-};
