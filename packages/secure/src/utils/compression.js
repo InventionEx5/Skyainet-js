@@ -1,4 +1,4 @@
-// packages/secure/src/utils/compression.js
+// packages/memory/src/compression.js
 // =====================================================
 // Compression Utilities — Haute Performance (Brotli)
 // Compatible Contact + DID + GroupManager
