@@ -69,49 +69,54 @@ export class LoraEvo {
   }
 
   // ============================================================
-  // ENTRAÎNEMENT LOURD (compatible EvolutionManager)
-  // ============================================================
-  async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
-    if (lessons.length < 8) {
-      return { trained: false, reason: "Pas assez de leçons" };
-    }
-
-    this.#trainingCount++;
-
-    // Vrai entraînement LoRA simulé (prêt pour backward réel)
-    let loss = 2.65;
-    for (let epoch = 0; epoch < epochs; epoch++) {
-      loss *= 0.79 + Math.random() * 0.04; // descente réaliste
-      console.debug(`[LoraEvo] Epoch ${epoch + 1} — loss: ${loss.toFixed(4)}`);
-    }
-
-    // Signature post-quantique
-    const digest = new TextEncoder().encode(
-      `loraevo_v\( {this.#trainingCount}_ \){Date.now()}_${loss.toFixed(4)}`
-    );
-    const signature = this.#signer.sign(digest);
-
-    // Checkpoint
-    const checkpoint = {
-      version: this.#trainingCount,
-      loss,
-      epochs,
-      signature: Array.from(signature),
-      timestamp: Date.now(),
-    };
-
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(`loraevo_checkpoint_v${this.#trainingCount}`, JSON.stringify(checkpoint));
-    }
-
-    return {
-      trained: true,
-      lessons: lessons.length,
-      finalLoss: loss,
-      epochs,
-      signatureBytes: signature.length,
-    };
+// ENTRAÎNEMENT LOURD (vraie logique - sans simulation)
+// ============================================================
+async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
+  if (lessons.length < 8) {
+    return { trained: false, reason: "Pas assez de leçons" };
   }
+
+  if (!this.#loraTrainer || typeof this.#loraTrainer.train !== 'function') {
+    throw new Error("LoRATrainer non injecté. Utilise injectLoRATrainer() avant d'appeler train().");
+  }
+
+  this.#trainingCount++;
+
+  // === VRAI ENTRAÎNEMENT LoRA ===
+  const trainingResult = await this.#loraTrainer.train({
+    lessons,
+    epochs,
+    learningRate,
+    batchSize: 4,
+  });
+
+  // Signature post-quantique
+  const digest = new TextEncoder().encode(
+    `loraevo_v\( {this.#trainingCount}_ \){Date.now()}_${trainingResult.finalLoss.toFixed(4)}`
+  );
+  const signature = this.#signer.sign(digest);
+
+  // Checkpoint
+  const checkpoint = {
+    version: this.#trainingCount,
+    loss: trainingResult.finalLoss,
+    epochs: trainingResult.epochs,
+    signature: Array.from(signature),
+    timestamp: Date.now(),
+  };
+
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(`loraevo_checkpoint_v${this.#trainingCount}`, JSON.stringify(checkpoint));
+  }
+
+  return {
+    trained: true,
+    lessons: lessons.length,
+    finalLoss: trainingResult.finalLoss,
+    epochs: trainingResult.epochs,
+    signatureBytes: signature.length,
+  };
+}
 
   // ============================================================
   // MÉTHODES PRIVÉES
