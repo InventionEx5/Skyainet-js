@@ -11,7 +11,7 @@ import { GematriaAead }             from '../../secure/src/crypto/gematria_aead.
 import { hkdfSha256, hmacSha256 }   from '../../secure/src/crypto/sha_fips.js';
 import { DecentralizedStorage }     from './storage.js';
 import { UserRewards }              from '../../core/src/rewards.js';
-import { NodeState }                from '../../core/src/node_types.js';
+import { NodeState }                from '../../node/src/node_types.js';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
