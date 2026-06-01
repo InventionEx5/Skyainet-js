@@ -1,4 +1,4 @@
-// packages/node/src/storage.js
+// packages/memory/src/storage.js
 // StorageNode — Gestionnaire de Stockage Souverain (Version Propre)
 // ZipMemory + Chiffrement Hybride Post-Quantique + Facturation + Réplication
 
