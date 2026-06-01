@@ -1,165 +1,255 @@
 // packages/sentinel/src/anti_fork.js
 // =====================================================
-// AntiFork — Système Anti‑Fork & Auto‑Défense Avancé
-// SkyAInet – Détection par hauteur, hash, réputation + Actions automatiques (Slash, Quarantine)
-// Intégré avec Rewards, NodeIdentity et Reputation System
+// AntiFork — Détection & Auto‑Défense Anti‑Fork
+// SkyAInet — hauteur, hash, réputation + quarantaine
+// SkyAInet × Nikola T369
 // =====================================================
 
-import { UserRewards, RewardReason } from '../../core/src/rewards.js';
-import { SkyAInetNode } from '../../node/src/node.js';
-import { Dilithium5Signer } from '../../secure/src/crypto/dilithium.js';
+"use strict";
 
-// ----------------------------------------------------------------------
-// Niveaux de gravité d’un fork
-// ----------------------------------------------------------------------
+import { randomUUID }          from 'crypto';
+import { Dilithium5Signer }    from '../../secure/src/crypto/dilithium.js';
+import { hmacSha256 }          from '../../secure/src/crypto/sha_fips.js';
+import { UserRewards }         from '../../core/src/rewards.js';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const QUARANTINE_TTL_MS       = 3_600_000;   // 1 h par défaut
+const REPUTATION_PENALTY      = 0.25;        // pénalité par quarantaine
+const REPUTATION_FLOOR        = 0.10;
+const REWARD_FORK_DETECTED    = 35;          // SKY par détection réussie
+const TE                      = new TextEncoder();
+
+// ─────────────────────────────────────────────────────────────────
+// NIVEAUX DE GRAVITÉ
+// ─────────────────────────────────────────────────────────────────
+
 export const ForkSeverity = Object.freeze({
-  Warning:  'Warning',
-  Minor:    'Minor',
-  Major:    'Major',
+  Warning : 'Warning',
+  Minor   : 'Minor',
+  Major   : 'Major',
   Critical: 'Critical',
 });
 
-// ----------------------------------------------------------------------
-// Événement de fork détecté
-// ----------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// FORK EVENT
+// ─────────────────────────────────────────────────────────────────
+
 export class ForkEvent {
-  /**
-   * @param {Date} timestamp
-   * @param {string} severity - clé de ForkSeverity
-   * @param {string} description
-   * @param {Array<string>} affectedNodes
-   * @param {string} evidence
-   */
-  constructor(timestamp, severity, description, affectedNodes, evidence) {
-    this.timestamp = timestamp;
-    this.severity = severity;
-    this.description = description;
+  constructor(severity, description, affectedNodes, evidence) {
+    this.id            = randomUUID();
+    this.timestamp     = new Date();
+    this.severity      = severity;
+    this.description   = description;
     this.affectedNodes = affectedNodes;
-    this.evidence = evidence;
+    this.evidence      = evidence;
   }
 
   toJSON() {
     return {
-      timestamp: this.timestamp.toISOString(),
-      severity: this.severity,
-      description: this.description,
+      id           : this.id,
+      timestamp    : this.timestamp.toISOString(),
+      severity     : this.severity,
+      description  : this.description,
       affectedNodes: this.affectedNodes,
-      evidence: this.evidence,
+      evidence     : this.evidence,
     };
   }
 
   static fromJSON(json) {
-    return new ForkEvent(
-      new Date(json.timestamp),
-      json.severity,
-      json.description,
-      json.affectedNodes,
-      json.evidence,
-    );
+    const e = new ForkEvent(json.severity, json.description, json.affectedNodes, json.evidence);
+    e.id        = json.id ?? randomUUID();
+    e.timestamp = new Date(json.timestamp);
+    return e;
   }
 }
 
-// ----------------------------------------------------------------------
-// Système Anti‑Fork
-// ----------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// ANTI FORK
+// ─────────────────────────────────────────────────────────────────
+
 export class AntiFork {
-  constructor() {
-    this.forkThresholdHeight = 5;
-    this.forkThresholdHash = 2; // nombre de mismatchs tolérés (non utilisé directement dans detect)
-    this.events = []; // Array<ForkEvent>
-    this.quarantinedNodes = new Map(); // Map<peerId, Date>
-    this.signer = new Dilithium5Signer(); // signeur post‑quantique pour preuves futures
+  #signer;            // Dilithium5Signer — signature des preuves de fork
+  #quarantined;       // Map<peerId, { since, reputation }>
+  #events;            // ForkEvent[]
+  #peerReputations;   // Map<peerId, number> — suivi local des réputations
+
+  constructor(opts = {}) {
+    this.forkThresholdHeight    = opts.thresholdHeight    ?? 5;
+    this.forkThresholdHashMiss  = opts.thresholdHashMiss  ?? 2;
+    this.quarantineTtlMs        = opts.quarantineTtlMs    ?? QUARANTINE_TTL_MS;
+
+    this.#signer           = new Dilithium5Signer();
+    this.#quarantined      = new Map();
+    this.#events           = [];
+    this.#peerReputations  = new Map();
   }
 
+  // ─── Détection ────────────────────────────────────────────────
+
   /**
-   * Détection avancée de fork.
-   * @param {number} localHeight
-   * @param {string} localHash
-   * @param {Array<{peerId: string, height: number, hash: string, reputation: number}>} peers
-   * @param {SkyAInetNode} node – mutable, pour mise en quarantaine immédiate
-   * @param {UserRewards} rewards – mutable, pour récompense de détection
-   * @returns {Array<ForkEvent>}
+   * Analyse les pairs et détecte les forks potentiels.
+   *
+   * Deux critères indépendants :
+   *   1. Écart de hauteur > forkThresholdHeight → Major
+   *   2. Hash différent ET pair réputé (score > 0.60) → Critical
+   *
+   * Si des forks sont détectés, les pairs impliqués sont mis en
+   * quarantaine et des récompenses de sécurité sont attribuées.
+   *
+   * @param {number}   localHeight
+   * @param {string}   localHash
+   * @param {Array<{peerId:string, height:number, hash:string, reputation:number}>} peers
+   * @param {object}   node     — SkyNode (lecture seule via getStatus/getPeers)
+   * @param {UserRewards|null} rewards
+   * @returns {ForkEvent[]}
    */
-  detectFork(localHeight, localHash, peers, node, rewards) {
+  detectFork(localHeight, localHash, peers, node, rewards = null) {
     const detected = [];
 
-    for (const { peerId, height, hash, reputation } of peers) {
-      // 1. Écart de hauteur suspect
-      const heightDiff = height - localHeight;
+    // Expire les quarantaines périmées avant la détection
+    this.#expireQuarantines();
+
+    for (const peer of peers) {
+      const { peerId, height, hash, reputation } = peer;
+
+      // Mise à jour de la réputation locale du pair
+      this.#peerReputations.set(peerId, Math.max(0, Math.min(1, reputation)));
+
+      // 1. Écart de hauteur
+      const heightDiff = Math.abs(height - localHeight);
       if (heightDiff > this.forkThresholdHeight) {
-        const event = new ForkEvent(
-          new Date(),
+        const evt = new ForkEvent(
           ForkSeverity.Major,
-          `Fork par hauteur détecté avec le pair ${peerId}`,
+          `Fork par hauteur avec le pair ${peerId}`,
           [peerId],
-          `Height diff: ${heightDiff}`,
+          `heightDiff=${heightDiff} (local=${localHeight}, peer=${height})`
         );
-        detected.push(event);
-        this.quarantineNode(peerId, node);
+        detected.push(evt);
+        this.#applyQuarantine(peerId, node, REPUTATION_PENALTY);
       }
 
-      // 2. Mismatch de hash (si le pair est réputé)
-      if (hash !== localHash && reputation > 0.6) {
-        const event = new ForkEvent(
-          new Date(),
+      // 2. Hash différent (seulement si pair réputé — évite les faux positifs)
+      if (hash !== localHash && reputation > 0.60 && !detected.find(e => e.affectedNodes.includes(peerId))) {
+        const evidenceHash = this.#signEvidence(`${localHash}|${hash}|${peerId}`);
+        const evt = new ForkEvent(
           ForkSeverity.Critical,
           `Mismatch de hash avec le pair ${peerId}`,
           [peerId],
-          `Local: ${localHash} | Peer: ${hash}`,
+          `local=${localHash.slice(0,16)}… peer=${hash.slice(0,16)}… sig=${evidenceHash}`
         );
-        detected.push(event);
-        this.quarantineNode(peerId, node);
+        detected.push(evt);
+        this.#applyQuarantine(peerId, node, REPUTATION_PENALTY * 1.5);
       }
     }
 
     if (detected.length > 0) {
-      this.events.push(...detected);
-      console.warn(`[AntiFork] ${detected.length} fork(s) détecté(s)`);
+      this.#events.push(...detected);
+      console.warn(`[AntiFork] ${detected.length} fork(s) détecté(s) — sévérités: ${detected.map(e => e.severity).join(', ')}`);
 
-      // Récompense de contribution à la sécurité
-      rewards.addReward(RewardReason.SecurityContribution, 35);
+      // Récompense de sécurité — UserRewards.addReward n'existe pas
+      if (rewards instanceof UserRewards) {
+        rewards.totalSkyEarned += REWARD_FORK_DETECTED * detected.length;
+      }
     }
 
     return detected;
   }
 
+  // ─── Quarantaine ──────────────────────────────────────────────
+
   /**
-   * Met un nœud en quarantaine et réduit sa réputation.
-   * @param {string} peerId
-   * @param {SkyAInetNode} node
+   * Met un pair en quarantaine et pénalise sa réputation locale.
+   * N'accède pas aux champs internes de SkyNode (tout est privé) —
+   * notifie via `node.removePeer(peerId)` si disponible.
    */
+  #applyQuarantine(peerId, node, penalty) {
+    const currentRep = this.#peerReputations.get(peerId) ?? 0.5;
+    this.#quarantined.set(peerId, {
+      since     : Date.now(),
+      reputation: Math.max(REPUTATION_FLOOR, currentRep - penalty),
+    });
+    this.#peerReputations.set(peerId, Math.max(REPUTATION_FLOOR, currentRep - penalty));
+
+    // Déconnecte le pair du nœud si l'API le permet
+    if (node && typeof node.removePeer === 'function') {
+      node.removePeer(peerId);
+    }
+
+    console.warn(`[AntiFork] Pair ${peerId.slice(0, 16)} mis en quarantaine (-${(penalty*100).toFixed(0)}% rép)`);
+  }
+
   quarantineNode(peerId, node) {
-    this.quarantinedNodes.set(peerId, new Date());
-    node.metadata.reputationScore = Math.max(0.1, node.metadata.reputationScore - 0.25);
-    console.warn(`[AntiFork] Nœud ${peerId} mis en quarantaine`);
+    this.#applyQuarantine(peerId, node, REPUTATION_PENALTY);
   }
 
-  /**
-   * Vérifie si un pair est en quarantaine.
-   * @param {string} peerId
-   * @returns {boolean}
-   */
+  releaseQuarantine(peerId) {
+    return this.#quarantined.delete(peerId);
+  }
+
   isQuarantined(peerId) {
-    return this.quarantinedNodes.has(peerId);
+    return this.#quarantined.has(peerId);
   }
 
-  /**
-   * Retourne la liste complète des événements.
-   * @returns {Array<ForkEvent>}
-   */
-  getEvents() {
-    return this.events;
-  }
+  // ─── Signature de preuve ──────────────────────────────────────
 
   /**
-   * Résumé de l'état du système anti‑fork.
-   * @returns {string}
+   * Signe une preuve de fork avec Dilithium5 et retourne les 8 premiers
+   * octets en hex — suffisant comme fingerprint d'évidence dans les logs.
    */
+  #signEvidence(evidence) {
+    const sig = this.#signer.sign(TE.encode(evidence));
+    return Array.from(sig.subarray(0, 8)).map(b => b.toString(16).padStart(2,'0')).join('');
+  }
+
+  // ─── Nettoyage ────────────────────────────────────────────────
+
+  #expireQuarantines() {
+    const now = Date.now();
+    for (const [peerId, entry] of this.#quarantined) {
+      if (now - entry.since > this.quarantineTtlMs) {
+        this.#quarantined.delete(peerId);
+        console.debug(`[AntiFork] Quarantaine expirée pour ${peerId.slice(0,16)}`);
+      }
+    }
+  }
+
+  pruneEvents(maxAgeDays = 30) {
+    const cutoff = Date.now() - maxAgeDays * 86_400_000;
+    const before = this.#events.length;
+    this.#events  = this.#events.filter(e => e.timestamp.getTime() > cutoff);
+    return before - this.#events.length;
+  }
+
+  // ─── Lecture ─────────────────────────────────────────────────
+
+  getEvents(severity = null) {
+    return severity
+      ? this.#events.filter(e => e.severity === severity)
+      : [...this.#events];
+  }
+
+  getQuarantined() {
+    return [...this.#quarantined.entries()].map(([id, e]) => ({
+      peerId    : id,
+      since     : new Date(e.since).toISOString(),
+      reputation: e.reputation,
+    }));
+  }
+
+  getPeerReputation(peerId) {
+    return this.#peerReputations.get(peerId) ?? null;
+  }
+
   summary() {
-    return (
-      `AntiFork | Events: ${this.events.length} | ` +
-      `Quarantined: ${this.quarantinedNodes.size} | ` +
-      `Threshold Height: ${this.forkThresholdHeight}`
-    );
+    return {
+      totalEvents     : this.#events.length,
+      quarantined     : this.#quarantined.size,
+      thresholdHeight : this.forkThresholdHeight,
+      criticalEvents  : this.#events.filter(e => e.severity === ForkSeverity.Critical).length,
+      majorEvents     : this.#events.filter(e => e.severity === ForkSeverity.Major).length,
+    };
   }
 }
