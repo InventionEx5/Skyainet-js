@@ -1,8 +1,7 @@
 // packages/model/src/thevie/dream_cycle.js
 // =====================================================
-// DreamCycle v2 — Consolidation Créative & Entraînement Réel
+// DreamCycle — Consolidation Créative & Entraînement Réel
 // Light Dream continu + LoRA Training réel (forward/backward)
-// Zéro simulation, zéro stub, zéro placeholder.
 // SkyAInet × Thevie × Nikola T369
 // =====================================================
 
