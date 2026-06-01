@@ -1,4 +1,4 @@
-// packages/secure/src/group/sender_keys.js
+// packages/secure/src/device/sender_keys.js
 // =====================================================
 // Sender Keys — Group Messaging Sécurisé
 // GematriaAead + HKDF-SHA256 + Rotation d'epoch
