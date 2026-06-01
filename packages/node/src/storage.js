@@ -1,9 +1,8 @@
 // packages/node/src/storage.js
-// =====================================================
-// StorageNode — Gestionnaire de Stockage Souverain
+// StorageNode — Gestionnaire de Stockage Souverain (Version Propre)
 // ZipMemory + Chiffrement Hybride Post-Quantique + Facturation + Réplication
-// =====================================================
 
+import crypto from 'crypto';
 import { ZipMemory } from '../../memory/src/zip_memory.js';
 import { HybridTransport } from '../../secure/src/crypto/hybrid.js';
 import { GematriaAead } from '../../secure/src/crypto/gematria_aead.js';
@@ -30,9 +29,10 @@ export class StorageNode {
     this.zipMemory = new ZipMemory(`./data/storage/${sovereignAlias}_zip`);
     this.hotCache = new Map();
 
-    // === Chiffrement Hybride ===
+    // === Chiffrement Hybride + Stockage réel ===
     this.hybrid = new HybridTransport(true);
-    this.encryptedFiles = new Map(); // filename → cid
+    this.encryptedFiles = new Map();     // filename → { cid, encryptedData }
+    this.fileData = new Map();           // filename → encrypted bytes (pour download réel)
 
     // === Facturation ===
     this.lastBillingUpdate = Date.now();
@@ -41,7 +41,7 @@ export class StorageNode {
   }
 
   // =====================================================
-  // UPLOAD AVEC ZIP + CHIFFREMENT HYBRIDE
+  // UPLOAD AVEC ZIP + CHIFFREMENT HYBRIDE (vraie logique)
   // =====================================================
   async uploadFile(filename, data, rewards = null) {
     const rawSizeGb = data.length / (1024 ** 3);
@@ -50,24 +50,25 @@ export class StorageNode {
       throw new Error('Quota de stockage dépassé');
     }
 
-    // Compression
+    // 1. Compression réelle
     const compressed = await this.zipMemory.compress(data);
     const compressedSizeGb = compressed.length / (1024 ** 3);
 
-    // Chiffrement Hybride
+    // 2. Chiffrement Hybride Post-Quantique
     const [key, nonce] = this.hybrid.deriveKeys();
     const aead = new GematriaAead(key, nonce);
     const encrypted = aead.encrypt(compressed);
 
+    // 3. Stockage réel
     const cid = `skn:${crypto.randomUUID()}`;
+    this.encryptedFiles.set(filename, { cid, encryptedData: encrypted });
+    this.fileData.set(filename, encrypted); // pour download
 
     this.usedStorageGb += compressedSizeGb;
     this.totalFiles++;
-    this.encryptedFiles.set(filename, cid);
-
     this.updateMonthlyCost();
 
-    // Récompense
+    // 4. Récompense (si fournie)
     if (rewards && typeof rewards.addReward === 'function') {
       rewards.addReward('StorageContribution', 3);
     }
@@ -78,14 +79,14 @@ export class StorageNode {
   }
 
   // =====================================================
-  // DOWNLOAD
+  // DOWNLOAD (vraie logique - plus de placeholder)
   // =====================================================
   async downloadFile(filename) {
-    const cid = this.encryptedFiles.get(filename);
-    if (!cid) return null;
+    const fileEntry = this.encryptedFiles.get(filename);
+    if (!fileEntry) return null;
 
-    // Simulation récupération (à connecter à vrai stockage décentralisé)
-    const encrypted = new Uint8Array(1024); // Placeholder
+    const encrypted = fileEntry.encryptedData || this.fileData.get(filename);
+    if (!encrypted) return null;
 
     const [key, nonce] = this.hybrid.deriveKeys();
     const aead = new GematriaAead(key, nonce);
@@ -98,11 +99,12 @@ export class StorageNode {
   }
 
   // =====================================================
-  // DELETE
+  // DELETE (vraie logique)
   // =====================================================
   deleteFile(filename) {
     if (this.encryptedFiles.has(filename)) {
       this.encryptedFiles.delete(filename);
+      this.fileData.delete(filename);
       this.totalFiles = Math.max(0, this.totalFiles - 1);
       return true;
     }
