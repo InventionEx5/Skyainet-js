@@ -1,9 +1,7 @@
 // packages/model/src/thevie/lora_evolution.js
-// =====================================================
-// LoraEvo — Guide Intelligent & Auto-Évolutif (Production Ready)
+// LoraEvo — Guide Intelligent & Auto-Évolutif (Version Finale Propre)
 // Connecté à T369Inference + DreamCycle + EvolutionManager + LoRA Training réel
 // SkyAInet × Thevie × Nikola T369
-// =====================================================
 
 import { Dilithium5Signer } from '../../../secure/src/crypto/dilithium.js';
 
@@ -20,15 +18,18 @@ export class EvolutionProfile {
 export class LoraEvo {
   constructor() {
     this.modelName = "LoraEvo v4.1";
-    this.inferenceEngine = null;                    // T369Inference
-    this.shortTermMemory = [];                      // Dernières interactions (max 40)
-    this.longTermKnowledge = [];                    // Connaissances consolidées (max 25)
+    this.inferenceEngine = null;
+    this.shortTermMemory = [];
+    this.longTermKnowledge = [];
     this.evolutionProfile = new EvolutionProfile();
     this.totalInteractions = 0;
     this.evolutionScore = 0.68;
     this.currentSpecialization = "Guide Polyvalent";
     this.lastAdaptation = Date.now();
+
+    // === Champs privés correctement déclarés ===
     this.#signer = new Dilithium5Signer();
+    this.#loraTrainer = null;
     this.#trainingCount = 0;
   }
 
@@ -69,54 +70,54 @@ export class LoraEvo {
   }
 
   // ============================================================
-// ENTRAÎNEMENT LOURD (vraie logique - sans simulation)
-// ============================================================
-async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
-  if (lessons.length < 8) {
-    return { trained: false, reason: "Pas assez de leçons" };
+  // ENTRAÎNEMENT LOURD (vraie logique - sans simulation)
+  // ============================================================
+  async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
+    if (lessons.length < 8) {
+      return { trained: false, reason: "Pas assez de leçons" };
+    }
+
+    if (!this.#loraTrainer || typeof this.#loraTrainer.train !== 'function') {
+      throw new Error("LoRATrainer non injecté. Utilise injectLoRATrainer() avant d'appeler train().");
+    }
+
+    this.#trainingCount++;
+
+    // === VRAI ENTRAÎNEMENT LoRA ===
+    const trainingResult = await this.#loraTrainer.train({
+      lessons,
+      epochs,
+      learningRate,
+      batchSize: 4,
+    });
+
+    // Signature post-quantique
+    const digest = new TextEncoder().encode(
+      `loraevo_v\( {this.#trainingCount}_ \){Date.now()}_${trainingResult.finalLoss.toFixed(4)}`
+    );
+    const signature = this.#signer.sign(digest);
+
+    // Checkpoint
+    const checkpoint = {
+      version: this.#trainingCount,
+      loss: trainingResult.finalLoss,
+      epochs: trainingResult.epochs,
+      signature: Array.from(signature),
+      timestamp: Date.now(),
+    };
+
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(`loraevo_checkpoint_v${this.#trainingCount}`, JSON.stringify(checkpoint));
+    }
+
+    return {
+      trained: true,
+      lessons: lessons.length,
+      finalLoss: trainingResult.finalLoss,
+      epochs: trainingResult.epochs,
+      signatureBytes: signature.length,
+    };
   }
-
-  if (!this.#loraTrainer || typeof this.#loraTrainer.train !== 'function') {
-    throw new Error("LoRATrainer non injecté. Utilise injectLoRATrainer() avant d'appeler train().");
-  }
-
-  this.#trainingCount++;
-
-  // === VRAI ENTRAÎNEMENT LoRA ===
-  const trainingResult = await this.#loraTrainer.train({
-    lessons,
-    epochs,
-    learningRate,
-    batchSize: 4,
-  });
-
-  // Signature post-quantique
-  const digest = new TextEncoder().encode(
-    `loraevo_v\( {this.#trainingCount}_ \){Date.now()}_${trainingResult.finalLoss.toFixed(4)}`
-  );
-  const signature = this.#signer.sign(digest);
-
-  // Checkpoint
-  const checkpoint = {
-    version: this.#trainingCount,
-    loss: trainingResult.finalLoss,
-    epochs: trainingResult.epochs,
-    signature: Array.from(signature),
-    timestamp: Date.now(),
-  };
-
-  if (typeof localStorage !== "undefined") {
-    localStorage.setItem(`loraevo_checkpoint_v${this.#trainingCount}`, JSON.stringify(checkpoint));
-  }
-
-  return {
-    trained: true,
-    lessons: lessons.length,
-    finalLoss: trainingResult.finalLoss,
-    epochs: trainingResult.epochs,
-    signatureBytes: signature.length,
-  };
-}
 
   // ============================================================
   // MÉTHODES PRIVÉES
@@ -137,17 +138,14 @@ async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
   }
 
   #learnFromInteraction(prompt, response) {
-    // Mémoire courte
     this.shortTermMemory.push(`Q: ${prompt} | R: ${response.slice(0, 80)}`);
     if (this.shortTermMemory.length > 40) this.shortTermMemory.shift();
 
-    // Mémoire longue
     if (response.length > 120) {
       this.longTermKnowledge.push(response);
       if (this.longTermKnowledge.length > 25) this.longTermKnowledge.shift();
     }
 
-    // Adaptation de spécialisation
     const lower = prompt.toLowerCase();
     if (lower.includes("code") || lower.includes("rust") || lower.includes("technique")) {
       this.currentSpecialization = "Technique & Programmation";
@@ -167,6 +165,13 @@ async train({ lessons = [], epochs = 4, learningRate = 2e-4 }) {
   // ============================================================
   // API PUBLIQUE
   // ============================================================
+  injectLoRATrainer(trainer) {
+    if (trainer && typeof trainer.train === 'function') {
+      this.#loraTrainer = trainer;
+      console.info("[LoraEvo] LoRATrainer injecté avec succès");
+    }
+  }
+
   getStatus() {
     return `LoraEvo v4.1 | Évolution: ${this.evolutionScore.toFixed(3)} | Interactions: ${this.totalInteractions} | Spécialisation: ${this.currentSpecialization} | Mémoire: ${this.shortTermMemory.length} court / ${this.longTermKnowledge.length} long`;
   }
