@@ -1,178 +1,269 @@
 // packages/sentinel/src/auto_healing.js
 // =====================================================
 // Sentinel — Auto‑Healing & Self‑Defense Intelligent
-// SkyAInet – Détection avancée + Actions autonomes + Intégration Thevie & Rewards
+// SkyAInet — Détection avancée + Actions autonomes
+// SkyAInet × Nikola T369
 // =====================================================
 
-import { UserRewards, RewardReason } from '../../core/src/rewards.js';
-import { SkyAInetNode } from '../../node/src/node.js';
+"use strict";
 
-// ----------------------------------------------------------------------
-// Niveaux de gravité
-// ----------------------------------------------------------------------
+import { UserRewards }  from '../../core/src/rewards.js';
+import { NodeState }    from '../../core/src/node_types.js';
+
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTES
+// ─────────────────────────────────────────────────────────────────
+
+const WISDOM_THRESHOLD_HIGH     = 0.55;    // en dessous → High
+const WISDOM_THRESHOLD_CRITICAL = 0.45;    // en dessous → Critical
+const REP_BOOST                 = 0.12;
+const REP_CAP                   = 1.0;
+const REWARD_HEALING            = 25;      // SKY par guérison
+const HEALING_HISTORY_MAX       = 256;
+
+// ─────────────────────────────────────────────────────────────────
+// NIVEAUX DE GRAVITÉ
+// ─────────────────────────────────────────────────────────────────
+
 export const IssueSeverity = Object.freeze({
-  Low:      'Low',
-  Medium:   'Medium',
-  High:     'High',
+  Low     : 'Low',
+  Medium  : 'Medium',
+  High    : 'High',
   Critical: 'Critical',
 });
 
-// ----------------------------------------------------------------------
-// Actions de guérison
-// ----------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// ACTIONS DE GUÉRISON
+// ─────────────────────────────────────────────────────────────────
+
 export const HealingAction = Object.freeze({
-  TriggerFlashGematria: 'TriggerFlashGematria',
-  EnterLowPowerMode:    'EnterLowPowerMode',
-  WakeNode:             'WakeNode',
-  BoostReputation:       'BoostReputation',
-  RebalanceCollective:  'RebalanceCollective',
-  PruneOldData:         'PruneOldData',
-  StartDreamCycle:      'StartDreamCycle',
+  TriggerFlashGematria : 'TriggerFlashGematria',   // génération IA pour stimuler la sagesse
+  StartDreamCycle      : 'StartDreamCycle',        // runEvolutionCycle
+  SyncNetwork          : 'SyncNetwork',            // syncWithNetwork
+  BoostReputation      : 'BoostReputation',        // incrémente wisdomScore interne
+  RebalanceCollective  : 'RebalanceCollective',    // diversityInjection sur le mesh
+  PruneOldData         : 'PruneOldData',           // replicateFiles / nettoyage
+  InjectLesson         : 'InjectLesson',           // injectLesson avec contenu correctif
 });
 
-// ----------------------------------------------------------------------
-// Problème détecté
-// ----------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// PROBLÈME DÉTECTÉ
+// ─────────────────────────────────────────────────────────────────
+
 export class DetectedIssue {
   constructor(message, severity, affectedNode = null) {
-    this.message = message;
-    this.severity = severity;
-    this.timestamp = new Date();
-    this.affectedNode = affectedNode; // string (peerId)
+    this.message      = message;
+    this.severity     = severity;
+    this.timestamp    = new Date();
+    this.affectedNode = affectedNode;
   }
 }
 
-// ----------------------------------------------------------------------
-// Sentinel
-// ----------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────
+// SENTINEL / AUTO HEALING
+// ─────────────────────────────────────────────────────────────────
+
 export class Sentinel {
+  #healingHistory;   // { action, issue, ts }[]
+
   constructor() {
     this.issuesDetected = 0;
     this.healsPerformed = 0;
-    this.lastHealing = null;        // Date | null
-    this.healingHistory = [];       // Array<{ action: string, timestamp: Date }>
+    this.lastHealing    = null;
+    this.#healingHistory= [];
   }
 
-  // ---------- Détection avancée ----------
+  // ─── Détection ────────────────────────────────────────────────
+
   /**
-   * Analyse un nœud et retourne les problèmes détectés.
-   * @param {SkyAInetNode} node
-   * @returns {Array<DetectedIssue>}
+   * Analyse l'état d'un SkyNode via `getStatus()` (API publique)
+   * et retourne la liste des problèmes détectés.
+   *
+   * Critères :
+   *   - wisdomScore < WISDOM_THRESHOLD_HIGH     → High
+   *   - wisdomScore < WISDOM_THRESHOLD_CRITICAL → Critical (additif)
+   *   - state === Sleeping ou Idle              → Medium
+   *   - engineReady === false                   → High
+   *   - peers === 0                             → Low
+   *
+   * @param {object} node  — SkyNode instance
+   * @returns {DetectedIssue[]}
    */
   detectIssues(node) {
+    const status = node.getStatus();
     const issues = [];
+    const id     = status.id ?? 'unknown';
 
-    // Sagesse collective trop basse (reputation_score est utilisé comme proxy)
-    if (node.metadata.reputationScore < 0.55) {
-      issues.push(new DetectedIssue(
-        'Sagesse collective trop basse',
-        IssueSeverity.High,
-        node.metadata.peerId,
-      ));
+    if (status.wisdomScore < WISDOM_THRESHOLD_CRITICAL) {
+      issues.push(new DetectedIssue('Sagesse critique — risque de dégradation', IssueSeverity.Critical, id));
+    } else if (status.wisdomScore < WISDOM_THRESHOLD_HIGH) {
+      issues.push(new DetectedIssue('Sagesse trop basse', IssueSeverity.High, id));
     }
 
-    // Réputation critique
-    if (node.metadata.reputationScore < 0.45) {
-      issues.push(new DetectedIssue(
-        'Réputation du nœud critique',
-        IssueSeverity.Critical,
-        node.metadata.peerId,
-      ));
+    if (status.state === NodeState.Sleeping || status.state === NodeState.Idle) {
+      issues.push(new DetectedIssue('Nœud inactif', IssueSeverity.Medium, id));
     }
 
-    // Nœud en veille
-    if (node.state === 'Sleeping') {
-      issues.push(new DetectedIssue(
-        'Nœud inactif depuis longtemps',
-        IssueSeverity.Medium,
-        node.metadata.peerId,
-      ));
+    if (status.engineReady === false) {
+      issues.push(new DetectedIssue('Moteur T369 non initialisé', IssueSeverity.High, id));
+    }
+
+    if (status.peers === 0) {
+      issues.push(new DetectedIssue('Aucun pair connecté', IssueSeverity.Low, id));
     }
 
     if (issues.length > 0) {
       this.issuesDetected += issues.length;
-      console.warn(`[Sentinel] ${issues.length} problème(s) détecté(s)`);
+      console.warn(`[Sentinel] ${issues.length} problème(s) : ${issues.map(i => i.message).join(' | ')}`);
     }
 
     return issues;
   }
 
-  // ---------- Choix de l'action ----------
-  /**
-   * Sélectionne la meilleure action en fonction de la gravité.
-   * @param {DetectedIssue} issue
-   * @returns {string} clé de HealingAction
-   */
+  // ─── Sélection de l'action ────────────────────────────────────
+
   chooseHealingAction(issue) {
     switch (issue.severity) {
-      case IssueSeverity.Critical: return HealingAction.TriggerFlashGematria;
-      case IssueSeverity.High:     return HealingAction.StartDreamCycle;
-      case IssueSeverity.Medium:   return HealingAction.EnterLowPowerMode;
-      default:                     return HealingAction.PruneOldData;
+      case IssueSeverity.Critical:
+        return issue.message.includes('Moteur')
+          ? HealingAction.StartDreamCycle
+          : HealingAction.TriggerFlashGematria;
+      case IssueSeverity.High:
+        return issue.message.includes('Moteur')
+          ? HealingAction.InjectLesson
+          : HealingAction.StartDreamCycle;
+      case IssueSeverity.Medium:
+        return HealingAction.SyncNetwork;
+      default:
+        return HealingAction.PruneOldData;
     }
   }
 
-  // ---------- Exécution de la guérison ----------
+  // ─── Exécution ────────────────────────────────────────────────
+
   /**
-   * Applique les actions de guérison sur le nœud et attribue des récompenses.
-   * @param {Array<DetectedIssue>} issues
-   * @param {SkyAInetNode} node        – mutable
-   * @param {UserRewards} rewards      – mutable
+   * Applique les actions de guérison sur le nœud.
+   *
+   * Toutes les actions utilisent l'API publique de SkyNode :
+   *   - runEvolutionCycle()      — StartDreamCycle
+   *   - generateWithAI(...)      — TriggerFlashGematria (stimulus IA)
+   *   - syncWithNetwork()        — SyncNetwork
+   *   - injectLesson(...)        — InjectLesson
+   *   - replicateFiles()         — PruneOldData
+   *
+   * Aucune mutation directe des champs privés.
+   *
+   * @param {DetectedIssue[]} issues
+   * @param {object}          node     — SkyNode
+   * @param {UserRewards|null} rewards
    */
-  async triggerHealing(issues, node, rewards) {
+  async triggerHealing(issues, node, rewards = null) {
     for (const issue of issues) {
       const action = this.chooseHealingAction(issue);
 
-      switch (action) {
-        case HealingAction.TriggerFlashGematria:
-          await node.triggerFlashGematria();
-          rewards.addReward(RewardReason.HealingContribution, 25);
-          break;
+      try {
+        switch (action) {
+          case HealingAction.TriggerFlashGematria:
+            // Stimule la sagesse via une génération IA ciblée
+            await node.generateWithAI({
+              prompt        : 'Auto-guérison : renforce la sagesse collective et l\'intégrité du nœud.',
+              ai            : 'thevie',
+              maxTokens     : 64,
+              useSpeculative: false,
+            });
+            break;
 
-        case HealingAction.EnterLowPowerMode:
-          await node.enterLowPowerMode();
-          break;
+          case HealingAction.StartDreamCycle:
+            await node.runEvolutionCycle();
+            break;
 
-        case HealingAction.WakeNode:
-          await node.wake();
-          break;
+          case HealingAction.SyncNetwork:
+            await node.syncWithNetwork();
+            break;
 
-        case HealingAction.BoostReputation:
-          node.metadata.reputationScore = Math.min(
-            1.0,
-            node.metadata.reputationScore + 0.12,
-          );
-          break;
+          case HealingAction.InjectLesson:
+            await node.injectLesson(
+              'Leçon auto-corrective : maintenir la cohérence du réseau et la qualité des contributions.'
+            );
+            break;
 
-        case HealingAction.RebalanceCollective:
-          console.debug('[Sentinel] Rebalancing collective wisdom');
-          // Appel à une fonction de rééquilibrage si disponible
-          break;
+          case HealingAction.PruneOldData:
+            await node.replicateFiles?.().catch(() => {});
+            break;
 
-        case HealingAction.PruneOldData:
-          if (node.zipMemory) {
-            await node.zipMemory.compressInactiveData();
-          }
-          break;
+          case HealingAction.BoostReputation:
+            // Sagesse indirectement boostée via une leçon + dream cycle
+            await node.injectLesson('Consolidation de la réputation par injection de connaissance.');
+            break;
 
-        case HealingAction.StartDreamCycle:
-          await node.runEvolutionCycle();
-          break;
+          case HealingAction.RebalanceCollective:
+            // Déclenche un cycle d'évolution plus profond
+            await node.runEvolutionCycle();
+            await node.syncWithNetwork();
+            break;
+        }
+
+        // Récompense de guérison
+        if (rewards instanceof UserRewards) {
+          rewards.totalSkyEarned += REWARD_HEALING;
+        }
+
+        this.#record(action, issue);
+        this.healsPerformed++;
+        console.info(`[Sentinel] ✅ Action ${action} appliquée (${issue.severity}: ${issue.message})`);
+
+      } catch (err) {
+        console.error(`[Sentinel] ❌ Action ${action} échouée : ${err.message}`);
+        this.#record(action, issue, err.message);
       }
-
-      this.healingHistory.push({
-        action,
-        timestamp: new Date(),
-      });
-      this.healsPerformed += 1;
     }
 
     this.lastHealing = new Date();
-    console.info(`[Sentinel] Healing completed: ${issues.length} action(s) performed`);
+    console.info(`[Sentinel] Healing terminé — ${issues.length} action(s)`);
   }
 
-  // ---------- Résumé ----------
+  // ─── Basique (compatibilité Thevie) ──────────────────────────
+
+  /**
+   * Version synchrone légère pour les appelants qui ne veulent pas
+   * await (ex. processQuery dans thevie.js).
+   * Détecte et lance la guérison en arrière-plan.
+   */
+  detectAndHealAsync(node, rewards = null) {
+    const issues = this.detectIssues(node);
+    if (issues.length > 0) {
+      this.triggerHealing(issues, node, rewards).catch(e =>
+        console.warn('[Sentinel] Healing background:', e.message)
+      );
+    }
+    return issues;
+  }
+
+  // ─── Lecture ─────────────────────────────────────────────────
+
+  getHistory(limit = 50) {
+    return this.#healingHistory.slice(-limit);
+  }
+
   summary() {
-    return `Sentinel | Issues: ${this.issuesDetected} | Heals: ${this.healsPerformed} | Last healing: ${this.lastHealing?.toISOString() ?? 'never'}`;
+    return {
+      issuesDetected: this.issuesDetected,
+      healsPerformed: this.healsPerformed,
+      lastHealing   : this.lastHealing?.toISOString() ?? null,
+      historySize   : this.#healingHistory.length,
+    };
+  }
+
+  // ─── Privés ───────────────────────────────────────────────────
+
+  #record(action, issue, error = null) {
+    this.#healingHistory.push({
+      action,
+      severity : issue.severity,
+      message  : issue.message,
+      ts       : new Date().toISOString(),
+      error,
+    });
+    if (this.#healingHistory.length > HEALING_HISTORY_MAX) this.#healingHistory.shift();
   }
 }
