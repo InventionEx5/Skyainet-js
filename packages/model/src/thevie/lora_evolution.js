@@ -17,7 +17,7 @@ export class EvolutionProfile {
 
 export class LoraEvo {
   constructor() {
-    this.modelName = "LoraEvo v4.1";
+    this.modelName = "LoraEvo";
     this.inferenceEngine = null;
     this.shortTermMemory = [];
     this.longTermKnowledge = [];
@@ -134,7 +134,7 @@ export class LoraEvo {
 
     context += `\n[Profil LoraEvo] Spécialisation: ${this.currentSpecialization} | Score évolution: ${this.evolutionScore.toFixed(2)}\n`;
 
-    return `Tu es LoraEvo v4.1, un assistant intelligent, bienveillant et auto-évolutif de SkyAInet.\nTu apprends en continu et t'adaptes à l'utilisateur.\n\n${context.trim()}\nUtilisateur : ${prompt}\nLoraEvo :`;
+    return `Tu es LoraEvo, un assistant intelligent, bienveillant et auto-évolutif de SkyAInet.\nTu apprends en continu et t'adaptes à l'utilisateur.\n\n${context.trim()}\nUtilisateur : ${prompt}\nLoraEvo :`;
   }
 
   #learnFromInteraction(prompt, response) {
@@ -173,7 +173,7 @@ export class LoraEvo {
   }
 
   getStatus() {
-    return `LoraEvo v4.1 | Évolution: ${this.evolutionScore.toFixed(3)} | Interactions: ${this.totalInteractions} | Spécialisation: ${this.currentSpecialization} | Mémoire: ${this.shortTermMemory.length} court / ${this.longTermKnowledge.length} long`;
+    return `LoraEvo | Évolution: ${this.evolutionScore.toFixed(3)} | Interactions: ${this.totalInteractions} | Spécialisation: ${this.currentSpecialization} | Mémoire: ${this.shortTermMemory.length} court / ${this.longTermKnowledge.length} long`;
   }
 
   getEvolutionProfile() {
