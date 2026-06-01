@@ -1,4 +1,4 @@
-// packages/secure/src/messaging.js
+// packages/secure/src/contacts/messaging.js
 // =====================================================
 // Messaging — Secure Messaging + ZipMemory Storage
 // KemT369 + Messages Éphémères + Burn After Read
