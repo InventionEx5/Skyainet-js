@@ -115,3 +115,24 @@ export class NodeIdentity {
     };
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// HELPER INTERNE
+// ─────────────────────────────────────────────────────────────────
+
+function _peerKey(peerId) {
+  if (typeof peerId === 'string') return peerId.toLowerCase();
+  return Array.from(peerId).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EXPORT PAR DÉFAUT — compatibilité
+// ─────────────────────────────────────────────────────────────────
+
+export default {
+  NodeType, NodeRole, NodeState, SubscriptionLevel, ReputationTier,
+  NodeCapabilities, NodeIdentity, Attestation,
+  isPaidNodeType, monthlyPriceEur, computeMultiplier,
+  isOperationalState, isPaidSubscription, reputationTierFromScore,
+  defaultCapabilitiesForType, isEdgeNode, requiresPaidSubscription,
+};
