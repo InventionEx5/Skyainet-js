@@ -46,6 +46,8 @@ const ROMAN_NONCE = new Uint8Array(12).fill(0x00);
 export class FederatedSync {
   #roman;       // RomanT369 — chiffrement des leçons en transit
   #timer;       // handle setInterval — sync en arrière-plan
+  #instances;   // Map<instanceId, peerId> — registre des instances nommées
+  #maxInstances;
 
   #stats;
   #mesh;         // MeshIn reference
@@ -71,6 +73,8 @@ export class FederatedSync {
     this.minQualityThreshold   = opts.minQuality      ?? MIN_QUALITY_THRESHOLD;
     this.minReputationThreshold= opts.minReputation   ?? MIN_REPUTATION_THRESHOLD;
     this.maxLessonsPerSync     = opts.maxLessons      ?? MAX_LESSONS_PER_SYNC;
+    this.#maxInstances         = opts.maxInstances    ?? 12;
+    this.#instances            = new Map();   // Map<instanceId, peerId>
 
     // Clé RomanT369 éphémère par instance pour que chaque nœud produit
     // des ciphertexts distincts (même leçon → ciphertexts différents)
@@ -78,11 +82,12 @@ export class FederatedSync {
     this.#timer = null;
 
     this.#stats = {
-      totalSyncs        : 0,
-      lessonsPropagated : 0,
-      lessonsReceived   : 0,
-      failedBroadcasts  : 0,
-      lastSync          : null,
+      totalSyncs              : 0,
+      lessonsPropagated       : 0,
+      lessonsReceived         : 0,
+      failedBroadcasts        : 0,
+      lastSync                : null,
+      totalDataTransferredBytes: 0,
     };
   }
 
@@ -234,10 +239,53 @@ export class FederatedSync {
     }
   }
 
+  // ─── Registre d'instances (port de replication_manager.rs) ──
+
+  /**
+   * Crée une instance nommée et lui assigne un peerId unique.
+   * @param {string} [instanceName] — nom personnalisé ou auto-généré
+   * @returns {string} instanceId créé
+   */
+  createInstance(instanceName = null) {
+    if (this.#instances.size >= this.#maxInstances) {
+      throw new Error(`Limite d'instances atteinte (${this.#maxInstances})`);
+    }
+    const parent = 'thevie';
+    const id     = instanceName ?? `${parent}-clone-${this.#instances.size + 1}`;
+    const peerId = `peer-${Math.random().toString(36).slice(2, 14)}`;
+    this.#instances.set(id, peerId);
+    console.info(`[FederatedSync] Instance créée : ${id} (peerId: ${peerId}) — total: ${this.#instances.size}`);
+    return id;
+  }
+
+  /**
+   * Supprime une instance du registre.
+   * @param {string} instanceId
+   * @returns {boolean}
+   */
+  removeInstance(instanceId) {
+    const removed = this.#instances.delete(instanceId);
+    if (removed) console.info(`[FederatedSync] Instance supprimée : ${instanceId}`);
+    return removed;
+  }
+
+  /** true si la réplication est possible (instances disponibles). */
+  canReplicate() {
+    return this.#instances.size < this.#maxInstances;
+  }
+
+  /** Liste les IDs d'instances actives. */
+  listInstances() { return [...this.#instances.keys()]; }
+
+  get instanceCount() { return this.#instances.size; }
+
   // ─── Stats ───────────────────────────────────────────────────
 
   getStats() {
-    return { ...this.#stats };
+    return {
+      ...this.#stats,
+      activeInstances: this.#instances.size,
+    };
   }
 
   // ─── Privés ───────────────────────────────────────────────────
@@ -262,9 +310,10 @@ export class FederatedSync {
     const serialized = TE.encode(JSON.stringify(lesson));
     const encrypted  = this.#roman.encrypt(serialized);
 
+    this.#stats.totalDataTransferredBytes += encrypted.length;
+
     if (this.#node && typeof this.#node.syncWithNetwork === 'function') {
       await this.#node.syncWithNetwork();
-      // La leçon chiffrée est disponible dans le bus du nœud
       console.debug(`[FederatedSync] Leçon diffusée via SkyNode (${encrypted.length} octets chiffrés)`);
     } else {
       console.debug('[FederatedSync] [LOCAL] Leçon prête pour diffusion future');
