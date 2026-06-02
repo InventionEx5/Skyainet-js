@@ -25,28 +25,49 @@ const COMP_RANGE  = 0.22;
 // Port de LocalMemory — arrivera via memory.rs
 // ─────────────────────────────────────────────────────────────────
 
-class LocalMemory {
-  #lessons;   // Lesson[]
-  #maxSize;
+// ─────────────────────────────────────────────────────────────────
+// LOCAL MEMORY — fusion memory.rs + Lesson buffer
+//
+// Deux couches :
+//   #lessons       — leçons consolidées haute qualité
+//   #interactions  — replay buffer circulaire (query + response)
+//
+// Consolidation automatique toutes les 50 interactions :
+//   purge les leçons sous CONSOLIDATION_MIN_QUALITY.
+// ─────────────────────────────────────────────────────────────────
 
-  constructor(maxSize = 64) {
-    this.#lessons = [];
-    this.#maxSize = maxSize;
+const CONSOLIDATION_EVERY       = 50;
+const CONSOLIDATION_MIN_QUALITY = 0.83;
+const SUCCESS_THRESHOLD         = 0.78;
+
+class LocalMemory {
+  #lessons;        // Lesson[]
+  #interactions;   // { query, response, timestamp, success, quality }[]
+  #maxLessons;
+  #maxInteractions;
+  #totalInteractions;
+  #lastConsolidation;
+
+  constructor(maxLessons = 80, maxInteractions = 160) {
+    this.#lessons           = [];
+    this.#interactions      = [];
+    this.#maxLessons        = maxLessons;
+    this.#maxInteractions   = maxInteractions;
+    this.#totalInteractions = 0;
+    this.#lastConsolidation = Date.now();
   }
+
+  // ─── Leçons ────────────────────────────────────────────────
 
   storeLesson(lesson) {
+    if (this.#lessons.length >= this.#maxLessons) this.#lessons.shift();
     this.#lessons.push(lesson);
-    if (this.#lessons.length > this.#maxSize) this.#lessons.shift();
   }
 
-  getRecentLessons(k = 5) {
-    return this.#lessons.slice(-k);
-  }
+  getRecentLessons(k = 5) { return this.#lessons.slice(-k); }
 
   getBestLessons(k = 5) {
-    return [...this.#lessons]
-      .sort((a, b) => b.quality - a.quality)
-      .slice(0, k);
+    return [...this.#lessons].sort((a, b) => b.quality - a.quality).slice(0, k);
   }
 
   searchLessons(query) {
@@ -56,9 +77,88 @@ class LocalMemory {
     );
   }
 
-  get size() { return this.#lessons.length; }
+  // ─── Interactions (port de memory.rs) ────────────────────
 
-  toJSON() { return this.#lessons.map(l => ({ ...l })); }
+  /**
+   * Stocke une interaction query+response et consolide périodiquement.
+   * @param {string|object} query
+   * @param {{ quality: number, text: string }} response
+   */
+  storeInteraction(query, response) {
+    const quality = response?.quality ?? 0;
+    if (this.#interactions.length >= this.#maxInteractions) this.#interactions.shift();
+    this.#interactions.push({
+      query    : typeof query === 'string' ? query : (query?.content ?? ''),
+      response : response?.text ?? '',
+      timestamp: Date.now(),
+      success  : quality > SUCCESS_THRESHOLD,
+      quality,
+    });
+    this.#totalInteractions++;
+    if (this.#totalInteractions % CONSOLIDATION_EVERY === 0) this.consolidate();
+  }
+
+  /**
+   * Replay Buffer — réflexion sur les interactions passées similaires.
+   * Détecte erreurs et succès liés à la requête courante.
+   * (port de replay_and_reflect)
+   */
+  replayAndReflect(currentQuery) {
+    const q       = currentQuery.toLowerCase();
+    const results = [];
+    for (const it of [...this.#interactions].reverse().slice(0, 12)) {
+      const past = it.query.toLowerCase();
+      if (past.includes(q) || q.includes(past)) {
+        if (!it.success) {
+          results.push(`⚠️ Erreur similaire : « ${it.query.slice(0, 60)} » (qualité ${it.quality.toFixed(2)})`);
+        } else if (it.quality > 0.88) {
+          results.push(`✅ Succès passé : « ${it.query.slice(0, 55)} » (qualité ${it.quality.toFixed(2)})`);
+        }
+      }
+    }
+    return results.length > 0 ? results : ['Aucune expérience similaire dans le replay buffer.'];
+  }
+
+  /**
+   * Purge les leçons sous le seuil de qualité. (port de consolidate)
+   */
+  consolidate() {
+    const before   = this.#lessons.length;
+    this.#lessons  = this.#lessons.filter(l => l.quality >= CONSOLIDATION_MIN_QUALITY);
+    this.#lastConsolidation = Date.now();
+    const removed  = before - this.#lessons.length;
+    if (removed > 0) console.debug(`[LocalMemory] Consolidation : ${removed} leçons purgées`);
+  }
+
+  getRecentInteractions(k = 10) { return this.#interactions.slice(-k); }
+
+  // ─── Stats & Accesseurs ──────────────────────────────────
+
+  get size()              { return this.#lessons.length; }
+  get totalInteractions() { return this.#totalInteractions; }
+  get bufferUsage()       { return this.#interactions.length / this.#maxInteractions; }
+
+  stats() {
+    const successRate = this.#interactions.length > 0
+      ? this.#interactions.filter(i => i.success).length / this.#interactions.length : 0;
+    return {
+      lessons          : this.#lessons.length,
+      interactions     : this.#interactions.length,
+      totalInteractions: this.#totalInteractions,
+      bufferUsage      : +this.bufferUsage.toFixed(3),
+      successRate      : +successRate.toFixed(3),
+    };
+  }
+
+  toJSON() {
+    return {
+      lessons     : this.#lessons.map(l => ({ ...l })),
+      interactions: this.#interactions.slice(-20),
+    };
+  }
+}
+
+
 }
 
 // ─────────────────────────────────────────────────────────────────
