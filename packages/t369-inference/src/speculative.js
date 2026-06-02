@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { T369Model } from './model.js';
+import { T369Model } from './t369.js';
 
 export class SpeculativeConfig {
   constructor() {
