@@ -1,164 +1,100 @@
 // packages/t369-inference/src/parallel.js
 // =====================================================
-// Parallel — Pipeline + Tensor Parallelism
-// Version finale ultra-optimisée pour CPU
+// Parallel — Pipeline + Tensor + Hybrid
+// Détection CPU sans 'os' (browser+Node), délègue aux TransformerBlocks
 // SkyAInet × Nikola T369
 // =====================================================
 
-import { T369Model } from './model.js';
+"use strict";
+
+import { T369Model } from './t369.js';
 
 export const ParallelStrategy = Object.freeze({
-  None: 'None',
-  Pipeline: 'Pipeline',
-  Tensor: 'Tensor',
-  Hybrid: 'Hybrid',
+  None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Hybrid: 'Hybrid',
 });
+
+function detectCpus() {
+  if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency)
+    return navigator.hardwareConcurrency;
+  try { return globalThis.require?.('os')?.cpus?.().length ?? 4; } catch { return 4; }
+}
 
 export class ParallelConfig {
   constructor() {
-    this.strategy = ParallelStrategy.None;
-    this.numWorkers = Math.min(8, require('os').cpus().length);
-    this.pipelineStages = 4;
+    this.strategy             = ParallelStrategy.None;
+    this.numWorkers           = Math.min(8, detectCpus());
+    this.pipelineStages       = 4;
     this.tensorParallelDegree = 4;
   }
 }
 
 export class ParallelExecutor {
   constructor(model, config = new ParallelConfig()) {
-    this.model = model;
-    this.config = config;
-    this.kvCache = null;
+    this.model = model; this.config = config;
   }
 
-  enableKVCache() {
-    this.model.initKVCache();
-  }
+  enableKVCache() { this.model.initKVCache(); }
 
-  // === Pipeline Parallelism ===
   async pipelineParallelForward(tokens) {
-    const numStages = this.config.pipelineStages;
     const numLayers = this.model.config.numLayers;
-    const layersPerStage = Math.ceil(numLayers / numStages);
-
-    let hidden = await this.#embedTokens(tokens);
+    const stages = this.config.pipelineStages;
+    const lps = Math.ceil(numLayers / stages);
+    const hidden = this._embed(tokens);
     const seqLen = tokens.length;
-
-    for (let stage = 0; stage < numStages; stage++) {
-      const startLayer = stage * layersPerStage;
-      const endLayer = Math.min((stage + 1) * layersPerStage, numLayers);
-
-      // Chaque stage dans une "promesse" (simule thread)
-      const stageHidden = await this.#runStage(hidden, startLayer, endLayer, seqLen);
-      hidden = stageHidden;
+    for (let s = 0; s < stages; s++) {
+      const start = s * lps, end = Math.min((s+1)*lps, numLayers);
+      for (let li = start; li < end && li < this.model.layers.length; li++)
+        this.model.layers[li].forward(hidden, seqLen, li, this.model.kvCache);
     }
-
-    console.debug(`[Parallel] Pipeline Parallel terminé (${numStages} stages)`);
     return hidden;
   }
 
-  async #runStage(hidden, startLayer, endLayer, seqLen) {
-    let h = new Float32Array(hidden);
-
-    for (let layerIdx = startLayer; layerIdx < endLayer; layerIdx++) {
-      if (layerIdx >= this.model.layers.length) break;
-
-      const layer = this.model.layers[layerIdx];
-
-      // RMSNorm + Attention
-      this.model.applyRMSNorm(h);
-      const attnOut = layer.attention.forward(h, h, h, seqLen);
-      for (let i = 0; i < h.length; i++) h[i] += attnOut[i];
-
-      // RMSNorm + MLP (MoE ou SwiGLU)
-      this.model.applyRMSNorm(h);
-      const mlpOut = this.model.swigluForward ? this.model.swigluForward(h, layer) : h;
-      for (let i = 0; i < h.length; i++) h[i] += mlpOut[i];
-    }
-
-    return h;
-  }
-
-  // === Tensor Parallelism (GQA) ===
   async tensorParallelForward(tokens) {
-    const degree = this.config.tensorParallelDegree;
-    const numHeads = this.model.config.numQueryHeads;
-    const headsPerWorker = Math.ceil(numHeads / degree);
-
-    let hidden = await this.#embedTokens(tokens);
+    const degree = Math.min(this.config.tensorParallelDegree, this.model.config.numQueryHeads);
+    const hidden = this._embed(tokens);
     const seqLen = tokens.length;
-
-    const promises = [];
-
-    for (let workerId = 0; workerId < degree; workerId++) {
-      const startHead = workerId * headsPerWorker;
-      const endHead = Math.min((workerId + 1) * headsPerWorker, numHeads);
-
-      promises.push(
-        (async () => {
-          let partial = new Float32Array(hidden);
-          for (const layer of this.model.layers) {
-            const attnOut = layer.attention.forward(partial, partial, partial, seqLen);
-            for (let i = 0; i < partial.length; i++) partial[i] += attnOut[i];
-          }
-          return partial;
-        })()
-      );
-    }
-
-    const results = await Promise.all(promises);
-
-    // Combine results
-    const finalHidden = new Float32Array(hidden.length);
-    for (const partial of results) {
-      for (let i = 0; i < finalHidden.length; i++) {
-        finalHidden[i] += partial[i];
+    const partials = [];
+    for (let w = 0; w < degree; w++) {
+      const p = new Float32Array(hidden);
+      for (const layer of this.model.layers) {
+        const attn = layer.attention.forward(p, p, p, seqLen);
+        for (let i = 0; i < p.length; i++) p[i] += attn[i];
       }
+      partials.push(p);
     }
-
-    console.debug(`[Parallel] Tensor Parallel terminé (${degree} workers)`);
-    return finalHidden;
+    const out = new Float32Array(hidden.length);
+    const inv = 1 / degree;
+    for (const p of partials) for (let i = 0; i < out.length; i++) out[i] += p[i] * inv;
+    return out;
   }
 
-  // === Hybrid Parallelism ===
   async hybridParallelForward(tokens) {
-    let hidden = await this.pipelineParallelForward(tokens);
-
-    // Tensor Parallel sur la dernière couche
-    if (this.model.layers.length > 0) {
-      const lastLayer = this.model.layers[this.model.layers.length - 1];
-      const attnOut = lastLayer.attention.forward(hidden, hidden, hidden, tokens.length);
-      for (let i = 0; i < hidden.length; i++) hidden[i] += attnOut[i];
+    const hidden = await this.pipelineParallelForward(tokens);
+    const last = this.model.layers[this.model.layers.length - 1];
+    if (last) {
+      const attn = last.attention.forward(hidden, hidden, hidden, tokens.length);
+      for (let i = 0; i < hidden.length; i++) hidden[i] += attn[i];
     }
-
-    console.debug('[Parallel] Hybrid Parallel terminé');
     return hidden;
   }
 
-  // === Méthode principale ===
   async executeParallel(tokens) {
     switch (this.config.strategy) {
-      case ParallelStrategy.Pipeline:
-        return this.pipelineParallelForward(tokens);
-      case ParallelStrategy.Tensor:
-        return this.tensorParallelForward(tokens);
-      case ParallelStrategy.Hybrid:
-        return this.hybridParallelForward(tokens);
-      default:
-        return this.model.forward(tokens);
+      case ParallelStrategy.Pipeline: return this.pipelineParallelForward(tokens);
+      case ParallelStrategy.Tensor:   return this.tensorParallelForward(tokens);
+      case ParallelStrategy.Hybrid:   return this.hybridParallelForward(tokens);
+      default:                        return this.model.forward(tokens);
     }
   }
 
-  async #embedTokens(tokens) {
+  _embed(tokens) {
+    const H = this.model.config.hiddenSize;
     const emb = this.model.embedding.dequantize();
-    const hiddenSize = this.model.config.hiddenSize;
-    const hidden = new Float32Array(tokens.length * hiddenSize);
-
+    const hidden = new Float32Array(tokens.length * H);
     for (let i = 0; i < tokens.length; i++) {
-      const start = i * hiddenSize;
-      const tokenEmb = emb.subarray(tokens[i] * hiddenSize, (tokens[i] + 1) * hiddenSize);
-      hidden.set(tokenEmb, start);
+      const src = tokens[i] * H;
+      hidden.set(emb.subarray(src, src + H), i * H);
     }
-
     return hidden;
   }
 }
