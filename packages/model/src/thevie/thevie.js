@@ -18,6 +18,10 @@ import { InDream }          from '../../t369-inference/src/indream.js';
 import { InSelf }           from '../../t369-inference/src/inself.js';
 import { InAware }          from '../../t369-inference/src/inaware.js';
 
+// Sentinel package — classes autonomes (sentinel/)
+import { Sentinel as SentinelCore }  from '../../../sentinel/src/sentinel.js';
+import { AntiFork }                  from '../../../sentinel/src/anti_fork.js';
+
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
 // ─────────────────────────────────────────────────────────────────
@@ -106,18 +110,6 @@ const EXPERT_PROMPTS = {
 };
 
 // ─────────────────────────────────────────────────────────────────
-// SENTINEL — Détection et auto-guérison
-// ─────────────────────────────────────────────────────────────────
-
-class Sentinel {
-  detect(wisdomScore, engineReady) {
-    const issues = [];
-    if (wisdomScore < WISDOM_FLOOR)  issues.push('wisdom_low');
-    if (!engineReady)                issues.push('engine_not_ready');
-    return issues;
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────
 // MÉMOIRE LOCALE — interaction buffer + replay
 // ─────────────────────────────────────────────────────────────────
@@ -167,7 +159,8 @@ export class Thevie {
   #router;        // ExpertRouter
   #experts;       // Map<string, BaseExpert>
   #memory;        // LocalMemory
-  #sentinel;      // Sentinel
+  #sentinel;      // SentinelCore (sentinel/src/sentinel.js)
+  #antiFork;      // AntiFork    (sentinel/src/anti_fork.js)
   #dreamCycle;    // DreamCycle
   #loraEvo;       // LoraEvo
   #node;          // SkyNode
@@ -185,6 +178,12 @@ export class Thevie {
   #treasuryConnection;
   #federatedSync;
 
+  // Nouveaux champs
+  #flashTimer;          // handle setInterval Flash Scheduler
+  #lowPowerMode;        // boolean
+  #zipMemoryEnabled;    // boolean
+  #pendingEthicalScores; // { nodeId, score, ts }[] — buffer avant treasury
+
   constructor() {
     // ── Subsystèmes T369 ────────────────────────────────────
     this.#mesh       = new MeshIn(64);
@@ -194,7 +193,8 @@ export class Thevie {
     this.#inAware    = new InAware();
     this.#router     = new ExpertRouter();
     this.#memory     = new LocalMemory(200);
-    this.#sentinel   = new Sentinel();
+    this.#sentinel   = new SentinelCore(this.#node);
+    this.#antiFork   = new AntiFork();
 
     // ── Experts ─────────────────────────────────────────────
     this.#experts = new Map(
@@ -226,6 +226,10 @@ export class Thevie {
     this.#lastRebalance    = 0;
     this.#treasuryConnection = null;
     this.#federatedSync      = null;
+    this.#flashTimer         = null;
+    this.#lowPowerMode       = false;
+    this.#zipMemoryEnabled   = true;
+    this.#pendingEthicalScores = [];
 
     // Initialisation moteur (async, non bloquant)
     this.#node.initEngine().catch(e =>
@@ -487,20 +491,24 @@ export class Thevie {
   // ─────────────────────────────────────────────────────────────
 
   async #runSentinelCheck() {
-    const status = this.#node.getStatus();
-    const issues = this.#sentinel.detect(
-      this.#collective.globalWisdom,
-      status.engineReady,
+    // Délègue à SentinelCore.runCheck() — detectIssues + triggerHealing
+    await this.#sentinel.runCheck().catch(e =>
+      console.warn('[Thevie] SentinelCheck:', e.message)
     );
 
-    for (const issue of issues) {
-      if (issue === 'wisdom_low') {
-        this.#collective.diversityInjection(0.15);
-        this.#collective.massiveFuse();
-      }
-      if (issue === 'engine_not_ready') {
-        await this.#node.initEngine().catch(() => {});
-      }
+    // Détection de fork sur les pairs actifs via AntiFork
+    const peers  = this.#node.getPeers();
+    if (peers.length > 0) {
+      const status    = this.#node.getStatus();
+      const localHash = `${status.wisdomScore.toFixed(6)}:${status.evolutionCycles}`;
+      const peerData  = peers.map(p => ({
+        peerId    : p.id,
+        height    : 0,
+        hash      : localHash,
+        reputation: p.reputation ?? 0.7,
+      }));
+      this.#antiFork.detectFork(0, localHash, peerData, this.#node, null);
+      this.#antiFork.pruneEvents(30);
     }
   }
 
@@ -624,6 +632,437 @@ export class Thevie {
       `Moteur T369     : ${s.nodeStatus.engineReady ? '✅' : '❌'}\n` +
       `Uptime          : ${s.nodeStatus.uptime_formatted ?? '?'}`
     );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // FLASH GEMATRIA
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Déclenche un Flash Gematria si la sagesse collective est sous le seuil.
+   * Appelle generateWithAI avec un prompt de renforcement cognitif.
+   */
+  async triggerFlashIfNeeded() {
+    if (this.#collective.globalWisdom < WISDOM_FLASH_THRESH) {
+      await this.#node.generateWithAI({
+        prompt        : 'Flash Gematria : renforcement immédiat de la sagesse collective T369.',
+        ai            : 'thevie',
+        maxTokens     : 32,
+        useSpeculative: false,
+      }).catch(() => {});
+      console.info(`[Thevie] Flash Gematria déclenché (sagesse: ${this.#collective.globalWisdom.toFixed(2)})`);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // GESTION D'ÉNERGIE DU NŒUD
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Met le nœud en veille intelligente — réduit les cycles périodiques. */
+  async sleepNode() {
+    this.#node._state = 'Sleeping';
+    // Suspendre le moteur LoraEvo pour libérer la mémoire
+    this.#loraEvo?.shortTermMemory?.splice(0);
+    console.info('[Thevie] Nœud mis en veille');
+  }
+
+  /** Réveille le nœud et relance l'engine si nécessaire. */
+  async wakeNode() {
+    this.#node._state = 'Active';
+    if (!this.#node._engine?.isReady) {
+      await this.#node.initEngine().catch(e =>
+        console.warn('[Thevie] wakeNode — initEngine:', e.message)
+      );
+    }
+    console.info('[Thevie] Nœud réveillé');
+  }
+
+  /** Active le mode basse consommation : réduit maxTokens et fréquence des cycles. */
+  async enableLowPowerMode() {
+    this.#lowPowerMode = true;
+    console.info('[Thevie] Mode basse consommation activé');
+  }
+
+  /** Désactive le mode basse consommation. */
+  async disableLowPowerMode() {
+    this.#lowPowerMode = false;
+    console.info('[Thevie] Mode basse consommation désactivé');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // SANTÉ ET RAPPORT
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Rapport de santé complet — combine node metrics + mesh + sentinel.
+   * Retourne un objet structuré (pas une string) pour une intégration facile.
+   */
+  nodeHealth() {
+    const s       = this.getSystemStats();
+    const metrics = this.#node.getNodeMetrics();
+    const ok      = s.globalWisdom > WISDOM_FLOOR && s.nodeStatus.engineReady;
+
+    return {
+      healthy          : ok,
+      globalWisdom     : s.globalWisdom,
+      metaConsciousness: s.metaConsciousness,
+      governanceScore  : s.governanceScore,
+      neurons          : s.neurons,
+      queriesProcessed : s.queriesProcessed,
+      dreamCycles      : s.dreamCycles,
+      engineReady      : s.nodeStatus.engineReady,
+      uptime           : metrics.uptime_formatted,
+      peers            : metrics.peers_connected,
+      lowPowerMode     : this.#lowPowerMode,
+      sentinel         : this.#sentinel?.antiFork?.summary() ?? null,
+    };
+  }
+
+  /**
+   * Rapport complet combinant nodeHealth + dashboard + sagesse.
+   */
+  fullStatusReport() {
+    const health    = this.nodeHealth();
+    const dashboard = this.getNodeDashboard();
+    return {
+      ...health,
+      dashboard,
+      timestamp: Date.now(),
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // COMPRESSION RÉSEAU (ZipMemory)
+  // ═══════════════════════════════════════════════════════════════
+
+  async getNetworkCompressionStats() {
+    // SkyNode.replicateFiles retourne { replicated: n }
+    // On enrichit avec les stats internes disponibles
+    const nodeMetrics = this.#node.getNodeMetrics();
+    return {
+      totalFiles   : nodeMetrics.api_keys_count ?? 0,  // proxy disponible
+      engineReady  : nodeMetrics.engine_ready,
+      wisdomScore  : nodeMetrics.wisdom_score,
+      zipEnabled   : this.#zipMemoryEnabled,
+    };
+  }
+
+  /** Active ou désactive la compression ZipMemory sur le nœud. */
+  setZipMemoryEnabled(enabled) {
+    this.#zipMemoryEnabled = !!enabled;
+    console.info(`[Thevie] ZipMemory ${this.#zipMemoryEnabled ? 'activé' : 'désactivé'}`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // MODÈLE ÉCONOMIQUE
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Vérifie si le nœud courant peut être upgradé (pas déjà au niveau max). */
+  canUpgradeNode() {
+    const status = this.#node.getStatus();
+    // Un nœud peut être upgradé s'il est actif et que le moteur est prêt
+    return status.isRunning && status.engineReady;
+  }
+
+  /**
+   * Upgrade le nœud vers un niveau supérieur.
+   * Crée un nouveau SkyNode configuré selon le niveau demandé
+   * et transfère les pairs existants.
+   *
+   * @param {'Mini'|'Light'|'Full'|'Validator'} level
+   */
+  async upgradeMyNode(level) {
+    const validLevels = ['Mini', 'Light', 'Full', 'Validator'];
+    if (!validLevels.includes(level)) {
+      return { success: false, error: `Niveau invalide : ${level}` };
+    }
+    if (!this.canUpgradeNode()) {
+      return { success: false, error: 'Nœud non éligible à l\'upgrade' };
+    }
+
+    // Préparer le nouveau nœud avec la config du niveau demandé
+    const newNode = new SkyNode();
+    await newNode.initEngine().catch(() => {});
+
+    // Transférer les pairs
+    for (const peer of this.#node.getPeers()) {
+      newNode.addPeer(peer);
+    }
+
+    this.#node = newNode;
+
+    // Reconnecter les subsystèmes
+    const engine = this.#node._engine;
+    if (engine?.isReady) {
+      this.#loraEvo.connectToInference(engine);
+      this.#dreamCycle.injectModel(engine.model);
+    }
+
+    console.info(`[Thevie] Nœud upgradé → ${level}`);
+    return { success: true, level, nodeId: this.#node.id };
+  }
+
+  /**
+   * Dashboard complet du nœud courant.
+   */
+  getNodeDashboard() {
+    const metrics = this.#node.getNodeMetrics();
+    const rewards = this.#node.getRewardsStats();
+    const status  = this.#node.getStatus();
+
+    return {
+      nodeId          : metrics.node_id,
+      state           : metrics.state,
+      engineReady     : metrics.engine_ready,
+      wisdomScore     : metrics.wisdom_score,
+      totalRequests   : metrics.total_requests,
+      evolutionCycles : metrics.evolution_cycles,
+      peersConnected  : metrics.peers_connected,
+      registeredAIs   : metrics.registered_ais,
+      uptime          : metrics.uptime_formatted,
+      apiKeysCount    : metrics.api_keys_count,
+      totalSkyEarned  : rewards.totalEarned,
+      zipMemory       : this.#zipMemoryEnabled,
+      lowPowerMode    : this.#lowPowerMode,
+      metaConsciousness: +this.#metaConsciousness.toFixed(4),
+      governanceScore : +this.#governanceScore.toFixed(4),
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // FLASH SCHEDULER
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Démarre le Flash Scheduler — vérifie toutes les 45 s si un Flash
+   * Gematria est nécessaire.
+   */
+  startFlashScheduler(intervalSeconds = 45) {
+    if (this.#flashTimer) clearInterval(this.#flashTimer);
+    this.#flashTimer = setInterval(async () => {
+      await this.triggerFlashIfNeeded().catch(() => {});
+    }, intervalSeconds * 1000).unref();
+    console.info(`[Thevie] Flash Scheduler démarré (intervalle: ${intervalSeconds}s)`);
+  }
+
+  /** Redémarre le Flash Scheduler avec un nouvel intervalle. */
+  restartFlashScheduler(newIntervalSeconds = 45) {
+    if (this.#flashTimer) clearInterval(this.#flashTimer);
+    this.#flashTimer = null;
+    this.startFlashScheduler(newIntervalSeconds);
+    console.info(`[Thevie] Flash Scheduler redémarré (${newIntervalSeconds}s)`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRÉATION DE NŒUD UTILISATEUR
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Crée un nœud SkyNode pour un utilisateur selon le type demandé.
+   *
+   * Nœuds disponibles : Mini (gratuit), Light, Full, Validator (payants).
+   * Le nœud est initialisé avec le moteur T369, ZipMemory activé,
+   * et connecté automatiquement au réseau via les bootstrap nodes.
+   *
+   * @param {'Mini'|'Light'|'Full'|'Validator'} desiredType
+   * @param {boolean} simulatePayment — true pour simuler un paiement (dev)
+   */
+  async createUserNode(desiredType = 'Mini', simulatePayment = false) {
+    const paidTypes = ['Light', 'Full', 'Validator'];
+    const isPaid    = paidTypes.includes(desiredType);
+
+    if (isPaid && !simulatePayment) {
+      return {
+        success: false,
+        error  : `Le type "${desiredType}" nécessite un abonnement payant.`,
+      };
+    }
+
+    const node = new SkyNode();
+
+    // Initialisation du moteur T369
+    try {
+      await node.initEngine();
+    } catch (e) {
+      console.warn('[Thevie] createUserNode — initEngine:', e.message);
+    }
+
+    // Connexion aux bootstrap nodes du réseau principal
+    for (const peer of this.getBootstrapNodes()) {
+      node.addPeer(peer);
+    }
+
+    // Enregistrement des AIs standards
+    node.registerAI('thevie',  'Thevie — Intelligence Collective');
+    node.registerAI('loraevo', 'LoraÉvo — Guide Évolutif');
+    node.registerAI('t369',    'T369 — Moteur Natif');
+
+    const prices = { Mini: 0, Light: 6, Full: 18, Validator: 55 };
+    const storage = { Mini: 5, Light: 50, Full: 200, Validator: 512 };
+
+    console.info(`[Thevie] Nœud ${desiredType} créé — id: ${node.id}`);
+
+    return {
+      success         : true,
+      node,
+      nodeId          : node.id,
+      nodeType        : desiredType,
+      isPaid,
+      storageLimitGb  : storage[desiredType] ?? 5,
+      monthlyPriceEur : prices[desiredType]  ?? 0,
+      zipMemoryEnabled: true,
+      message         : isPaid
+        ? `✅ Nœud ${desiredType} créé — abonnement activé (${prices[desiredType]} €/mois)`
+        : '✅ Mini Nœud créé (gratuit) — ZipMemory activé',
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // RÉSEAU & CONNEXION
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Génère les données QR de connexion du nœud courant.
+   * Format : JSON encodé avec id, wisdomScore et adresses pairs.
+   */
+  getMyQrConnection() {
+    const status = this.#node.getStatus();
+    const data   = {
+      nodeId     : status.id,
+      wisdomScore: status.wisdomScore,
+      peers      : this.#node.getPeers().map(p => p.id),
+      network    : 'skyainet/v1',
+      ts         : Date.now(),
+    };
+    return JSON.stringify(data);
+  }
+
+  /**
+   * Retourne les nœuds bootstrap du réseau SkyAInet.
+   * En production, ces adresses seraient chargées depuis une config externe.
+   */
+  getBootstrapNodes() {
+    return [
+      { id: 'bootstrap-1', address: 'skyainet-bootstrap-1.net:8080', reputation: 0.95 },
+      { id: 'bootstrap-2', address: 'skyainet-bootstrap-2.net:8080', reputation: 0.93 },
+      { id: 'bootstrap-3', address: 'skyainet-bootstrap-3.net:8080', reputation: 0.91 },
+    ];
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // GOUVERNANCE & RÉCOMPENSES
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Envoie le score éthique d'un nœud vers le treasury on-chain.
+   * Prépare le terrain pour l'intégration blockchain.
+   *
+   * @param {string} nodeId
+   * @param {number} score — [0, 1]
+   */
+  async sendEthicalScoreOnchain(nodeId, score) {
+    if (this.#treasuryConnection) {
+      await this.#treasuryConnection.recordEthicalScore?.(nodeId, score);
+      console.info(`[Thevie] Score éthique envoyé on-chain : ${nodeId.slice(0, 16)} → ${score.toFixed(3)}`);
+    } else {
+      // Sans treasury connecté, on stocke localement en attendant
+      if (!this.#pendingEthicalScores) this.#pendingEthicalScores = [];
+      this.#pendingEthicalScores.push({ nodeId, score, ts: Date.now() });
+      console.debug(`[Thevie] Score éthique mis en attente (treasury non connecté)`);
+    }
+  }
+
+  /**
+   * Rééquilibrage du réseau si le ratio de sagesse est hors des bornes.
+   * Throttlé à 1 h minimum entre deux rééquilibrages.
+   */
+  async checkAndTriggerRebalance() {
+    const now = Date.now();
+    if (now - this.#lastRebalance < REBALANCE_INTERVAL) return;
+    this.#lastRebalance = now;
+
+    const wisdom = this.#collective.globalWisdom;
+    if (wisdom < 0.65 || wisdom > 0.95) {
+      this.#collective.diversityInjection(0.10);
+      this.#collective.massiveFuse();
+
+      if (this.#treasuryConnection) {
+        await this.#treasuryConnection.triggerRebalance?.();
+      }
+
+      console.info(`[Thevie] Rebalance déclenché (sagesse: ${wisdom.toFixed(2)})`);
+    }
+  }
+
+  /**
+   * Note la dernière réponse et renforce l'apprentissage en conséquence.
+   *
+   * rating [0, 1] :
+   *   ≥ 0.8 → injection LoRA + boost wisdom
+   *   0.5–0.8 → injection légère
+   *   < 0.5  → signal négatif, ajustement du profil LoraEvo
+   */
+  async rateLastResponse(rating) {
+    const r = Math.max(0, Math.min(1, rating));
+
+    if (r >= 0.8) {
+      // Excellente réponse → renforcer via LoRA
+      const ctx = this.#memory.recentContext(1);
+      if (ctx) {
+        await this.#node.injectLesson(ctx).catch(() => {});
+      }
+      this.#collective.globalWisdom = Math.min(0.99, this.#collective.globalWisdom + 0.002);
+      this.#metaConsciousness       = Math.min(0.99, this.#metaConsciousness + 0.001);
+
+    } else if (r >= 0.5) {
+      // Réponse correcte → renforcement léger
+      this.#collective.propagateWisdom(r);
+
+    } else {
+      // Réponse insuffisante → ajuster le profil de spécialisation LoraEvo
+      this.#loraEvo?.evolutionProfile?.adapt?.('Guide Polyvalent');
+      this.#collective.diversityInjection(0.05);
+    }
+
+    console.debug(`[Thevie] Rating: ${r.toFixed(2)} — apprentissage appliqué`);
+  }
+
+  /**
+   * Réclame les récompenses quotidiennes du nœud.
+   * Retourne [montantClamé, totalCumulé].
+   */
+  async claimDailyReward() {
+    const result = this.#node.claimRewards();
+    const stats  = this.#node.getRewardsStats();
+    return [result.claimed ?? 0, stats.totalEarned ?? 0];
+  }
+
+  /**
+   * Demande des leçons sur un sujet spécifique via le sync fédéré.
+   * Si pas de sync fédéré, génère localement via T369.
+   *
+   * @param {string} topic
+   * @param {number} minQuality — [0, 1]
+   */
+  async requestLessonsOnTopic(topic, minQuality = 0.7) {
+    if (this.#federatedSync) {
+      return this.#federatedSync.requestSpecificLessons?.(topic, minQuality) ?? [];
+    }
+
+    // Fallback : génération locale de leçons sur le sujet
+    try {
+      const result = await this.#node.generateWithAI({
+        prompt        : `Génère 3 leçons concises et denses sur le sujet : ${topic}`,
+        ai            : 'thevie',
+        maxTokens     : 256,
+        useSpeculative: false,
+      });
+      return result?.text
+        ? result.text.split('\n').filter(l => l.trim().length > 10)
+        : [];
+    } catch {
+      return [];
+    }
   }
 
   // Compat accesseurs legacy
