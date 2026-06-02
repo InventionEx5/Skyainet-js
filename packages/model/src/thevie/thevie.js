@@ -50,6 +50,18 @@ const EXPERT_SPECS = [
   { name: 'text',     keys: [] },  // défaut
 ];
 
+// ExpertType — enum des types d'experts (port de moe.rs)
+const ExpertType = Object.freeze({
+  Text    : 'text',
+  Code    : 'code',
+  Analysis: 'analysis',
+  Science : 'science',
+  Ethics  : 'ethics',
+  Finance : 'finance',
+  Creative: 'creative',
+  Logic   : 'logic',
+});
+
 class ExpertRouter {
   #exposures = new Map();
 
@@ -70,21 +82,28 @@ class ExpertRouter {
 
 // ─────────────────────────────────────────────────────────────────
 // EXPERTS SPÉCIALISÉS — prompt engineering différencié
-// Chaque expert construit un prompt orienté et retourne un score
-// de qualité estimé basé sur la longueur et la densité de la réponse.
+// levelUp() : incrémente la compétence + monte de niveau si > 1.0
+//             (port de Expert::level_up dans moe.rs)
 // ─────────────────────────────────────────────────────────────────
 
 class BaseExpert {
   #name; #callCount = 0;
+  #competence;
+  #level;
 
-  constructor(name) { this.#name = name; }
+  constructor(name, initialCompetence = 0.80) {
+    this.#name       = name;
+    this.#competence = Math.max(0.5, Math.min(2.0, initialCompetence));
+    this.#level      = 1;
+  }
 
   buildPrompt(content) { return content; }
 
   score(text) {
     const words  = (text ?? '').split(/\s+/).filter(Boolean).length;
     const unique = new Set((text ?? '').toLowerCase().match(/\b\w+\b/g) ?? []).size;
-    return Math.min(0.99, 0.5 + (words / 200) * 0.3 + (unique / words || 0) * 0.2);
+    const compBoost = Math.min(0.07, (this.#competence - 1) * 0.07);
+    return Math.min(0.99, 0.5 + (words / 200) * 0.3 + (unique / words || 0) * 0.2 + compBoost);
   }
 
   process(query, responseText) {
@@ -94,10 +113,21 @@ class BaseExpert {
       quality   : this.score(responseText),
       expertUsed: this.#name,
       callCount : this.#callCount,
+      level     : this.#level,
+      competence: +this.#competence.toFixed(3),
     };
   }
 
-  get name() { return this.#name; }
+  /** Monte la compétence de l'expert (port de Expert::level_up dans moe.rs). */
+  levelUp() {
+    this.#competence = Math.min(2.0, this.#competence + 0.06);
+    if (this.#competence > 1.0 && this.#level < 12) this.#level++;
+    console.debug(`[Expert:${this.#name}] Level up → lvl ${this.#level} (comp: ${this.#competence.toFixed(3)})`);
+  }
+
+  get name()       { return this.#name; }
+  get competence() { return this.#competence; }
+  get level()      { return this.#level; }
 }
 
 const EXPERT_PROMPTS = {
@@ -107,6 +137,8 @@ const EXPERT_PROMPTS = {
   ethics  : c => `Tu es un philosophe éthicien. Explore les dimensions morales avec nuance.\n\n${c}`,
   finance : c => `Tu es un expert financier. Réponds avec chiffres, risques et recommandations.\n\n${c}`,
   text    : c => `Tu es Thevie, assistant bienveillant de SkyAInet. Réponds clairement et utilement.\n\n${c}`,
+  creative: c => `Tu es un créatif inspiré. Réponds avec imagination, originalité et fluidité.\n\n${c}`,
+  logic   : c => `Tu es un logicien rigoureux. Décompose le problème étape par étape.\n\n${c}`,
 };
 
 // ─────────────────────────────────────────────────────────────────
