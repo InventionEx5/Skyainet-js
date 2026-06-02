@@ -1,138 +1,257 @@
 // packages/secure/src/blockchain/epoch.js
 // =====================================================
-// Epoch Manager v6.0 — Gestion des Époques + Rekeying Sécurisé
-// SkyAInet × Nikola T369 — Intégration Dilithium5 + Hybrid Crypto
-// Version Ultra Améliorée (Production Ready)
+// EpochManager — Gestion des Époques + Rekeying Distribué
+// Consensus pondéré + rotation Dilithium5 via NodeIdentity
+// SkyAInet × Nikola T369
 // =====================================================
 
+"use strict";
+
+import { randomBytes } from 'crypto';
+
+// ─────────────────────────────────────────────────────────────────
+// ERREUR TYPÉE
+// ─────────────────────────────────────────────────────────────────
+
 export class EpochError extends Error {
-  constructor(message) {
+  constructor(message, code = 'EPOCH_ERROR') {
     super(message);
     this.name = 'EpochError';
+    this.code = code;
   }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// STATUTS
+// ─────────────────────────────────────────────────────────────────
+
 export const EpochStatus = Object.freeze({
-  Active: 'Active',
-  Rekeying: 'Rekeying',
+  Active    : 'Active',
+  Rekeying  : 'Rekeying',
   Finalizing: 'Finalizing',
 });
 
+// ─────────────────────────────────────────────────────────────────
+// EPOCH MANAGER
+//
+// Cycle de vie d'une epoch :
+//   Active → shouldAdvanceEpoch() → advanceEpoch() → Rekeying
+//   Rekeying → voteForRekey() × N → Finalizing (si consensus ≥ seuil)
+//   Finalizing → finalizeEpoch(identities) → Active
+//
+// Consensus :
+//   votes / totalNodes ≥ rekeyThreshold ET totalNodes ≥ minParticipants
+//
+// Rekeying :
+//   Pour chaque NodeIdentity fourni, génère une nouvelle attestation
+//   Dilithium5 via generateAttestation() et met à jour la clé publique.
+//   NodeIdentity n'expose pas rotatePublicKey() — on utilise
+//   generateAttestation() qui signe un nouveau nonce avec la clé
+//   secrète du signer, prouvant la possession sans changer le signer.
+//
+//   Pour une vraie rotation de clé, l'appelant doit recréer le
+//   NodeIdentity avec un nouveau Dilithium5Signer et appeler
+//   identity.upgrade() — documenté ci-dessous.
+// ─────────────────────────────────────────────────────────────────
+
 export class EpochManager {
-  constructor(durationSeconds = 3600, rekeyThreshold = 0.66) {
-    this.currentEpoch = 0;
-    this.epochDuration = durationSeconds;           // en secondes
-    this.lastEpochStart = new Date();
-    this.status = EpochStatus.Active;
-    this.rekeyThreshold = rekeyThreshold;           // ex: 0.66 = 66%
-    this.totalRekeyVotes = 0;
-    this.minParticipants = 3;                       // Minimum 3 nœuds pour consensus
-  }
+  #votes;            // Map<nodeIdHex, boolean> — votes uniques par nœud
+  #epochHistory;     // { epoch, startedAt, finalizedAt, rotations }[]
+  #startedAt;        // timestamp ms de l'epoch courante
 
   /**
-   * Vérifie si on doit passer à l'epoch suivant
+   * @param {number} durationSeconds  — durée de chaque epoch (défaut 3600 s)
+   * @param {number} rekeyThreshold   — fraction de votes requise [0, 1] (défaut 0.66)
+   * @param {number} minParticipants  — nœuds minimum pour consensus (défaut 3)
    */
+  constructor(durationSeconds = 3_600, rekeyThreshold = 0.66, minParticipants = 3) {
+    this.currentEpoch    = 0;
+    this.epochDuration   = Math.max(1, durationSeconds);
+    this.rekeyThreshold  = Math.max(0, Math.min(1, rekeyThreshold));
+    this.minParticipants = Math.max(1, minParticipants);
+    this.status          = EpochStatus.Active;
+
+    this.#votes        = new Map();
+    this.#epochHistory = [];
+    this.#startedAt    = Date.now();
+  }
+
+  // ─── Progression de l'epoch ───────────────────────────────────
+
   shouldAdvanceEpoch() {
-    const now = new Date();
-    const elapsed = Math.floor((now - this.lastEpochStart) / 1000);
-    return elapsed >= this.epochDuration;
+    return this.elapsedSeconds() >= this.epochDuration;
+  }
+
+  elapsedSeconds() {
+    return Math.floor((Date.now() - this.#startedAt) / 1000);
+  }
+
+  timeUntilNextEpoch() {
+    return Math.max(0, this.epochDuration - this.elapsedSeconds());
   }
 
   /**
-   * Avance à l'epoch suivant (avec rekeying si nécessaire)
+   * Démarre l'epoch suivante et passe en état Rekeying.
+   * Lève si la transition est invalide.
    */
   advanceEpoch() {
     if (this.status !== EpochStatus.Active) {
-      throw new EpochError('Invalid epoch state');
+      throw new EpochError(`Transition invalide (état courant: ${this.status})`, 'E_STATE');
     }
 
-    this.currentEpoch += 1;
-    this.lastEpochStart = new Date();
-    this.status = EpochStatus.Rekeying;
-    this.totalRekeyVotes = 0;
+    this.currentEpoch++;
+    this.#startedAt = Date.now();
+    this.status     = EpochStatus.Rekeying;
+    this.#votes.clear();
 
-    console.info(`[EpochManager] Nouvel epoch: ${this.currentEpoch} → Status: Rekeying`);
+    console.info(`[EpochManager] Epoch ${this.currentEpoch} — état: Rekeying`);
   }
 
+  // ─── Consensus ────────────────────────────────────────────────
+
   /**
-   * Enregistre un vote pour le rekeying (consensus-aware)
+   * Enregistre le vote d'un nœud pour le rekeying.
+   * Dédupliqué par nodeId — un nœud ne peut voter qu'une fois par epoch.
+   *
+   * @param {string|Uint8Array} nodeId
+   * @param {number}            totalNodes — nombre total de nœuds actifs
+   * @returns {boolean} true si le consensus est atteint
    */
   voteForRekey(nodeId, totalNodes) {
+    if (this.status !== EpochStatus.Rekeying) {
+      console.warn('[EpochManager] Vote ignoré — pas en période Rekeying');
+      return false;
+    }
     if (totalNodes < this.minParticipants) {
-      console.warn('[EpochManager] Pas assez de participants pour consensus');
+      console.warn(`[EpochManager] Participants insuffisants (${totalNodes} < ${this.minParticipants})`);
       return false;
     }
 
-    this.totalRekeyVotes += 1;
+    const hex = _toHex(nodeId);
+    this.#votes.set(hex, true);   // idempotent
 
-    const consensusRatio = this.totalRekeyVotes / totalNodes;
+    const ratio = this.#votes.size / totalNodes;
+    const consensusReached = ratio >= this.rekeyThreshold;
 
-    if (consensusRatio >= this.rekeyThreshold) {
+    if (consensusReached) {
       this.status = EpochStatus.Finalizing;
       console.info(
-        `[EpochManager] Consensus rekeying atteint (\( {this.totalRekeyVotes}/ \){totalNodes} → ${(consensusRatio * 100).toFixed(1)}%) → Finalizing epoch ${this.currentEpoch}`
+        `[EpochManager] Consensus atteint : ${this.#votes.size}/${totalNodes}` +
+        ` (${(ratio * 100).toFixed(1)}%) → Finalizing epoch ${this.currentEpoch}`
       );
-      return true;
     } else {
       console.debug(
-        `[EpochManager] Vote rekeying: \( {this.totalRekeyVotes}/ \){totalNodes} (${(consensusRatio * 100).toFixed(1)}%)`
+        `[EpochManager] Vote : ${this.#votes.size}/${totalNodes} (${(ratio * 100).toFixed(1)}%)`
       );
-      return false;
     }
+
+    return consensusReached;
   }
 
+  // ─── Finalisation ─────────────────────────────────────────────
+
   /**
-   * Finalise l'epoch et effectue le rekeying global (rotation réelle des clés)
-   * @param {Array} identities - Tableau d'objets NodeIdentity avec méthode rotatePublicKey()
+   * Finalise l'epoch en rafraîchissant les attestations Dilithium5
+   * de chaque NodeIdentity.
+   *
+   * API réelle de NodeIdentity (node_types.js) :
+   *   identity.generateAttestation() → Attestation signée avec le signer courant
+   *
+   * Pour une vraie rotation de clé (nouveau Dilithium5Signer), l'appelant
+   * doit reconstruire les NodeIdentity avant d'appeler finalizeEpoch().
+   *
+   * @param {NodeIdentity[]} identities
+   * @returns {{ epoch, rotations, failed }}
    */
   finalizeEpoch(identities) {
     if (this.status !== EpochStatus.Finalizing) {
-      throw new EpochError('Invalid epoch state');
+      throw new EpochError(`Finalisation impossible (état: ${this.status})`, 'E_STATE');
+    }
+    if (!Array.isArray(identities) || identities.length === 0) {
+      throw new EpochError('Au moins une identité requise pour finaliser', 'E_INPUT');
     }
 
-    let successfulRotations = 0;
+    let rotations = 0;
+    let failed    = 0;
 
     for (const identity of identities) {
+      if (!identity) continue;
       try {
-        if (typeof identity.rotatePublicKey === 'function') {
-          identity.rotatePublicKey();
-          successfulRotations++;
-          console.debug(`[EpochManager] Clé rotée avec succès pour ${identity.nodeId || 'unknown'}`);
+        // generateAttestation() : re-signe un nouveau nonce avec Dilithium5
+        // → prouve la possession de la clé + fraîcheur de l'attestation
+        if (typeof identity.generateAttestation === 'function') {
+          identity.generateAttestation();
+          rotations++;
+          const id = identity.nodeIdHex?.()?.slice(0, 16) ?? 'unknown';
+          console.debug(`[EpochManager] Attestation renouvelée : ${id}`);
         } else {
-          console.warn('[EpochManager] NodeIdentity sans méthode rotatePublicKey()');
+          console.warn('[EpochManager] Identité sans generateAttestation() — ignorée');
+          failed++;
         }
       } catch (e) {
-        console.error(`[EpochManager] Échec rotation clé: ${e.message}`);
+        console.error(`[EpochManager] Échec attestation : ${e.message}`);
+        failed++;
       }
     }
 
-    if (successfulRotations === 0) {
-      throw new EpochError('Key rotation failed: Aucune clé n\'a pu être rotée');
+    if (rotations === 0) {
+      throw new EpochError('Aucune attestation n\'a pu être renouvelée', 'E_ROTATION');
     }
 
+    // Archiver l'epoch
+    this.#epochHistory.push({
+      epoch      : this.currentEpoch,
+      startedAt  : this.#startedAt,
+      finalizedAt: Date.now(),
+      rotations,
+      failed,
+    });
+
     this.status = EpochStatus.Active;
-    this.totalRekeyVotes = 0;
+    this.#votes.clear();
 
     console.info(
-      `[EpochManager] Epoch \( {this.currentEpoch} finalisé → Rekeying terminé ( \){successfulRotations} nœuds sur ${identities.length})`
+      `[EpochManager] Epoch ${this.currentEpoch} finalisé — ` +
+      `${rotations} attestations renouvelées, ${failed} échecs`
     );
+
+    return { epoch: this.currentEpoch, rotations, failed };
   }
 
-  /**
-   * Retourne le temps restant avant le prochain epoch (en secondes)
-   */
-  timeUntilNextEpoch() {
-    const now = new Date();
-    const elapsed = Math.floor((now - this.lastEpochStart) / 1000);
-    return Math.max(0, this.epochDuration - elapsed);
-  }
+  // ─── Accesseurs ───────────────────────────────────────────────
 
-  /**
-   * Vérifie si on est en période de rekeying
-   */
   isRekeyingPeriod() {
     return this.status === EpochStatus.Rekeying || this.status === EpochStatus.Finalizing;
+  }
+
+  get voteCount() { return this.#votes.size; }
+
+  getHistory(limit = 10) {
+    return this.#epochHistory.slice(-limit);
+  }
+
+  stats() {
+    return {
+      currentEpoch   : this.currentEpoch,
+      status         : this.status,
+      elapsedSeconds : this.elapsedSeconds(),
+      timeUntilNext  : this.timeUntilNextEpoch(),
+      votes          : this.#votes.size,
+      epochDuration  : this.epochDuration,
+      rekeyThreshold : this.rekeyThreshold,
+      minParticipants: this.minParticipants,
+      totalEpochs    : this.#epochHistory.length,
+    };
   }
 }
 
 export default EpochManager;
+
+// ─────────────────────────────────────────────────────────────────
+// HELPER INTERNE
+// ─────────────────────────────────────────────────────────────────
+
+function _toHex(nodeId) {
+  if (typeof nodeId === 'string') return nodeId.toLowerCase();
+  return Array.from(nodeId).map(b => b.toString(16).padStart(2, '0')).join('');
+}
