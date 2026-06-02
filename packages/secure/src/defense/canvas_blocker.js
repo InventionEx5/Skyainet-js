@@ -1,134 +1,200 @@
 // packages/secure/src/defense/canvas_blocker.js
 // =====================================================
-// Canvas Fingerprinting Blocker — Strong Edition
-// SkyAInet × Nikola T369 — Active Evasion (AE)
+// Canvas Fingerprinting Blocker — Active Evasion
+// SkyAInet × Nikola T369
 // =====================================================
 
-import { RomanT369, GematriaMode } from '../crypto/roman_t369.js';
+"use strict";
+
+import { randomBytes }                from 'crypto';
+import { RomanT369, GematriaMode }    from '../crypto/roman_t369.js';
+
+// ─────────────────────────────────────────────────────────────────
+// NIVEAUX DE PROTECTION
+// ─────────────────────────────────────────────────────────────────
 
 export const CanvasProtectionLevel = Object.freeze({
-  Low: 'Low',       // 35% de bruit
-  Medium: 'Medium', // 65% de bruit (par défaut)
-  High: 'High',     // 82% de bruit
-  Paranoid: 'Paranoid', // 95% de bruit + perturbation RomanT369
+  Low     : 'Low',      // 35 % de bruit — quasi transparent
+  Medium  : 'Medium',   // 65 % de bruit — équilibre (défaut)
+  High    : 'High',     // 82 % de bruit
+  Paranoid: 'Paranoid', // 95 % de bruit + perturbation RomanT369
 });
 
+const NOISE_STRENGTH = {
+  [CanvasProtectionLevel.Low]     : 0.35,
+  [CanvasProtectionLevel.Medium]  : 0.65,
+  [CanvasProtectionLevel.High]    : 0.82,
+  [CanvasProtectionLevel.Paranoid]: 0.95,
+};
+
+const MAX_NOISE_BYTE = 12;  // bruit max par octet ([0, 12])
+
+// ─────────────────────────────────────────────────────────────────
+// CANVAS BLOCKER
+//
+// Pollue les données brutes d'un canvas pour empêcher le
+// fingerprinting tout en restant visuellement indiscernable.
+//
+// Niveaux Low/Medium/High : bruit pseudo-aléatoire pondéré par position.
+// Niveau Paranoid : bruit RomanT369 à clé éphémère — chaque instance
+//   produit un pattern différent, rendant la corrélation entre sessions
+//   cryptographiquement impossible.
+//
+// Clé RomanT369 : randomBytes(32) à la construction — éphémère,
+//   jamais réutilisée entre instances.
+// ─────────────────────────────────────────────────────────────────
+
 export class CanvasBlocker {
+  #roman;          // RomanT369 éphémère (Paranoid uniquement)
+  #noiseStrength;
+  #noiseTable;     // Uint8Array(256) — table de bruit HKDF précalculée
+
   constructor(level = CanvasProtectionLevel.Medium) {
-    let noiseStrength;
-    switch (level) {
-      case CanvasProtectionLevel.Low:
-        noiseStrength = 0.35;
-        break;
-      case CanvasProtectionLevel.Medium:
-        noiseStrength = 0.65;
-        break;
-      case CanvasProtectionLevel.High:
-        noiseStrength = 0.82;
-        break;
-      case CanvasProtectionLevel.Paranoid:
-        noiseStrength = 0.95;
-        break;
-      default:
-        noiseStrength = 0.65;
+    if (!CanvasProtectionLevel[level]) {
+      throw new TypeError(`Niveau invalide : ${level}`);
     }
 
-    this.noiseStrength = noiseStrength;
-    this.protectionLevel = level;
-    this.injectionCount = 0;
-    this.totalBytesModified = 0;
-    this.roman = new RomanT369(
-      new Uint8Array(32).fill(0xAB),
-      new Uint8Array(12).fill(0xCD),
-      GematriaMode.Hyper256
-    );
+    this.protectionLevel   = level;
+    this.#noiseStrength    = NOISE_STRENGTH[level] ?? 0.65;
+    this.injectionCount    = 0;
+    this.totalBytesModified= 0;
+
+    // Clé et nonce aléatoires — pattern unique par instance
+    const key   = randomBytes(32);
+    const nonce = randomBytes(12);
+    this.#roman = new RomanT369(key, nonce, GematriaMode.Hyper256);
+
+    // Précalcul d'une table de bruit de 256 octets pour les niveaux non-Paranoid
+    // Évite d'appeler Math.random() par octet — plus rapide sur grands buffers
+    this.#noiseTable = randomBytes(256);
   }
 
+  // ─── Blocage ──────────────────────────────────────────────────
+
   /**
-   * Bloque et pollue activement le fingerprinting Canvas
-   * @param {Uint8Array} canvasData - Données du canvas (modifié en place)
+   * Pollue les données canvas en place.
+   *
+   * Algorithme :
+   *   Pour chaque octet : si rand < noiseStrength → ajouter du bruit
+   *   Bruit = noiseTable[i % 256] % (MAX_NOISE_BYTE + 1)
+   *   Niveau Paranoid : bruit additionnel RomanT369 par bloc de 32 octets
+   *
+   * Modification en place pour éviter la copie de grands buffers.
+   *
+   * @param {Uint8Array} canvasData — modifié en place
    */
   blockCanvasFingerprinting(canvasData) {
     if (!(canvasData instanceof Uint8Array)) {
-      throw new Error('canvasData must be a Uint8Array');
+      throw new TypeError('canvasData doit être un Uint8Array');
     }
 
     let modified = 0;
 
+    // Niveau Paranoid : préchiffrer un bloc de 32 octets pour l'index courant
+    let romanBlock    = null;
+    let romanBlockIdx = -1;
+
     for (let i = 0; i < canvasData.length; i++) {
-      if (Math.random() < this.noiseStrength) {
-        const noise = Math.floor(Math.random() * 13); // 0..12
+      // Décision d'injection basée sur la table précalculée + position
+      const threshold = this.#noiseStrength * 255;
+      if ((this.#noiseTable[i % 256] + i) % 256 > threshold) continue;
 
-        let newVal = (canvasData[i] + noise) & 0xff;
+      // Bruit de base
+      let noise = this.#noiseTable[(i + 1) % 256] % (MAX_NOISE_BYTE + 1);
 
-        // Perturbation RomanT369 sur niveau Paranoid
-        if (this.protectionLevel === CanvasProtectionLevel.Paranoid) {
-          const romanNoise = this.roman.encrypt(new Uint8Array([newVal]))[0];
-          newVal = (newVal + (romanNoise % 7)) & 0xff;
+      // Variation selon le canal RGBA (i % 4 : R=0, G=1, B=2, A=3)
+      const channel = i % 4;
+      if (channel === 3) continue;  // ne pas toucher l'alpha — évite les artefacts
+
+      if (channel === 0) noise = (noise + 2) & 0xff;   // R — bruit légèrement plus fort
+
+      // Perturbation RomanT369 (Paranoid) par bloc de 32 octets
+      if (this.protectionLevel === CanvasProtectionLevel.Paranoid) {
+        const blockIndex = Math.floor(i / 32);
+        if (blockIndex !== romanBlockIdx) {
+          const seed       = new Uint8Array(32);
+          seed[0]          = blockIndex & 0xff;
+          seed[1]          = (blockIndex >> 8) & 0xff;
+          romanBlock       = this.#roman.encrypt(seed);
+          romanBlockIdx    = blockIndex;
         }
-
-        // Variation selon la position (bruit moins uniforme)
-        if (i % 4 === 0) {
-          newVal = (newVal + 3) & 0xff;
-        }
-
-        canvasData[i] = newVal % 255;
-        modified++;
+        noise = (noise + (romanBlock[i % 32] % 5)) & 0xff;
       }
+
+      canvasData[i] = (canvasData[i] + noise) & 0xff;
+      modified++;
     }
 
     this.injectionCount++;
     this.totalBytesModified += modified;
 
     console.debug(
-      `[CanvasBlocker] Fingerprinting bloqué — ${modified} octets modifiés (niveau: ${this.protectionLevel})`
+      `[CanvasBlocker] ${modified}/${canvasData.length} octets modifiés` +
+      ` (niveau: ${this.protectionLevel}, ratio: ${(modified/canvasData.length*100).toFixed(1)}%)`
     );
+
+    return modified;
   }
+
+  // ─── Faux canvas ──────────────────────────────────────────────
 
   /**
-   * Génère un faux Canvas réaliste
+   * Génère un faux canvas RGBA visuellement plausible (fond clair bruité).
+   * Le bruit est cohérent par blocs de 4 pixels pour éviter les artefacts
+   * de compression JPEG qui trahiraient un canvas purement aléatoire.
+   *
+   * @param {number} width
+   * @param {number} height
+   * @returns {Uint8Array} — données RGBA
    */
   generateFakeCanvas(width, height) {
+    if (width <= 0 || height <= 0) throw new RangeError('Dimensions invalides');
+
     const size = width * height * 4;
-    const fake = new Uint8Array(size);
-    let rngIndex = 0; // pour simuler la position dans la boucle
+    const data = new Uint8Array(size);
+
+    // Base lumineuse cohérente (200–245) — plausible pour un canvas de texte
+    const baseR = 200 + (randomBytes(1)[0] % 46);
+    const baseG = 200 + (randomBytes(1)[0] % 46);
+    const baseB = 200 + (randomBytes(1)[0] % 46);
+
+    // Bruit par bloc de 4 pixels pour cohérence spatiale
+    const noisePool = randomBytes(Math.ceil(size / 4));
 
     for (let i = 0; i < size; i += 4) {
-      const base = 200 + Math.floor(Math.random() * 46); // 200..245
+      const n       = noisePool[i >> 2];
+      data[i]       = Math.min(255, baseR + (n & 0x0f));
+      data[i + 1]   = Math.min(255, baseG + ((n >> 2) & 0x0f));
+      data[i + 2]   = Math.min(255, baseB + ((n >> 4) & 0x0f));
+      data[i + 3]   = 255;  // alpha opaque
 
-      fake[i]     = (base + Math.floor(Math.random() * 16)) & 0xff; // R
-      fake[i + 1] = (base + Math.floor(Math.random() * 13)) & 0xff; // G
-      fake[i + 2] = (base + Math.floor(Math.random() * 19)) & 0xff; // B
-      fake[i + 3] = 255; // Alpha
-
-      // Ajout de bruit RomanT369 sur Paranoid
-      if (this.protectionLevel === CanvasProtectionLevel.Paranoid && rngIndex % 7 === 0) {
-        const romanVal = this.roman.encrypt(new Uint8Array([fake[i]]))[0];
-        fake[i] = (fake[i] + (romanVal % 5)) & 0xff;
+      // Perturbation RomanT369 sur Paranoid
+      if (this.protectionLevel === CanvasProtectionLevel.Paranoid && (i >> 2) % 7 === 0) {
+        const seed   = new Uint8Array(32);
+        seed[0]      = (i >> 2) & 0xff;
+        const roman  = this.#roman.encrypt(seed);
+        data[i]      = (data[i] + (roman[0] % 5)) & 0xff;
       }
-
-      rngIndex++;
     }
 
-    console.info(
-      `[CanvasBlocker] Faux Canvas généré (\( {width}x \){height}) — Niveau: ${this.protectionLevel}`
-    );
-
-    return fake;
+    console.info(`[CanvasBlocker] Faux canvas ${width}×${height} généré (${size} octets)`);
+    return data;
   }
 
-  getInjectionCount() {
-    return this.injectionCount;
-  }
+  // ─── Accesseurs ───────────────────────────────────────────────
 
-  getTotalBytesModified() {
-    return this.totalBytesModified;
-  }
+  getInjectionCount()     { return this.injectionCount; }
+  getTotalBytesModified() { return this.totalBytesModified; }
+  getProtectionLevel()    { return this.protectionLevel; }
 
-  getProtectionLevel() {
-    return this.protectionLevel;
+  stats() {
+    return {
+      level              : this.protectionLevel,
+      noiseStrength      : this.#noiseStrength,
+      injectionCount     : this.injectionCount,
+      totalBytesModified : this.totalBytesModified,
+    };
   }
 }
 
-// Default export pour facilité d'utilisation
 export default CanvasBlocker;
