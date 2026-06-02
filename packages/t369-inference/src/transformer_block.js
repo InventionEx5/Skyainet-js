@@ -1,24 +1,72 @@
-// packages/t369-inference/src/index.js
+// packages/t369-inference/src/transformer_block.js
 // =====================================================
-// T369Inference — Point d'entrée (16 fichiers)
+// TransformerBlock — Pre-Norm RMSNorm + GQA/MHLA + MoE + RomanDiffusion
+// Forward in-place, RMSNorm avec weights, MoE sur dernier token
 // SkyAInet × Nikola T369
 // =====================================================
 
-export { T369Inference, ParallelMode }                        from './inference.js';
-export { T369Model, ModelConfig }                             from './model.js';
-export { TransformerBlock }                                   from './transformer_block.js';
-export { BpeTokenizer }                                       from './tokenizer.js';
-export { KVCache }                                            from './kv_cache.js';
-export { RomanAttention, RomanAttentionConfig }               from './roman_attention.js';
-export { MoELayer, MoEConfig, ExpertFFN }                     from './moe.js';
-export { RomanDiffusion }                                     from './roman_diffusion.js';
-export { QuantizedTensor, bufferPool }                        from './quant.js';
-export { SpeculativeDecoder, SpeculativeConfig }              from './speculative.js';
-export { ParallelExecutor, ParallelConfig, ParallelStrategy } from './parallel.js';
-export { InSelf, ImprovedResponse }                           from './inself.js';
-export { InAware, AwareResponse }                             from './inaware.js';
-export { InDream }                                            from './indream.js';
-export { CollectivIn, Personality }                           from './collectivin.js';
-export { MeshIn, Neuron }                                     from './meshin.js';
+"use strict";
 
-export const VERSION = '11.0.0';
+import { RomanAttention } from './roman_attention.js';
+import { MoELayer }       from './moe.js';
+import { RomanDiffusion } from './roman_diffusion.js';
+
+export class TransformerBlock {
+  constructor(hiddenSize, numQueryHeads, numKvHeads, headDim, moeConfig = null) {
+    this.hiddenSize = hiddenSize;
+
+    this.attention = new RomanAttention({
+      numQueryHeads, numKvHeads, headDim,
+      latentDim: 32, diffusionStrength: 0.38, maxSeqLen: 32768,
+      ropeBase: 10000.0, ropeScaling: 1.0, useFlash: true, useMhla: true,
+    });
+
+    this.moeLayer = new MoELayer(moeConfig ?? {
+      numExperts: 8, topK: 2, hiddenSize,
+      intermediateSize: hiddenSize * 4, bits: 4,
+    });
+
+    this.romanDiffusion = new RomanDiffusion();
+    this.norm1 = new Float32Array(hiddenSize).fill(1.0);
+    this.norm2 = new Float32Array(hiddenSize).fill(1.0);
+    this._normBuf = new Float32Array(hiddenSize);
+  }
+
+  _rmsNorm(x, weights, buf) {
+    const len = x.length, eps = 1e-6;
+    let ss = 0;
+    for (let i = 0; i < len; i++) ss += x[i] * x[i];
+    const inv = 1.0 / Math.sqrt(ss / len + eps);
+    for (let i = 0; i < len; i++) buf[i] = x[i] * inv * weights[i];
+    return buf;
+  }
+
+  // Forward in-place sur hidden [seqLen × hiddenSize]
+  forward(hidden, seqLen, layerIdx, kvCache = null) {
+    const H = this.hiddenSize;
+
+    // 1. Pre-Norm (sur tout) + Attention + Residual
+    // Norme une copie du tenseur complet pour l'attention
+    const total = H * seqLen;
+    const normedFull = new Float32Array(total);
+    for (let t = 0; t < seqLen; t++) {
+      const off = t * H;
+      let ss = 0;
+      for (let i = 0; i < H; i++) ss += hidden[off+i] * hidden[off+i];
+      const inv = 1.0 / Math.sqrt(ss / H + 1e-6);
+      for (let i = 0; i < H; i++) normedFull[off+i] = hidden[off+i] * inv * this.norm1[i];
+    }
+    const attn = this.attention.forward(normedFull, normedFull, normedFull, seqLen, kvCache, layerIdx);
+    for (let i = 0; i < total; i++) hidden[i] += attn[i];
+
+    // 2. Pre-Norm + MoE (dernier token) + Residual
+    const lastOff   = (seqLen - 1) * H;
+    const lastTok   = hidden.subarray(lastOff, lastOff + H);
+    const normed2   = this._rmsNorm(lastTok, this.norm2, this._normBuf);
+    const moeOut    = this.moeLayer.forward(normed2);
+    for (let i = 0; i < H; i++) hidden[lastOff + i] += moeOut[i];
+
+    // 3. RomanDiffusion Ultra (in-place)
+    this.romanDiffusion.applyUltra(hidden, seqLen, layerIdx, null);
+  }
+}
