@@ -1,7 +1,7 @@
 // packages/secure/src/roots/pool.js
 // =====================================================
 // PeerPool — Gestion Intelligente des Pairs
-// Sélection par réputation + diversité + DID optionnel
+// Sélection par réputation + diversité + DID (via Contact)
 // SkyAInet × Nikola T369
 // =====================================================
 
@@ -9,6 +9,7 @@
 
 import { hmacSha256, constantTimeEq } from '../crypto/sha_fips.js';
 import { randomBytes }                from 'crypto';
+import { Contact }                    from './contact.js';
 
 // ─────────────────────────────────────────────────────────────────
 // ERREUR TYPÉE
@@ -23,12 +24,7 @@ export class PeerPoolError extends Error {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// RÉPUTATION — modèle EMA (exponential moving average)
-//
-// Chaque événement positif ou négatif met à jour le score via
-// une moyenne exponentielle (α = 0.15) plutôt qu'une simple somme.
-// Cela donne un poids croissant aux événements récents et permet
-// une réhabilitation progressive sans réinitialisation brutale.
+// RÉPUTATION — modèle EMA
 // ─────────────────────────────────────────────────────────────────
 
 const REPUTATION_ALPHA = 0.15;
@@ -38,7 +34,7 @@ const REPUTATION_MAX   = 1.00;
 
 export class PeerReputation {
   #score;
-  #events;    // ring buffer des 32 derniers événements { ts, delta }
+  #events;
 
   constructor(initialScore = REPUTATION_INIT) {
     this.#score  = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, initialScore));
@@ -47,7 +43,6 @@ export class PeerReputation {
 
   get score() { return this.#score; }
 
-  /** @param {number} delta — [-1, 1] */
   update(delta) {
     const bounded = Math.max(-1, Math.min(1, delta));
     const target  = Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, this.#score + bounded * 0.3));
@@ -71,11 +66,11 @@ export class PeerReputation {
 // ─────────────────────────────────────────────────────────────────
 
 export const ReputationTier = Object.freeze({
-  UNTRUSTED : 0,    // < 0.40
-  LOW       : 1,    // 0.40 – 0.59
-  MEDIUM    : 2,    // 0.60 – 0.79
-  HIGH      : 3,    // 0.80 – 0.89
-  ELITE     : 4,    // ≥ 0.90
+  UNTRUSTED : 0,
+  LOW       : 1,
+  MEDIUM    : 2,
+  HIGH      : 3,
+  ELITE     : 4,
 
   fromScore(s) {
     if (s >= 0.90) return ReputationTier.ELITE;
@@ -96,7 +91,7 @@ export class PeerInfo {
     this.reputation      = new PeerReputation();
     this.lastSeen        = Date.now();
     this.connectionCount = 0;
-    this.contactId       = contactId;   // Uint8Array(32) | null
+    this.contactId       = contactId;
     this.failureCount    = 0;
     this.addedAt         = Date.now();
   }
@@ -110,16 +105,10 @@ export class PeerInfo {
 
 // ─────────────────────────────────────────────────────────────────
 // PEER POOL
-//
-// PeerPool gère uniquement les pairs réseau et leur réputation.
-// La gestion des contacts (identité, DID, UI) est dans contacts/.
-// Les méthodes qui acceptent un ContactManager en paramètre
-// font référence à l'interface : contactManager.get(nodeId)
-// et contact.hasDecentralizedIdentity() — découplage complet.
 // ─────────────────────────────────────────────────────────────────
 
 export class PeerPool {
-  #peers;          // Map<hex, PeerInfo>
+  #peers;
   #minReputation;
 
   constructor(opts = {}) {
@@ -127,14 +116,10 @@ export class PeerPool {
     this.#minReputation = opts.minReputation ?? 0.60;
   }
 
-  // ─── Fluent builder ───────────────────────────────────────────
-
   withMinReputation(threshold) {
     this.#minReputation = Math.max(0, Math.min(1, threshold));
     return this;
   }
-
-  // ─── Gestion des pairs ────────────────────────────────────────
 
   addPeer(nodeId, addr) {
     const hex = this.#toHex(nodeId);
@@ -143,7 +128,7 @@ export class PeerPool {
   }
 
   addPeerWithContact(nodeId, addr, contact = null) {
-    const hex       = this.#toHex(nodeId);
+    const hex = this.#toHex(nodeId);
     const contactId = contact?.nodeId ?? null;
     if (!this.#peers.has(hex)) this.#peers.set(hex, new PeerInfo(addr, contactId));
     return this;
@@ -155,19 +140,12 @@ export class PeerPool {
   len()              { return this.#peers.size; }
   isEmpty()          { return this.#peers.size === 0; }
 
-  // ─── Sélection ────────────────────────────────────────────────
-
-  /** Sélection aléatoire parmi tous les pairs vivants. */
   getRandomPeers(count) {
     const alive = this.#alivePeers();
     if (alive.length === 0) throw new PeerPoolError('No peers available', 'E_EMPTY');
     return this.#shuffleSample(alive.map(([, i]) => i.addr), count);
   }
 
-  /**
-   * Pairs dont la réputation ≥ seuil.
-   * Si un contactManager est fourni, filtre aussi sur DID vérifié.
-   */
   getHighReputationPeers(count, minReputation = null, contactManager = null) {
     const threshold  = minReputation ?? this.#minReputation;
     const candidates = [];
@@ -182,10 +160,7 @@ export class PeerPool {
     }
 
     if (candidates.length < count) {
-      throw new PeerPoolError(
-        `Not enough peers (requested: ${count}, available: ${candidates.length})`,
-        'E_INSUFFICIENT'
-      );
+      throw new PeerPoolError(`Not enough peers (requested: ${count}, available: ${candidates.length})`, 'E_INSUFFICIENT');
     }
 
     candidates.sort((a, b) =>
@@ -194,17 +169,10 @@ export class PeerPool {
     return candidates.slice(0, count).map(i => i.addr);
   }
 
-  /**
-   * Sélection diverse : round-robin par tier de réputation.
-   * Résiste aux attaques Sybil concentrées sur un seul tier.
-   */
   getDiversePeers(count) {
     const alive = this.#alivePeers().map(([, i]) => i);
     if (alive.length < count) {
-      throw new PeerPoolError(
-        `Not enough peers (requested: ${count}, available: ${alive.length})`,
-        'E_INSUFFICIENT'
-      );
+      throw new PeerPoolError(`Not enough peers (requested: ${count}, available: ${alive.length})`, 'E_INSUFFICIENT');
     }
 
     const buckets = new Map();
@@ -231,10 +199,6 @@ export class PeerPool {
     return result;
   }
 
-  /**
-   * Pairs avec DID complet (verificationLevel ≥ 2) et réputation ≥ seuil.
-   * Utilisé pour les paiements et données sensibles.
-   */
   getTrustedPeers(count, contactManager) {
     if (!contactManager) throw new PeerPoolError('ContactManager requis', 'E_CONTACT');
 
@@ -249,17 +213,12 @@ export class PeerPool {
     }
 
     if (candidates.length < count) {
-      throw new PeerPoolError(
-        `Not enough trusted peers (requested: ${count}, available: ${candidates.length})`,
-        'E_INSUFFICIENT'
-      );
+      throw new PeerPoolError(`Not enough trusted peers (requested: ${count}, available: ${candidates.length})`, 'E_INSUFFICIENT');
     }
 
     candidates.sort((a, b) => b.reputation.score - a.reputation.score);
     return this.#shuffleSample(candidates.map(i => i.addr), count);
   }
-
-  // ─── Mise à jour ──────────────────────────────────────────────
 
   updateReputation(nodeId, delta) {
     this.#getOrThrow(nodeId).reputation.update(delta);
@@ -285,8 +244,6 @@ export class PeerPool {
     return this;
   }
 
-  // ─── Lecture ─────────────────────────────────────────────────
-
   getPeersByReputation() {
     return [...this.#peers.values()]
       .map(i => ({ addr: i.addr, score: i.reputation.score, tier: ReputationTier.fromScore(i.reputation.score) }))
@@ -302,8 +259,6 @@ export class PeerPool {
     for (const p of peers) tierCounts[ReputationTier.fromScore(p.reputation.score)]++;
     return { total: peers.length, alive, avgScore: +avgScore.toFixed(4), tierCounts, minReputation: this.#minReputation };
   }
-
-  // ─── Privés ───────────────────────────────────────────────────
 
   #toHex(nodeId) {
     if (typeof nodeId === 'string') return nodeId.toLowerCase();
