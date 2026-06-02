@@ -8,7 +8,7 @@
 "use strict";
 
 import { RomanDiffusion }          from './roman_diffusion.js';
-import { Personality }             from './personality.js';
+import { Personality }             from '../../model/src/thevie/personality.js';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
