@@ -660,7 +660,7 @@ export class Thevie {
 
   /** Met le nœud en veille intelligente — réduit les cycles périodiques. */
   async sleepNode() {
-    this.#node._state = 'Sleeping';
+    this.#node.setState('Sleeping');
     // Suspendre le moteur LoraEvo pour libérer la mémoire
     this.#loraEvo?.shortTermMemory?.splice(0);
     console.info('[Thevie] Nœud mis en veille');
@@ -668,7 +668,7 @@ export class Thevie {
 
   /** Réveille le nœud et relance l'engine si nécessaire. */
   async wakeNode() {
-    this.#node._state = 'Active';
+    this.#node.setState('Active');
     if (!this.#node._engine?.isReady) {
       await this.#node.initEngine().catch(e =>
         console.warn('[Thevie] wakeNode — initEngine:', e.message)
