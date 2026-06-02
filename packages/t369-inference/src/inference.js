@@ -8,7 +8,7 @@
 
 "use strict";
 
-import { T369Model, ModelConfig }                          from './model.js';
+import { T369Model, ModelConfig }                          from './t369.js';
 import { KVCache }                                         from './kv_cache.js';
 import { SpeculativeDecoder, SpeculativeConfig }            from './speculative.js';
 import { ParallelExecutor, ParallelConfig, ParallelStrategy } from './parallel.js';
