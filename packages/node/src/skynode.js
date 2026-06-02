@@ -384,6 +384,18 @@ export class SkyNode {
   // Exposé pour EvolutionManager et LoraEvo qui y accèdent via node._engine
   get _engine()         { return this.#engine; }
 
+  /**
+   * Permet à Thevie de changer l'état du nœud (ex. sleep/wake).
+   * Valeurs valides : NodeState.*
+   */
+  setState(newState) {
+    const valid = Object.values(NodeState);
+    if (!valid.includes(newState)) {
+      throw new Error(`État invalide : ${newState}. Valeurs : ${valid.join(', ')}`);
+    }
+    this.#state = newState;
+  }
+
   // ─── Initialisation ──────────────────────────────────────────
 
   async initEngine(weightsPath = null) {
@@ -546,7 +558,7 @@ export class SkyNode {
 
   // ─── Stockage ─────────────────────────────────────────────────
 
-  async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
+async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
   async listFiles()             { return this.#storage.listFiles(); }
   async downloadFile(id)        { return this.#storage.retrieveFile(id); }
   async deleteFile(id)          { return this.#storage.deleteFile(id); }
