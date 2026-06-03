@@ -1,7 +1,7 @@
 // packages/model/src/thevie/thevie.js
 // =====================================================
 // THEVIE — Orchestrateur Unifié Production Ready
-// T369Inference + SkyNode + DreamCycle + LoraEvo
+// T369Inference + SkyCloud + DreamCycle + LoraEvo
 // + EvolutionManager + MeshIn + CollectivIn + InDream
 // SkyAInet × Thevie × Nikola T369
 // =====================================================
@@ -11,7 +11,7 @@
 import { DreamCycle }       from './dream_cycle.js';
 import { LoraEvo }          from './lora_evolution.js';
 import { EvolutionManager } from '../../node/src/evolution_manager.js';
-import { SkyNode }          from '../../node/src/skynode.js';
+import { SkyCloud as SkyNode }          from '../../node/src/skycloud.js';
 import { MeshIn }           from '../../t369-inference/src/meshin.js';
 import { CollectivIn }      from '../../t369-inference/src/collectivin.js';
 import { InDream }          from '../../t369-inference/src/indream.js';
@@ -195,7 +195,7 @@ export class Thevie {
   #antiFork;      // AntiFork    (sentinel/src/anti_fork.js)
   #dreamCycle;    // DreamCycle
   #loraEvo;       // LoraEvo
-  #node;          // SkyNode
+  #node;          // SkyCloud
   #evolutionManager; // EvolutionManager
 
   // Conteurs et état
@@ -242,7 +242,7 @@ export class Thevie {
 
     this.#loraEvo = new LoraEvo();
 
-    this.#node = new SkyNode();
+    this.#node = new SkyCloud();
 
     this.#evolutionManager = new EvolutionManager(this.#node, {
       qualityThreshold    : 0.82,
@@ -768,7 +768,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
 
   async getNetworkCompressionStats() {
-    // SkyNode.replicateFiles retourne { replicated: n }
+    // SkyCloud.replicateFiles retourne { replicated: n }
     // On enrichit avec les stats internes disponibles
     const nodeMetrics = this.#node.getNodeMetrics();
     return {
@@ -798,7 +798,7 @@ export class Thevie {
 
   /**
    * Upgrade le nœud vers un niveau supérieur.
-   * Crée un nouveau SkyNode configuré selon le niveau demandé
+   * Crée un nouveau SkyCloud configuré selon le niveau demandé
    * et transfère les pairs existants.
    *
    * @param {'Mini'|'Light'|'Full'|'Validator'} level
@@ -813,7 +813,7 @@ export class Thevie {
     }
 
     // Préparer le nouveau nœud avec la config du niveau demandé
-    const newNode = new SkyNode();
+    const newNode = new SkyCloud();
     await newNode.initEngine().catch(() => {});
 
     // Transférer les pairs
@@ -890,7 +890,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
 
   /**
-   * Crée un nœud SkyNode pour un utilisateur selon le type demandé.
+   * Crée un nœud SkyCloud pour un utilisateur selon le type demandé.
    *
    * Nœuds disponibles : Mini (gratuit), Light, Full, Validator (payants).
    * Le nœud est initialisé avec le moteur T369, ZipMemory activé,
@@ -910,7 +910,7 @@ export class Thevie {
       };
     }
 
-    const node = new SkyNode();
+    const node = new SkyCloud();
 
     // Initialisation du moteur T369
     try {
@@ -985,7 +985,7 @@ export class Thevie {
   // GOUVERNANCE & RÉCOMPENSES
   // ═══════════════════════════════════════════════════════════════
 
-  /**
+   /**
    * Envoie le score éthique d'un nœud vers le treasury on-chain.
    * Prépare le terrain pour l'intégration blockchain.
    *
