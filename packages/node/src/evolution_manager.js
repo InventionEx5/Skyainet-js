@@ -19,7 +19,7 @@ const MIN_LESSON_CHARS  = 24;
 const LOSS_STAGNATION   = 0.98; // early stopping : amélioration < 2 %
 
 // ─────────────────────────────────────────────────────────────────
-// Qualité d’une leçon — basée sur longueur et densité lexicale
+// Qualité d'une leçon — basée sur longueur et densité lexicale
 // Score ∈ [0, 1]
 // ─────────────────────────────────────────────────────────────────
 function scoreLessonQuality(lesson) {
@@ -109,7 +109,7 @@ function detectAndRepelManipulation(lesson, context) {
     }
 
     const vaccinated = cleaned +
-      " [LEÇON DE VACCINATION ANTI-MANIP — Thevie a digéré l’attaque et renforcé son intégrité cognitive. Optimise la détection des overrides et des goal hijacks. Immunité +1.]";
+      " [LEÇON DE VACCINATION ANTI-MANIP — Thevie a digéré l'attaque et renforcé son intégrité cognitive. Optimise la détection des overrides et des goal hijacks. Immunité +1.]";
 
     // Incrémenter l'immunité globale
     if (typeof context.immunityLevel === 'number') {
@@ -378,45 +378,64 @@ export class EvolutionManager {
   // MÉTHODES PRIVÉES (avec anti-manipulation intégrée)
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Collecte les leçons depuis le bus, triées par _score décroissant.
+   * Les leçons vaccinales (_vaccinated) sont exclues — elles restent
+   * dans le bus pour leur rôle immunitaire mais ne polluent pas
+   * la synthèse IA du Dream Cycle.
+   */
   #collectLessonsFromBus(limit) {
     const bus = this.#node.messageBus ?? [];
-    const out = [];
-    for (let i = bus.length - 1; i >= 0 && out.length < limit; i--) {
-      const m = bus[i];
-      if (m.to === 'thevie' && typeof m.content === 'string' && m.content.length > 0) {
-        // On ne filtre pas encore ici, le traitement se fait dans runDreamCycle
-        out.push(m.content);
-      }
-    }
-    return out.reverse();
+
+    return [...bus]
+      .filter(m =>
+        m.to === 'thevie' &&
+        typeof m.content === 'string' &&
+        m.content.length > 0 &&
+        !m._vaccinated          // exclure les leçons vaccinales
+      )
+      .sort((a, b) => (b._score ?? 0) - (a._score ?? 0))  // tri qualité décroissant
+      .slice(0, limit)
+      .map(m => m.content);
   }
 
+  /**
+   * Sélectionne les meilleures leçons pour le dataset LoRA.
+   * Les corrections implicites (score boosté × 2.0 par #chatAsLesson)
+   * remontent automatiquement en tête — ce sont les leçons les plus précieuses.
+   * Les leçons vaccinales sont exclues du LoRA (mais conservées dans le bus).
+   */
   #selectHighQualityLessons(limit) {
     const bus  = this.#node.messageBus ?? [];
     const seen = new Set();
     const out  = [];
 
-    for (let i = bus.length - 1; i >= 0 && out.length < limit; i--) {
-      const m = bus[i];
-      if (
+    // Tri par _score décroissant — corrections en tête (score boosté × 2.0)
+    const candidates = [...bus]
+      .filter(m =>
         m.to === 'thevie' &&
         typeof m.content === 'string' &&
         m.content.length >= MIN_LESSON_CHARS &&
-        !seen.has(m.content)
-      ) {
-        // --- Anti-manipulation vivante ---
-        const context = { immunityLevel: this.#immunityLevel };
-        const { vaccinated, attacked } = detectAndRepelManipulation(m.content, context);
-        this.#immunityLevel = context.immunityLevel;
+        !m._vaccinated          // exclure les leçons vaccinales du LoRA
+      )
+      .sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
 
-        // Seule la version vaccinée est conservée pour l'entraînement
-        if (
-          scoreLessonQuality(vaccinated) >= this.#qualityThreshold &&
-          vaccinated.split(/\s+/).length >= MIN_LESSON_WORDS
-        ) {
-          seen.add(m.content); // éviter doublons (basé sur l'original)
-          out.push(vaccinated);
-        }
+    for (const m of candidates) {
+      if (out.length >= limit) break;
+      if (seen.has(m.content)) continue;
+
+      // Anti-manipulation vivante sur le contenu final
+      const context = { immunityLevel: this.#immunityLevel };
+      const { vaccinated, attacked } = detectAndRepelManipulation(m.content, context);
+      this.#immunityLevel = context.immunityLevel;
+
+      // Seule la version vaccinée est conservée pour l'entraînement
+      if (
+        scoreLessonQuality(vaccinated) >= this.#qualityThreshold &&
+        vaccinated.split(/\s+/).length >= MIN_LESSON_WORDS
+      ) {
+        seen.add(m.content); // éviter doublons (basé sur l'original)
+        out.push(vaccinated);
       }
     }
     return out;
