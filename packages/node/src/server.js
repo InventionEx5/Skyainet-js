@@ -1,7 +1,7 @@
 // packages/node/src/server.js
-// SkyNode HTTP Server — Production Grade
+// SkyCloud HTTP Server — Production Grade
 // Express + JWT HS256 + Sliding Window Rate Limit + Métriques + WebSocket
-// Branché sur SkyNode réel (skynode.js)
+// Branché sur SkyCloud réel (skycloud.js)
 
 "use strict";
 
@@ -13,7 +13,7 @@ import jwt                   from 'jsonwebtoken';
 import { WebSocketServer }   from 'ws';
 import crypto                from 'crypto';
 
-import { SkyNode }           from './skynode.js';
+import { SkyCloud as SkyNode }           from './skycloud.js';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -128,11 +128,11 @@ function apiError(res, status, error, message) {
 }
 
 // =====================================================
-// ÉTAT GLOBAL — SkyNode réel
+// ÉTAT GLOBAL — SkyCloud réel
 // =====================================================
 
 const state = {
-  node       : new SkyNode(),
+  node       : new SkyCloud(),
   rateLimiter: new RateLimiter(60, 60),
   metrics    : new ServerMetrics(),
   apiKeys    : [process.env.SKYNODE_API_KEY    ?? 'dev-key-unsafe'],
@@ -413,7 +413,7 @@ function handleWs(ws) {
 
   ws.send(JSON.stringify({
     type     : 'connected',
-    message  : 'SkyNode WebSocket connecté',
+    message  : 'SkyCloud WebSocket connecté',
     timestamp: new Date().toISOString(),
   }));
 
@@ -433,7 +433,7 @@ function handleWs(ws) {
           wisdom_score: s.wisdomScore,
           is_running : s.isRunning,
           engine_ready: s.engineReady,
-          tier       : 'SkyNode',
+          tier       : 'SkyCloud',
         };
         break;
       }
@@ -614,7 +614,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.info(`✅ SkyNode Server démarré sur http://0.0.0.0:${PORT}`);
+  console.info(`✅ SkyCloud Server démarré sur http://0.0.0.0:${PORT}`);
   console.info(`   JWT HS256 | Sliding Window | Métriques EMA | Pagination | WebSocket`);
   if (state.jwtSecret === 'change-me-in-prod') {
     console.warn('   ⚠️  JWT secret par défaut — définir SKYNODE_JWT_SECRET en production');
