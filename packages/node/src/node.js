@@ -11,7 +11,7 @@
 // NŒUD PRINCIPAL
 // ─────────────────────────────────────────────────────────────────
 
-export { SkyNode }                                from './skynode.js';
+export { SkyCloud as SkyNode, SkyCloud }                                from './skycloud.js';
 
 // ─────────────────────────────────────────────────────────────────
 // TYPES, ÉTATS & IDENTITÉ
@@ -108,7 +108,7 @@ export const PACKAGE_INFO = Object.freeze({
   version    : VERSION,
   description: 'SkyAInet Node Package — Nœud Souverain, PoUW, Marketplace, Évolution',
   modules    : [
-    'SkyNode',
+    'SkyCloud',
     'NodeType', 'NodeState', 'NodeIdentity',
     'NodeCommunication', 'MixedNode',
     'PoUWEngine', 'DreamScoring',
