@@ -14,6 +14,18 @@
 export { SkyCloud as SkyNode, SkyCloud }                                from './skycloud.js';
 
 // ─────────────────────────────────────────────────────────────────
+// CHAT IA — Conversations, Tâches, Génération, Multimodal
+// ─────────────────────────────────────────────────────────────────
+
+export {
+  AIChatManager,
+  Conversation,
+  Message,
+  Attachment,
+  Task,
+}                                                 from './chat.js';
+
+// ─────────────────────────────────────────────────────────────────
 // TYPES, ÉTATS & IDENTITÉ
 // ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +85,12 @@ export { ValidatorNode }                          from './validator.js';
 export { EvolutionManager }                       from './evolution_manager.js';
 
 // ─────────────────────────────────────────────────────────────────
+// LORA TRAINER — Cœur mathématique de l'entraînement LoRA
+// ─────────────────────────────────────────────────────────────────
+
+export { LoraAdapter, crossEntropyGrad }          from './lora_trainer.js';
+
+// ─────────────────────────────────────────────────────────────────
 // MARKETPLACE COMPUTE
 // ─────────────────────────────────────────────────────────────────
 
@@ -106,14 +124,15 @@ export const VERSION = '1.0.0';
 export const PACKAGE_INFO = Object.freeze({
   name       : 'skyainet-node',
   version    : VERSION,
-  description: 'SkyAInet Node Package — Nœud Souverain, PoUW, Marketplace, Évolution',
+  description: 'SkyAInet Node Package — Nœud Souverain, Chat IA, PoUW, Marketplace, Évolution',
   modules    : [
     'SkyCloud',
+    'AIChatManager', 'Conversation', 'Message', 'Attachment',
     'NodeType', 'NodeState', 'NodeIdentity',
     'NodeCommunication', 'MixedNode',
     'PoUWEngine', 'DreamScoring',
     'ValidatorNode',
-    'EvolutionManager',
+    'EvolutionManager', 'LoraAdapter',
     'ComputeMarketplace', 'GpuCpuMarketplaceService',
   ],
 });
