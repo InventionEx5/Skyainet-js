@@ -9,7 +9,7 @@
 import { writeFile, mkdir }           from 'fs/promises';
 import { ZipMemory }                  from '../../memory/src/zip_memory.js';
 import { Dilithium5Signer }           from '../../secure/src/crypto/dilithium.js';
-import { LoraAdapter, crossEntropyGrad } from './lora_evolution.js';
+import { LoraAdapter, crossEntropyGrad } from './lora_trainer.js';
 
 const DAY_MS            = 24 * 60 * 60 * 1000;
 const CHECKPOINT_DIR    = './checkpoints';
