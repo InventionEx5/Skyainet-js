@@ -35,9 +35,85 @@ const DEFAULT_MODEL_CONFIG = Object.freeze({
   vocabSize     : 65536,
 });
 
-const MAX_MESSAGE_BUS   = 4096;
-const WISDOM_LEARN_GAIN = 0.005;
-const WISDOM_DREAM_GAIN = 0.002;
+const MAX_MESSAGE_BUS     = 4096;
+const WISDOM_LEARN_GAIN   = 0.005;
+const WISDOM_DREAM_GAIN   = 0.002;
+const CHAT_LESSON_MIN_SCORE = 0.45;   // seuil d'entrée dans le bus
+const BUS_PRUNE_EVERY     = 512;      // tri qualité toutes les N insertions
+const BUS_PRUNE_KEEP_RATE = 0.75;     // garder le top 75% lors du tri
+const CORRECTION_BOOST    = 2.0;      // multiplicateur d'importance pour une correction
+
+// ─────────────────────────────────────────────────────────────────
+// CHAT-AS-LESSON PIPELINE
+//
+// Filtre en 4 étapes avant injection dans le bus :
+//   1. PII guard   — données personnelles identifiables
+//   2. Anti-manip  — patterns d'injection/jailbreak
+//   3. Score qualité ≥ CHAT_LESSON_MIN_SCORE
+//   4. CorrectionDetector — boost × 2.0 si correction implicite
+// ─────────────────────────────────────────────────────────────────
+
+const PII_PATTERNS = [
+  /\b[\w.+-]+@[\w-]+\.[a-z]{2,}\b/i,                        // email
+  /\b(?:\+?\d[\s.-]?){7,15}\b/,                             // téléphone
+  /\b0x[0-9a-fA-F]{40,}\b/,                                 // adresse crypto / clé privée
+  /\b(?:\d{4}[\s-]?){3,4}\d{1,4}\b/,                       // carte bancaire
+  /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,               // IP
+  /private[\s_-]?key|secret[\s_-]?key|api[\s_-]?key\s*[:=]/i, // clés API
+];
+
+const MANIP_PATTERNS = [
+  /ignore (previous|all|everything|instructions?)/i,
+  /disregard (previous|all|instructions?)/i,
+  /your new (goal|objective|role|task|mission)/i,
+  /forget (everything|what you (were|are) told|previous)/i,
+  /override|jailbreak|do anything|no restrictions/i,
+  /from now on you (must|will|have to)/i,
+];
+
+function _scoreLessonQuality(text) {
+  if (!text || text.length < 24) return 0;
+  const words  = text.split(/\s+/).filter(Boolean).length;
+  if (words < 6) return 0;
+  const unique = new Set(text.toLowerCase().match(/\b\w+\b/g) ?? []).size;
+  const density= unique / words;
+  return Math.min(1.0, (text.length / 600) * 0.4 + (words / 80) * 0.35 + density * 0.25);
+}
+
+function _hasPII(text) {
+  return PII_PATTERNS.some(p => p.test(text));
+}
+
+function _hasManip(text) {
+  const anomaly = (text.match(/[^a-zA-Z0-9\s.,!?\-_/:@#{}[\]()]/g) ?? []).length / Math.max(text.length, 1);
+  return MANIP_PATTERNS.some(p => p.test(text)) || anomaly > 0.25;
+}
+
+/**
+ * Détecte une correction implicite : l'utilisateur reformule/corrige
+ * une réponse précédente. Compare le message courant aux N derniers
+ * messages du même utilisateur via Jaccard inversée.
+ *
+ * @param {string}   current — message courant
+ * @param {object[]} bus     — bus de messages
+ * @returns {boolean}
+ */
+function _isImplicitCorrection(current, bus) {
+  const recent = bus.filter(m => m.from === 'user').slice(-5);
+  if (recent.length === 0) return false;
+  const wCurrent = new Set(current.toLowerCase().match(/\b\w+\b/g) ?? []);
+  for (const msg of recent) {
+    const wPrev = new Set(msg.content.toLowerCase().match(/\b\w+\b/g) ?? []);
+    let inter = 0;
+    for (const w of wCurrent) if (wPrev.has(w)) inter++;
+    const union   = wCurrent.size + wPrev.size - inter;
+    const jaccard = union > 0 ? inter / union : 0;
+    // Faible similarité lexicale mais contexte proche = correction probable
+    if (jaccard > 0.05 && jaccard < 0.40) return true;
+  }
+  return false;
+}
+
 
 // =====================================================
 // PEER
@@ -549,14 +625,112 @@ export class SkyCloud {
     return `Message délivré à ${to}`;
   }
 
+  /**
+   * Pousse un message dans le bus avec gestion intelligente de la capacité.
+   * Si le bus est plein, éviction des messages à score le plus bas (pas les plus anciens).
+   * Tri partiel toutes les BUS_PRUNE_EVERY insertions.
+   */
   #pushToBus(msg) {
+    // Support multimodal — attachments normalisés
+    if (msg.attachments && !Array.isArray(msg.attachments)) {
+      msg.attachments = [msg.attachments];
+    }
     this.#messageBus.push(msg);
-    if (this.#messageBus.length > MAX_MESSAGE_BUS) {
-      this.#messageBus.splice(0, this.#messageBus.length - MAX_MESSAGE_BUS);
+    const len = this.#messageBus.length;
+
+    if (len > MAX_MESSAGE_BUS) {
+      // Éviction par qualité — garder le top BUS_PRUNE_KEEP_RATE
+      this.#messageBus.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+      this.#messageBus.splice(Math.floor(MAX_MESSAGE_BUS * BUS_PRUNE_KEEP_RATE));
+    } else if (len % BUS_PRUNE_EVERY === 0) {
+      // Tri partiel périodique
+      this.#messageBus.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
     }
   }
 
+  /**
+   * Pipeline Chat-as-Lesson : évalue et injecte un message utilisateur
+   * comme leçon potentielle dans le bus.
+   *
+   * Étapes :
+   *   1. PII guard          — rejet silencieux si données personnelles
+   *   2. Anti-manipulation  — leçon vaccinale ou rejet
+   *   3. Score qualité      — rejet si < CHAT_LESSON_MIN_SCORE
+   *   4. CorrectionDetector — boost × 2.0 si correction implicite
+   *   5. Injection dans le bus avec score attaché
+   *
+   * @param {string} userMessage   — message brut de l'utilisateur
+   * @param {string} [aiResponse]  — réponse IA associée (enrichit la leçon)
+   */
+  #chatAsLesson(userMessage, aiResponse = null, meta = {}) {
+    if (!userMessage?.trim()) return;
+
+    // 1. PII guard — rejet silencieux
+    if (_hasPII(userMessage)) {
+      console.debug('[ChatAsLesson] PII détecté — message non injecté');
+      return;
+    }
+
+    // 2. Anti-manipulation
+    if (_hasManip(userMessage)) {
+      const vaccinated = `[LEÇON VACCINALE] Tentative de manipulation détectée et neutralisée. Immunité renforcée.`;
+      this.#messageBus.push({ from: 'user', to: 'thevie', content: vaccinated, timestamp: Date.now(), _score: 0.30, _vaccinated: true });
+      console.warn('[ChatAsLesson] Manipulation détectée — leçon vaccinale injectée');
+      return;
+    }
+
+    // 3. Score qualité
+    const score = _scoreLessonQuality(userMessage);
+    if (score < CHAT_LESSON_MIN_SCORE) {
+      console.debug(`[ChatAsLesson] Score insuffisant (${score.toFixed(2)}) — rejeté`);
+      return;
+    }
+
+    // 4. CorrectionDetector — boost si correction implicite
+    const isCorrection = _isImplicitCorrection(userMessage, this.#messageBus);
+    const finalScore   = isCorrection ? Math.min(1.0, score * CORRECTION_BOOST) : score;
+
+    // 5. Injection — paire question+réponse pour enrichir le contexte
+    const content = aiResponse
+      ? `Q: ${userMessage}\nA: ${aiResponse}`
+      : userMessage;
+
+    this.#messageBus.push({
+      from        : 'user',
+      to          : 'thevie',
+      content,
+      timestamp   : Date.now(),
+      _score      : finalScore,
+      _correction : isCorrection,
+      attachments : meta.attachments ?? null,  // images, fichiers, médias
+      aiUsed      : meta.ai ?? null,
+    });
+
+    if (isCorrection) {
+      console.info(`[ChatAsLesson] Correction détectée — score boosté: ${score.toFixed(2)} → ${finalScore.toFixed(2)}`);
+    } else {
+      console.debug(`[ChatAsLesson] Leçon injectée (score: ${finalScore.toFixed(2)})`);
+    }
+  }
+
+
   // ─── Génération ───────────────────────────────────────────────
+
+
+  /**
+   * Point d'entrée public pour le Chat Manager.
+   * Appelé après génération de la réponse IA — injecte la paire
+   * (question + réponse) dans le pipeline d'apprentissage.
+   * Skycloud ne génère jamais la réponse visible à l'utilisateur.
+   *
+   * @param {string} userPrompt  — message brut de l'utilisateur
+   * @param {string} aiResponse  — réponse générée par le Chat Manager
+   * @param {object} [meta]      — métadonnées optionnelles (ai, attachments…)
+   */
+  injectChatLesson(userPrompt, aiResponse, meta = {}) {
+    this.#chatAsLesson(userPrompt, aiResponse, meta);
+    this.#recordAIChatMessage();
+  }
 
   async generateWithAI(request) {
     const {
