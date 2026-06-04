@@ -1,0 +1,21 @@
+{
+  "name": "@skyainet/core",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet Core — Rewards, Economics, Constitution PAEVF, Alignment Kernel",
+  "main": "src/core.js",
+  "exports": {
+    ".": "./src/core.js"
+  },
+  "files": [
+    "src/core.js",
+    "src/rewards.js",
+    "src/economics.js",
+    "src/constitution.js",
+    "src/alignment_kernel.js"
+  ],
+  "scripts": {
+    "check": "node --check src/core.js"
+  },
+  "license": "MIT"
+}
