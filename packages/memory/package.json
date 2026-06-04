@@ -1,0 +1,22 @@
+{
+  "name": "@skyainet/memory",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet Memory — ZipMemory, Compression, Storage, VectorStore, IPFS",
+  "main": "src/memory.js",
+  "exports": {
+    ".": "./src/memory.js"
+  },
+  "files": [
+    "src/memory.js",
+    "src/zip_memory.js",
+    "src/compression.js",
+    "src/storage.js",
+    "src/vector_store.js",
+    "src/ipfs.js"
+  ],
+  "scripts": {
+    "check": "node --check src/memory.js"
+  },
+  "license": "MIT"
+}
