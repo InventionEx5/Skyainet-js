@@ -1,0 +1,30 @@
+{
+  "name": "@skyainet/model",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet Model — Thevie, Personnalité, Mémoire, Dream, LoRA, Migration, Distillation",
+  "main": "src/thevie/model.js",
+  "exports": {
+    ".": "./src/thevie/model.js"
+  },
+  "files": [
+    "src/thevie/model.js",
+    "src/thevie/thevie.js",
+    "src/thevie/personality.js",
+    "src/thevie/synapse.js",
+    "src/thevie/neurone.js",
+    "src/thevie/replay_buffer.js",
+    "src/thevie/dream_cycle.js",
+    "src/thevie/lora_evolution.js",
+    "src/thevie/migration_manager.js",
+    "src/thevie/distillation_manager.js",
+    "src/thevie/benchmark.js",
+    "src/thevie/model_registry.js",
+    "src/thevie/flash_scheduler.js",
+    "src/thevie/federated_sync.js"
+  ],
+  "scripts": {
+    "check": "node --check src/thevie/model.js"
+  },
+  "license": "MIT"
+}
