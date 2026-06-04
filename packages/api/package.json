@@ -1,0 +1,26 @@
+{
+  "name": "@skyainet/api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet API — REST + WebSocket + GraphQL",
+  "main": "src/api.js",
+  "exports": {
+    ".": "./src/api.js"
+  },
+  "files": [
+    "src/api.js",
+    "src/rest.js",
+    "src/websocket.js",
+    "src/graphql.js"
+  ],
+  "scripts": {
+    "check": "node --check src/api.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "graphql": "^16.0.0",
+    "graphql-http": "^1.0.0",
+    "ws": "^8.0.0"
+  },
+  "license": "MIT"
+}
