@@ -1,0 +1,20 @@
+{
+  "name": "@skyainet/governance",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet Governance — PoSI, DAO, Conviction Voting",
+  "main": "src/governance.js",
+  "exports": {
+    ".": "./src/governance.js"
+  },
+  "files": [
+    "src/governance.js",
+    "src/posi.js",
+    "src/dao.js",
+    "src/conviction_voting.js"
+  ],
+  "scripts": {
+    "check": "node --check src/governance.js"
+  },
+  "license": "MIT"
+}
