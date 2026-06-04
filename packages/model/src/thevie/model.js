@@ -1,4 +1,4 @@
-// packages/model/src/model.js
+// packages/model/src/thevie/model.js
 // =====================================================
 // Model Package — Point d'entrée central
 // Thevie + tous les sous-modules du dossier model/
