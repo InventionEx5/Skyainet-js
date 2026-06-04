@@ -1,0 +1,33 @@
+{
+  "name": "@skyainet/node",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SkyAInet Node — Nœud Souverain, Chat IA, LoRA, PoUW, Marketplace",
+  "main": "src/node.js",
+  "exports": {
+    ".": "./src/node.js"
+  },
+  "files": [
+    "src/skycloud.js",
+    "src/node.js",
+    "src/server.js",
+    "src/evolution_manager.js",
+    "src/lora_trainer.js",
+    "src/chat.js",
+    "src/node_types.js",
+    "src/node_communication.js",
+    "src/validator.js",
+    "src/marketplace.js",
+    "src/gpu_cpu.js",
+    "src/pouw.js"
+  ],
+  "scripts": {
+    "check": "node --check src/node.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "jsonwebtoken": "^9.0.0",
+    "ws": "^8.0.0"
+  },
+  "license": "MIT"
+}
