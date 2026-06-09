@@ -9,7 +9,7 @@ import { HybridTransport }                        from '../../secure/src/crypto/
 import { GematriaAead }                           from '../../secure/src/crypto/gematria_aead.js';
 import { RomanT369, GematriaMode }                from '../../secure/src/crypto/roman_t369.js';
 import { UserRewards, RewardReason, AccountType } from '../../core/src/rewards.js';
-import { NodeState }                              from '../../node/src/node_types.js';
+import { NodeState }                              from './node_types.js';
 import { ZipMemory }                              from '../../memory/src/zip_memory.js';
 import { EvolutionManager }                       from './evolution_manager.js';
 import { StorageNode }                            from '../../memory/src/storage.js';
@@ -309,43 +309,129 @@ class AgenticRunner {
 
 // =====================================================
 // API KEY STORE
+//
+// Scopes disponibles :
+//   inference:read   — appeler generateWithAI / processRequest
+//   inference:write  — injecter des leçons
+//   storage:read     — listFiles / downloadFile
+//   storage:write    — uploadFile / deleteFile / replicateFiles
+//   gateway:read     — consulter les endpoints exposés
+//   gateway:admin    — créer/supprimer des endpoints, enableGateway
+//   peers:read       — getPeers
+//   peers:write      — addPeer / removePeer / syncWithNetwork
+//   rewards:read     — getRewardsStats
+//   rewards:claim    — claimRewards
+//   admin            — accès total (toutes les routes)
 // =====================================================
 
-class ApiKeyStore {
-  #keys = new Map();
+const ALL_SCOPES = Object.freeze([
+  'inference:read', 'inference:write',
+  'storage:read',   'storage:write',
+  'gateway:read',   'gateway:admin',
+  'peers:read',     'peers:write',
+  'rewards:read',   'rewards:claim',
+  'admin',
+]);
 
+const SCOPE_LABELS = Object.freeze({
+  'inference:read'  : 'Read AI responses',
+  'inference:write' : 'Inject lessons',
+  'storage:read'    : 'Download files',
+  'storage:write'   : 'Upload / delete files',
+  'gateway:read'    : 'List endpoints',
+  'gateway:admin'   : 'Manage gateway',
+  'peers:read'      : 'List peers',
+  'peers:write'     : 'Manage peers',
+  'rewards:read'    : 'Read rewards stats',
+  'rewards:claim'   : 'Claim rewards',
+  'admin'           : 'Full access',
+});
+
+class ApiKeyStore {
+  #keys = new Map();   // rawKey → ApiKeyEntry
+
+  /**
+   * Crée une clé API signée.
+   * @param {string}   name
+   * @param {object}   opts
+   * @param {string[]} opts.scopes       — permissions (défaut: ['inference:read'])
+   * @param {string[]} opts.allowedAIs   — IA destination autorisées ([] = toutes)
+   * @param {number}   opts.rateLimit    — max req/min (0 = illimité)
+   * @param {number}   opts.ttlDays      — durée de vie en jours (0 = permanent)
+   * @returns {string} clé brute
+   */
   create(name, opts = {}) {
     if (!name || typeof name !== 'string') throw new Error('Nom de clé invalide');
-    const key = `skn_${crypto.randomUUID().replace(/-/g, '')}`;
+    const key     = `skn_${crypto.randomUUID().replace(/-/g, '')}`;
+    const scopes  = Array.isArray(opts.scopes) && opts.scopes.length
+      ? opts.scopes.filter(s => ALL_SCOPES.includes(s))
+      : ['inference:read'];
+    const ttlMs   = opts.ttlDays > 0 ? opts.ttlDays * 86_400_000 : 0;
+
     this.#keys.set(key, {
       name,
       createdAt  : Date.now(),
+      expiresAt  : ttlMs > 0 ? Date.now() + ttlMs : null,
       lastUsed   : null,
       usageCount : 0,
+      usageLogs  : [],         // { ts, targetAI, scope, ip? }[] — 100 derniers
+      scopes,
       allowedAIs : opts.allowedAIs ?? [],
       rateLimit  : opts.rateLimit  ?? 0,
       rateWindow : [],
       revoked    : false,
+      rotatedFrom: null,       // référence vers l'ancienne clé si rotation
     });
+
+    console.info(`[ApiKeyStore] Clé créée : ${name} | scopes: ${scopes.join(', ')}`);
     return key;
   }
 
-  validate(key, targetAI = '') {
+  /**
+   * Valide une clé API et vérifie le scope requis.
+   * @param {string} key
+   * @param {string} [targetAI]   — IA visée
+   * @param {string} [scope]      — scope requis (ex: 'inference:read')
+   * @returns {{ valid: boolean, reason?: string, entry?: object }}
+   */
+  validate(key, targetAI = '', scope = '') {
     if (!key || typeof key !== 'string') return { valid: false, reason: 'Clé absente ou malformée' };
     const entry = this.#keys.get(key);
-    if (!entry)         return { valid: false, reason: 'Clé inconnue' };
-    if (entry.revoked)  return { valid: false, reason: 'Clé révoquée' };
-    if (entry.allowedAIs.length > 0 && !entry.allowedAIs.includes(targetAI)) {
-      return { valid: false, reason: `IA '${targetAI}' non autorisée` };
+    if (!entry)        return { valid: false, reason: 'Clé inconnue' };
+    if (entry.revoked) return { valid: false, reason: 'Clé révoquée' };
+
+    // Expiration automatique
+    if (entry.expiresAt && Date.now() > entry.expiresAt) {
+      entry.revoked = true;
+      return { valid: false, reason: 'Clé expirée' };
     }
+
+    // Vérification scope
+    if (scope && !entry.scopes.includes('admin') && !entry.scopes.includes(scope)) {
+      return { valid: false, reason: `Scope '${scope}' non autorisé pour cette clé` };
+    }
+
+    // IA autorisées
+    if (entry.allowedAIs.length > 0 && targetAI && !entry.allowedAIs.includes(targetAI)) {
+      return { valid: false, reason: `IA '${targetAI}' non autorisée pour cette clé` };
+    }
+
+    // Rate limiting (fenêtre glissante 60s)
     if (entry.rateLimit > 0) {
       const now = Date.now();
       entry.rateWindow = entry.rateWindow.filter(t => now - t < 60_000);
-      if (entry.rateWindow.length >= entry.rateLimit) return { valid: false, reason: 'Rate limit dépassé' };
+      if (entry.rateWindow.length >= entry.rateLimit) {
+        return { valid: false, reason: 'Rate limit dépassé' };
+      }
       entry.rateWindow.push(now);
     }
+
+    // Mise à jour stats + log
     entry.lastUsed = Date.now();
     entry.usageCount++;
+    entry.usageLogs.push({ ts: Date.now(), targetAI, scope });
+    if (entry.usageLogs.length > 100) entry.usageLogs.shift();
+
     return { valid: true, entry };
   }
 
@@ -353,23 +439,49 @@ class ApiKeyStore {
     const entry = this.#keys.get(key);
     if (!entry) throw new Error('Clé introuvable');
     entry.revoked = true;
+    console.info(`[ApiKeyStore] Clé révoquée : ${entry.name}`);
+  }
+
+  /**
+   * Rotation d'une clé : crée une nouvelle clé avec les mêmes paramètres,
+   * révoque l'ancienne. Retourne la nouvelle clé brute.
+   */
+  rotate(oldKey) {
+    const entry = this.#keys.get(oldKey);
+    if (!entry) throw new Error('Clé introuvable pour rotation');
+    const newKey = this.create(entry.name, {
+      scopes    : entry.scopes,
+      allowedAIs: entry.allowedAIs,
+      rateLimit : entry.rateLimit,
+    });
+    this.#keys.get(newKey).rotatedFrom = oldKey;
+    entry.revoked = true;
+    console.info(`[ApiKeyStore] Rotation effectuée : ${entry.name}`);
+    return newKey;
   }
 
   list() {
     return [...this.#keys.entries()].map(([key, e]) => ({
-      keyPreview : `${key.slice(0, 8)}…`,
-      name       : e.name,
-      createdAt  : e.createdAt,
-      lastUsed   : e.lastUsed,
-      usageCount : e.usageCount,
-      allowedAIs : e.allowedAIs,
-      rateLimit  : e.rateLimit,
-      revoked    : e.revoked,
+      keyPreview  : `${key.slice(0, 10)}…`,
+      rawKey      : key,   // exposé pour rotation/révocation côté UI
+      name        : e.name,
+      createdAt   : e.createdAt,
+      expiresAt   : e.expiresAt,
+      lastUsed    : e.lastUsed,
+      usageCount  : e.usageCount,
+      usageLogs   : e.usageLogs.slice(-10),  // 10 derniers seulement
+      scopes      : e.scopes,
+      allowedAIs  : e.allowedAIs,
+      rateLimit   : e.rateLimit,
+      revoked     : e.revoked,
+      rotatedFrom : e.rotatedFrom,
     }));
   }
 
   exists(key) { return this.#keys.has(key) && !this.#keys.get(key).revoked; }
 }
+
+export { ALL_SCOPES, SCOPE_LABELS };
 
 // =====================================================
 // PERSONAS PAR IA
@@ -487,6 +599,9 @@ export class SkyCloud {
   #evolutionManager; // EvolutionManager | null
   #apiKeyStore;      // ApiKeyStore
 
+  #exposedEndpoints;   // Map<name, EndpointConfig> — endpoints publics du Gateway
+  #gatewayTrafficLogs; // { ts, method, path, statusCode, latencyMs, keyName }[]
+
   #registeredAIs;    // Map<string, string>
   #messageBus;       // object[]
   #externalAIEnabled;
@@ -513,6 +628,10 @@ export class SkyCloud {
     this.#zipMemory   = new ZipMemory('./data/zip_memory');
     this.#userRewards = new UserRewards(AccountType.Free);
     this.#apiKeyStore = new ApiKeyStore();
+
+    // Gateway — endpoints exposés + logs de trafic
+    this.#exposedEndpoints   = new Map();
+    this.#gatewayTrafficLogs = [];
 
     this.#registeredAIs     = new Map();
     this.#messageBus        = [];
@@ -588,14 +707,133 @@ export class SkyCloud {
 
   // ─── API Keys ─────────────────────────────────────────────────
 
-  generateApiKey(name, allowedAIs = [], rateLimit = 60) {
-    return this.#apiKeyStore.create(name, { allowedAIs, rateLimit });
+  /**
+   * Génère une clé API signée avec scopes, TTL et rate limit.
+   * @param {string}   name
+   * @param {object}   opts
+   * @param {string[]} opts.scopes       — permissions (défaut: ['inference:read'])
+   * @param {string[]} opts.allowedAIs   — IA autorisées ([] = toutes)
+   * @param {number}   opts.rateLimit    — max req/min (0 = illimité)
+   * @param {number}   opts.ttlDays      — durée de vie en jours (0 = permanent)
+   * @returns {string} clé brute
+   */
+  generateApiKey(name, opts = {}) {
+    // Rétrocompatibilité : generateApiKey(name, allowedAIs[], rateLimit)
+    if (Array.isArray(opts)) {
+      opts = { allowedAIs: opts, rateLimit: arguments[2] ?? 60 };
+    }
+    return this.#apiKeyStore.create(name, opts);
   }
-  validateApiKey(key, targetAI = '') { return this.#apiKeyStore.validate(key, targetAI); }
-  revokeApiKey(key)                  { this.#apiKeyStore.revoke(key); }
-  listApiKeys()                      { return this.#apiKeyStore.list(); }
 
-  // ─── IA ───────────────────────────────────────────────────────
+  /**
+   * Valide une clé pour une IA et un scope donnés.
+   * @param {string} key
+   * @param {string} [targetAI]
+   * @param {string} [scope]    — ex: 'inference:read'
+   */
+  validateApiKey(key, targetAI = '', scope = '') {
+    return this.#apiKeyStore.validate(key, targetAI, scope);
+  }
+
+  revokeApiKey(key)      { this.#apiKeyStore.revoke(key); }
+  rotateApiKey(key)      { return this.#apiKeyStore.rotate(key); }
+  listApiKeys()          { return this.#apiKeyStore.list(); }
+
+  // ─── Gateway ──────────────────────────────────────────────────
+
+  enableGateway(port = 8080) {
+    if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
+    this.#gatewayEnabled = true;
+    this.#gatewayPort    = port;
+    this.#state          = NodeState.Gateway;
+    console.info(`[SkyCloud] Gateway activé sur le port ${port}`);
+  }
+
+  disableGateway() {
+    this.#gatewayEnabled = false;
+    this.#state          = NodeState.Active;
+    console.info('[SkyCloud] Gateway désactivé');
+  }
+
+  /**
+   * Expose un endpoint d'inférence public sur le Gateway.
+   * Remplace generateDynamicSite — crée un endpoint HTTP public dédié
+   * à un modèle IA avec persona et paramètres configurables.
+   * Génère automatiquement une API Key limitée à cet endpoint.
+   *
+   * @param {string} name   — nom de l'endpoint (ex: "my-thevie-api")
+   * @param {object} config
+   * @param {string}  config.ai          — IA cible ('thevie', 'loraevo', 't369', …)
+   * @param {string}  [config.persona]   — persona personnalisée
+   * @param {number}  [config.maxTokens] — max tokens (défaut: 512)
+   * @param {number}  [config.temperature] — température (défaut: 0.8)
+   * @param {number}  [config.rateLimit] — req/min pour la clé auto-générée
+   * @param {number}  [config.ttlDays]   — durée de vie de la clé (0 = permanent)
+   * @returns {{ url: string, apiKey: string, endpointName: string }}
+   */
+  exposeInferenceEndpoint(name, config = {}) {
+    if (!name?.trim()) throw new Error('Nom d\'endpoint requis');
+    const safeName = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
+    const endpointConfig = {
+      name        : safeName,
+      ai          : config.ai          ?? 'thevie',
+      persona     : config.persona     ?? null,
+      maxTokens   : config.maxTokens   ?? 512,
+      temperature : config.temperature ?? 0.8,
+      createdAt   : Date.now(),
+      requestCount: 0,
+      active      : true,
+    };
+
+    this.#exposedEndpoints.set(safeName, endpointConfig);
+
+    // Génère une clé API dédiée avec scope limité à inference:read
+    const apiKey = this.#apiKeyStore.create(`endpoint:${safeName}`, {
+      scopes    : ['inference:read'],
+      rateLimit : config.rateLimit ?? 30,
+      ttlDays   : config.ttlDays   ?? 0,
+    });
+
+    const url = `http://localhost:${this.#gatewayPort}/api/inference/${safeName}`;
+    console.info(`[Gateway] Endpoint exposé : ${url}`);
+
+    return { url, apiKey, endpointName: safeName };
+  }
+
+  /**
+   * Supprime un endpoint exposé.
+   * @param {string} name
+   */
+  removeEndpoint(name) {
+    const safeName = name.trim().toLowerCase();
+    if (!this.#exposedEndpoints.has(safeName)) throw new Error(`Endpoint '${safeName}' introuvable`);
+    this.#exposedEndpoints.delete(safeName);
+    console.info(`[Gateway] Endpoint supprimé : ${safeName}`);
+  }
+
+  /** Retourne tous les endpoints exposés. */
+  listExposedEndpoints() {
+    return [...this.#exposedEndpoints.values()];
+  }
+
+  /**
+   * Enregistre une entrée dans les logs de trafic du Gateway.
+   * Appelé par server.js à chaque requête entrante.
+   * @param {{ method, path, statusCode, latencyMs, keyName }} entry
+   */
+  logTraffic(entry) {
+    this.#gatewayTrafficLogs.push({ ts: Date.now(), ...entry });
+    if (this.#gatewayTrafficLogs.length > 500) this.#gatewayTrafficLogs.shift();
+  }
+
+  /**
+   * Retourne les N derniers logs de trafic.
+   * @param {number} [limit=50]
+   */
+  getTrafficLogs(limit = 50) {
+    return this.#gatewayTrafficLogs.slice(-limit);
+  }
 
   registerAI(name, description) {
     if (!name?.trim()) throw new Error('Nom IA invalide');
@@ -839,16 +1077,6 @@ export class SkyCloud {
     this.#state          = NodeState.Active;
   }
 
-  async generateDynamicSite(prompt) {
-    if (!this.#engine.isReady) throw new Error('Moteur non initialisé');
-    const response  = await this.generateWithAI({ prompt, ai: 'thevie', maxTokens: 2048, useSpeculative: false });
-    const [key, nonce] = this.#hybrid.deriveKeys();
-    const encrypted = new GematriaAead(key, nonce).encrypt(new TextEncoder().encode(response.text));
-    const siteId    = `site_${Date.now()}`;
-    await this.#storage.storeFile(siteId, encrypted, this.#id);
-    return siteId;
-  }
-
   // ─── Réseau / Pairs ───────────────────────────────────────────
 
   addPeer(peerData)    { const p = new Peer(peerData); if (!this.peers.find(x => x.id === p.id)) this.peers.push(p); return p; }
@@ -914,36 +1142,40 @@ export class SkyCloud {
 
   getStatus() {
     return {
-      id              : this.#id,
-      state           : this.#state,
-      isRunning       : this.#isRunning,
-      wisdomScore     : +this.#wisdomScore.toFixed(4),
-      totalRequests   : this.#totalRequests,
-      evolutionCycles : this.#evolutionCycles,
-      peers           : this.peers.length,
-      registeredAIs   : this.#registeredAIs.size,
-      engineReady     : this.#engine.isReady,
-      gatewayEnabled  : this.#gatewayEnabled,
+      id               : this.#id,
+      state            : this.#state,
+      isRunning        : this.#isRunning,
+      wisdomScore      : +this.#wisdomScore.toFixed(4),
+      totalRequests    : this.#totalRequests,
+      evolutionCycles  : this.#evolutionCycles,
+      peers            : this.peers.length,
+      registeredAIs    : this.#registeredAIs.size,
+      engineReady      : this.#engine.isReady,
+      gatewayEnabled   : this.#gatewayEnabled,
+      gatewayPort      : this.#gatewayPort,
       externalAIEnabled: this.#externalAIEnabled,
-      apiKeysCount    : this.#apiKeyStore.list().length,
+      apiKeysCount     : this.#apiKeyStore.list().length,
+      exposedEndpoints : this.#exposedEndpoints.size,
     };
   }
 
   getNodeMetrics() {
     const upSec = Math.floor((Date.now() - this.#startTime) / 1000);
     return {
-      node_id         : this.#id,
-      state           : this.#state,
-      engine_ready    : this.#engine.isReady,
-      engine_stats    : this.#engine.stats(),
-      wisdom_score    : +this.#wisdomScore.toFixed(4),
-      total_requests  : this.#totalRequests,
-      evolution_cycles: this.#evolutionCycles,
-      last_dream_cycle: this.#lastDreamCycle,
-      peers_connected : this.peers.filter(p => p.isAlive()).length,
-      registered_ais  : [...this.#registeredAIs.keys()],
-      uptime_formatted: `${Math.floor(upSec / 3600)}h ${Math.floor((upSec % 3600) / 60)}m`,
-      api_keys_count  : this.#apiKeyStore.list().length,
+      node_id          : this.#id,
+      state            : this.#state,
+      engine_ready     : this.#engine.isReady,
+      engine_stats     : this.#engine.stats(),
+      wisdom_score     : +this.#wisdomScore.toFixed(4),
+      total_requests   : this.#totalRequests,
+      evolution_cycles : this.#evolutionCycles,
+      last_dream_cycle : this.#lastDreamCycle,
+      peers_connected  : this.peers.filter(p => p.isAlive()).length,
+      registered_ais   : [...this.#registeredAIs.keys()],
+      uptime_formatted : `${Math.floor(upSec / 3600)}h ${Math.floor((upSec % 3600) / 60)}m`,
+      api_keys_count   : this.#apiKeyStore.list().filter(k => !k.revoked).length,
+      exposed_endpoints: this.listExposedEndpoints(),
+      gateway_port     : this.#gatewayPort,
     };
   }
 
@@ -961,35 +1193,52 @@ export class SkyCloud {
   tauriCommands() {
     const n = this;
     return {
-      enableGateway          : n.enableGateway.bind(n),
-      disableGateway         : n.disableGateway.bind(n),
-      generateDynamicSite    : n.generateDynamicSite.bind(n),
-      createApiKey           : (name, allowedAIs, rateLimit) => n.generateApiKey(name, allowedAIs, rateLimit),
-      validateApiKey         : n.validateApiKey.bind(n),
-      revokeApiKey           : n.revokeApiKey.bind(n),
-      listApiKeys            : n.listApiKeys.bind(n),
-      uploadFile             : n.uploadFile.bind(n),
-      listFiles              : n.listFiles.bind(n),
-      downloadFile           : n.downloadFile.bind(n),
-      deleteFile             : n.deleteFile.bind(n),
-      replicateFiles         : n.replicateFiles.bind(n),
-      generateWithAI         : (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
-      sendAiMessage          : (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
-      getRegisteredAis       : () => [...n.registeredAIs.keys()],
-      toggleExternalAi       : enabled => n.enableExternalAI(enabled),
-      claimRewards           : n.claimRewards.bind(n),
-      getRewardsStats        : n.getRewardsStats.bind(n),
-      injectLesson           : n.injectLesson.bind(n),
-      syncWithNetwork        : n.syncWithNetwork.bind(n),
-      getPeers               : n.getPeers.bind(n),
-      getNodeStats           : n.getStatus.bind(n),
-      getNodeMetrics         : n.getNodeMetrics.bind(n),
-      runDreamCycle          : n.runDreamCycle.bind(n),
+      // Gateway
+      enableGateway             : n.enableGateway.bind(n),
+      disableGateway            : n.disableGateway.bind(n),
+      exposeInferenceEndpoint   : n.exposeInferenceEndpoint.bind(n),
+      removeEndpoint            : n.removeEndpoint.bind(n),
+      listExposedEndpoints      : n.listExposedEndpoints.bind(n),
+      logTraffic                : n.logTraffic.bind(n),
+      getTrafficLogs            : n.getTrafficLogs.bind(n),
+      serveSite                 : n.serveSite.bind(n),
+      // API Keys
+      generateApiKey            : (name, opts) => n.generateApiKey(name, opts),
+      validateApiKey            : (key, ai, scope) => n.validateApiKey(key, ai, scope),
+      revokeApiKey              : n.revokeApiKey.bind(n),
+      rotateApiKey              : n.rotateApiKey.bind(n),
+      listApiKeys               : n.listApiKeys.bind(n),
+      // Storage
+      uploadFile                : n.uploadFile.bind(n),
+      listFiles                 : n.listFiles.bind(n),
+      downloadFile              : n.downloadFile.bind(n),
+      deleteFile                : n.deleteFile.bind(n),
+      replicateFiles            : n.replicateFiles.bind(n),
+      // IA
+      generateWithAI            : (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
+      sendAiMessage             : (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
+      getRegisteredAis          : () => [...n.registeredAIs.keys()],
+      toggleExternalAi          : enabled => n.enableExternalAI(enabled),
+      // Rewards
+      claimRewards              : n.claimRewards.bind(n),
+      getRewardsStats           : n.getRewardsStats.bind(n),
+      // Learn / Evolution
+      injectLesson              : n.injectLesson.bind(n),
+      injectChatLesson          : n.injectChatLesson.bind(n),
+      runDreamCycle             : n.runDreamCycle.bind(n),
       triggerTraditionalTraining: n.triggerTraditionalTraining.bind(n),
-      runAgenticTask         : n.runAgenticTask.bind(n),
-      getLoraEvoStatus       : () => n.#loraEvo?.getStatus(),
-      getDreamCycleStats     : () => n.#dreamCycle?.getStats(),
-      getAgentStatus         : () => n.#agenticRunner?.getStatus() ?? { engineReady: n.#engine.isReady, mode: 'agentic' },
+      runAgenticTask            : n.runAgenticTask.bind(n),
+      // Réseau
+      syncWithNetwork           : n.syncWithNetwork.bind(n),
+      getPeers                  : n.getPeers.bind(n),
+      // Status
+      getNodeStats              : n.getStatus.bind(n),
+      getNodeMetrics            : n.getNodeMetrics.bind(n),
+      setNodeState              : n.setNodeState.bind(n),
+      // Internals (debug)
+      getLoraEvoStatus          : () => n.#loraEvo?.getStatus(),
+      getDreamCycleStats        : () => n.#dreamCycle?.getStats(),
+      getAgentStatus            : () => n.#agenticRunner?.getStatus() ?? { engineReady: n.#engine.isReady, mode: 'agentic' },
     };
   }
 }
