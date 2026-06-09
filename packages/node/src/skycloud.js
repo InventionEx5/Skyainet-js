@@ -9,7 +9,7 @@ import { HybridTransport }                        from '../../secure/src/crypto/
 import { GematriaAead }                           from '../../secure/src/crypto/gematria_aead.js';
 import { RomanT369, GematriaMode }                from '../../secure/src/crypto/roman_t369.js';
 import { UserRewards, RewardReason, AccountType } from '../../core/src/rewards.js';
-import { NodeState }                              from '../../core/src/node_types.js';
+import { NodeState }                              from '../../node/src/node_types.js';
 import { ZipMemory }                              from '../../memory/src/zip_memory.js';
 import { EvolutionManager }                       from './evolution_manager.js';
 import { StorageNode }                            from '../../memory/src/storage.js';
