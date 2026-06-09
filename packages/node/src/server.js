@@ -1,6 +1,6 @@
 // packages/node/src/server.js
 // SkyCloud HTTP Server — Production Grade
-// Express + JWT HS256 + Sliding Window Rate Limit + Métriques + WebSocket
+// Express + ApiKeyStore (scopes) + JWT fallback + Traffic Logs + Gateway Endpoints
 // Branché sur SkyCloud réel (skycloud.js)
 
 "use strict";
@@ -13,7 +13,8 @@ import jwt                   from 'jsonwebtoken';
 import { WebSocketServer }   from 'ws';
 import crypto                from 'crypto';
 
-import { SkyCloud as SkyNode }           from './skycloud.js';
+import { SkyCloud as SkyCloud }    from './skycloud.js';
+import { ALL_SCOPES, SCOPE_LABELS } from './skycloud.js';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -158,26 +159,69 @@ function rateLimitMiddleware(req, res, next) {
   next();
 }
 
-function authMiddleware(req, res, next) {
-  const path = req.path;
-  if (path === '/health' || path === '/api/status') return next();
+// =====================================================
+// SCOPE REQUIRED — helper pour protéger les routes par scope
+// =====================================================
 
-  const apiKey = req.headers['x-api-key'];
-  if (state.apiKeys.includes(apiKey)) return next();
+/**
+ * Retourne un middleware qui vérifie le scope requis.
+ * Priorité : clé skn_… (ApiKeyStore) > JWT Bearer > clé dev.
+ * @param {string} [scope] — ex: 'inference:read'. Absent = auth seule.
+ */
+function requireScope(scope = '') {
+  return function scopeMiddleware(req, res, next) {
+    const path = req.path;
+    if (path === '/health' || path === '/api/status') return next();
 
-  const auth = (req.headers.authorization ?? '');
-  if (!auth.startsWith('Bearer ')) {
-    return apiError(res, 401, 'UNAUTHORIZED', 'API key ou token JWT requis.');
-  }
+    const rawKey = req.headers['x-api-key'] ?? '';
+    const auth   = req.headers.authorization ?? '';
 
-  try {
-    req.jwtPayload = jwt.verify(auth.slice(7), state.jwtSecret, { algorithms: ['HS256'] });
-    next();
-  } catch (err) {
-    const msg = err.name === 'TokenExpiredError' ? 'Token JWT expiré.' : 'Token JWT invalide.';
-    return apiError(res, 401, 'UNAUTHORIZED', msg);
-  }
+    // 1. Clé SKY (ApiKeyStore) — prioritaire
+    if (rawKey.startsWith('skn_')) {
+      const targetAI = req.body?.ai ?? req.query?.ai ?? '';
+      const result   = state.node.validateApiKey(rawKey, targetAI, scope);
+
+      if (!result.valid) {
+        return apiError(res, 401, 'UNAUTHORIZED', result.reason);
+      }
+
+      // Enregistrer l'identité de la clé sur la requête
+      req.apiKeyName  = result.entry?.name ?? 'unknown';
+      req.apiKeyScope = scope;
+      return next();
+    }
+
+    // 2. Clé de développement (variable d'env)
+    if (state.apiKeys.includes(rawKey)) {
+      req.apiKeyName  = 'dev-key';
+      req.apiKeyScope = 'admin';
+      return next();
+    }
+
+    // 3. JWT Bearer — fallback
+    if (auth.startsWith('Bearer ')) {
+      try {
+        req.jwtPayload  = jwt.verify(auth.slice(7), state.jwtSecret, { algorithms: ['HS256'] });
+        req.apiKeyName  = req.jwtPayload.sub ?? 'jwt';
+        req.apiKeyScope = req.jwtPayload.scope ?? 'admin';
+
+        // Vérifier que le JWT a bien le scope requis
+        if (scope && req.apiKeyScope !== 'admin' && req.apiKeyScope !== scope) {
+          return apiError(res, 403, 'FORBIDDEN', `Scope '${scope}' requis.`);
+        }
+        return next();
+      } catch (err) {
+        const msg = err.name === 'TokenExpiredError' ? 'Token JWT expiré.' : 'Token JWT invalide.';
+        return apiError(res, 401, 'UNAUTHORIZED', msg);
+      }
+    }
+
+    return apiError(res, 401, 'UNAUTHORIZED', 'API key (x-api-key) ou Bearer JWT requis.');
+  };
 }
+
+// Alias rétrocompatible utilisé dans les routes existantes
+const auth = requireScope('admin');
 
 function metricsMiddleware(req, res, next) {
   const start = Date.now();
@@ -195,8 +239,25 @@ app.use(compression());
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE'], allowedHeaders: ['*'], maxAge: 3600 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(rateLimitMiddleware);
-app.use(authMiddleware);
+// NOTE : authMiddleware retiré du global — chaque route déclare son scope via requireScope()
 app.use(metricsMiddleware);
+
+// ─── Traffic Log Middleware ────────────────────────────────────────────────
+// Appelle skyCloud.logTraffic() à chaque requête — alimente getTrafficLogs()
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    state.node.logTraffic({
+      method    : req.method,
+      path      : req.path,
+      statusCode: res.statusCode,
+      latencyMs : Date.now() - start,
+      keyName   : req.apiKeyName ?? 'anonymous',
+      ip        : (req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.ip || 'unknown',
+    });
+  });
+  next();
+});
 
 // =====================================================
 // ROUTES — SANTÉ & MONITORING
@@ -257,7 +318,7 @@ app.get('/api/dream-cycle', async (req, res) => {
 // ROUTES — IA
 // =====================================================
 
-app.post('/api/ai/generate', async (req, res) => {
+app.post('/api/ai/generate', requireScope('inference:read'), async (req, res) => {
   try {
     const result = await state.node.generateWithAI(req.body);
     res.json({ success: true, response: result });
@@ -288,7 +349,7 @@ app.post('/api/ai/external', (req, res) => {
   res.json({ success: true, external_ai_enabled: !!req.body.enabled });
 });
 
-app.post('/api/ai/lesson', async (req, res) => {
+app.post('/api/ai/lesson', requireScope('inference:write'), async (req, res) => {
   const { lesson } = req.body;
   if (!lesson?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'lesson' requis.");
   try {
@@ -299,19 +360,46 @@ app.post('/api/ai/lesson', async (req, res) => {
   }
 });
 
-// Clés API
-app.post('/api/keys/create', (req, res) => {
-  const { name, allowedAIs = [], rateLimit = 60 } = req.body;
+// =====================================================
+// ROUTES — API KEYS (scopes, TTL, rotation, logs)
+// =====================================================
+
+// POST /api/keys/create — génère une clé avec scopes + TTL
+app.post('/api/keys/create', requireScope('gateway:admin'), (req, res) => {
+  const { name, scopes, allowedAIs = [], rateLimit = 60, ttlDays = 0 } = req.body;
   if (!name?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'name' requis.");
-  const key = state.node.generateApiKey(name.trim(), allowedAIs, rateLimit);
-  res.status(201).json({ success: true, key });
+  // Valider les scopes
+  const validScopes  = (Array.isArray(scopes) ? scopes : [scopes ?? 'inference:read'])
+    .filter(s => ALL_SCOPES.includes(s));
+  if (!validScopes.length) return apiError(res, 400, 'BAD_REQUEST', 'Aucun scope valide fourni.');
+  try {
+    const key = state.node.generateApiKey(name.trim(), { scopes: validScopes, allowedAIs, rateLimit, ttlDays });
+    res.status(201).json({
+      success: true, key,
+      scopes : validScopes,
+      ttlDays,
+      expiresAt: ttlDays > 0 ? Date.now() + ttlDays * 86_400_000 : null,
+    });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
 });
 
-app.get('/api/keys/list', (req, res) => {
+// GET /api/keys/list — liste toutes les clés (sans valeur brute)
+app.get('/api/keys/list', requireScope('gateway:admin'), (req, res) => {
   res.json({ success: true, keys: state.node.listApiKeys() });
 });
 
-app.post('/api/keys/revoke', (req, res) => {
+// POST /api/keys/validate — vérifie une clé + scope
+app.post('/api/keys/validate', requireScope('gateway:read'), (req, res) => {
+  const { key, targetAI = '', scope = '' } = req.body;
+  if (!key) return apiError(res, 400, 'BAD_REQUEST', "Champ 'key' requis.");
+  const result = state.node.validateApiKey(key, targetAI, scope);
+  res.json({ success: true, valid: result.valid, reason: result.reason ?? null });
+});
+
+// POST /api/keys/revoke — révoque une clé
+app.post('/api/keys/revoke', requireScope('gateway:admin'), (req, res) => {
   const { key } = req.body;
   if (!key) return apiError(res, 400, 'BAD_REQUEST', "Champ 'key' requis.");
   try {
@@ -322,11 +410,31 @@ app.post('/api/keys/revoke', (req, res) => {
   }
 });
 
+// POST /api/keys/rotate — révoque l'ancienne clé, retourne la nouvelle
+app.post('/api/keys/rotate', requireScope('gateway:admin'), (req, res) => {
+  const { key } = req.body;
+  if (!key) return apiError(res, 400, 'BAD_REQUEST', "Champ 'key' requis.");
+  try {
+    const newKey = state.node.rotateApiKey(key);
+    res.json({ success: true, newKey });
+  } catch (e) {
+    apiError(res, 404, 'NOT_FOUND', e.message);
+  }
+});
+
+// GET /api/keys/scopes — liste tous les scopes disponibles
+app.get('/api/keys/scopes', requireScope('gateway:read'), (req, res) => {
+  res.json({
+    success: true,
+    scopes : ALL_SCOPES.map(s => ({ scope: s, label: SCOPE_LABELS[s] })),
+  });
+});
+
 // =====================================================
 // ROUTES — STOCKAGE (avec pagination)
 // =====================================================
 
-app.post('/api/storage/upload', async (req, res) => {
+app.post('/api/storage/upload', requireScope('storage:write'), async (req, res) => {
   const { name, data } = req.body;
   if (!name?.trim())             return apiError(res, 400, 'BAD_REQUEST', "Champ 'name' requis.");
   if (!Array.isArray(data) || !data.length)
@@ -340,7 +448,7 @@ app.post('/api/storage/upload', async (req, res) => {
   }
 });
 
-app.get('/api/storage/list', async (req, res) => {
+app.get('/api/storage/list', requireScope('storage:read'), async (req, res) => {
   try {
     const files              = await state.node.listFiles();
     const params             = new PaginationParams(req.query.page, req.query.per_page);
@@ -351,7 +459,7 @@ app.get('/api/storage/list', async (req, res) => {
   }
 });
 
-app.post('/api/storage/download', async (req, res) => {
+app.post('/api/storage/download', requireScope('storage:read'), async (req, res) => {
   const id = req.body.file_id?.trim() || req.body.id?.trim();
   if (!id) return apiError(res, 400, 'BAD_REQUEST', "Champ 'file_id' requis.");
   try {
@@ -362,7 +470,7 @@ app.post('/api/storage/download', async (req, res) => {
   }
 });
 
-app.post('/api/storage/delete', async (req, res) => {
+app.post('/api/storage/delete', requireScope('storage:write'), async (req, res) => {
   const id = req.body.file_id?.trim() || req.body.id?.trim();
   if (!id) return apiError(res, 400, 'BAD_REQUEST', "Champ 'file_id' requis.");
   try {
@@ -377,11 +485,11 @@ app.post('/api/storage/delete', async (req, res) => {
 // ROUTES — RÉSEAU
 // =====================================================
 
-app.get('/api/peers', (req, res) => {
+app.get('/api/peers', requireScope('peers:read'), (req, res) => {
   res.json({ success: true, peers: state.node.getPeers() });
 });
 
-app.post('/api/peers/sync', async (req, res) => {
+app.post('/api/peers/sync', requireScope('peers:write'), async (req, res) => {
   try {
     const result = await state.node.syncWithNetwork();
     res.json({ success: true, ...result });
@@ -391,8 +499,104 @@ app.post('/api/peers/sync', async (req, res) => {
 });
 
 // =====================================================
-// ROUTES — ÉVOLUTION
+// ROUTES — GATEWAY (endpoints exposés + logs de trafic)
 // =====================================================
+
+// POST /api/gateway/expose — expose un endpoint d'inférence public
+app.post('/api/gateway/expose', requireScope('gateway:admin'), (req, res) => {
+  const { name, ai = 'thevie', persona, maxTokens = 512, temperature = 0.8, rateLimit = 30, ttlDays = 0 } = req.body;
+  if (!name?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'name' requis.");
+  try {
+    const result = state.node.exposeInferenceEndpoint(name.trim(), { ai, persona, maxTokens, temperature, rateLimit, ttlDays });
+    // Monter dynamiquement l'endpoint Express
+    mountInferenceEndpoint(result.endpointName);
+    res.status(201).json({ success: true, ...result });
+  } catch (e) {
+    apiError(res, 500, 'INTERNAL_ERROR', e.message);
+  }
+});
+
+// GET /api/gateway/endpoints — liste les endpoints exposés
+app.get('/api/gateway/endpoints', requireScope('gateway:read'), (req, res) => {
+  res.json({ success: true, endpoints: state.node.listExposedEndpoints() });
+});
+
+// DELETE /api/gateway/endpoints/:name — supprime un endpoint
+app.delete('/api/gateway/endpoints/:name', requireScope('gateway:admin'), (req, res) => {
+  try {
+    state.node.removeEndpoint(req.params.name);
+    res.json({ success: true, removed: req.params.name });
+  } catch (e) {
+    apiError(res, 404, 'NOT_FOUND', e.message);
+  }
+});
+
+// GET /api/gateway/logs — logs de trafic (50 derniers par défaut)
+app.get('/api/gateway/logs', requireScope('gateway:read'), (req, res) => {
+  const limit = Math.min(500, parseInt(req.query.limit) || 50);
+  res.json({ success: true, logs: state.node.getTrafficLogs(limit) });
+});
+
+// GET /api/gateway/status — statut Gateway complet
+app.get('/api/gateway/status', requireScope('gateway:read'), (req, res) => {
+  const s = state.node.getStatus();
+  res.json({
+    success          : true,
+    gatewayEnabled   : s.gatewayEnabled,
+    gatewayPort      : s.gatewayPort,
+    exposedEndpoints : state.node.listExposedEndpoints(),
+    externalAIEnabled: s.externalAIEnabled,
+    nodeState        : s.state,
+  });
+});
+
+// ─── Mount inference endpoints dynamiquement ──────────────────────────────
+/**
+ * Monte l'endpoint /api/inference/:name sur Express.
+ * Appelé au démarrage (pour les endpoints déjà enregistrés)
+ * et à chaque POST /api/gateway/expose.
+ */
+function mountInferenceEndpoint(name) {
+  const path = `/api/inference/${name}`;
+  // Éviter le double-montage
+  if (app._router?.stack?.some(l => l.route?.path === path)) return;
+
+  app.post(path, requireScope('inference:read'), async (req, res) => {
+    const endpoints = state.node.listExposedEndpoints();
+    const ep        = endpoints.find(e => e.name === name);
+    if (!ep || !ep.active) return apiError(res, 404, 'NOT_FOUND', `Endpoint '${name}' introuvable ou désactivé.`);
+
+    const { prompt, maxTokens, temperature } = req.body;
+    if (!prompt?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'prompt' requis.");
+
+    try {
+      const fullPrompt = ep.persona
+        ? `[SYSTEM] ${ep.persona}\n\n[USER] ${prompt}\n\n[ASSISTANT]`
+        : prompt;
+
+      const result = await state.node.generateWithAI({
+        prompt     : fullPrompt,
+        ai         : ep.ai,
+        maxTokens  : maxTokens  ?? ep.maxTokens,
+        temperature: temperature ?? ep.temperature,
+      });
+
+      ep.requestCount++;
+      res.json({
+        success  : true,
+        endpoint : name,
+        ai       : ep.ai,
+        response : result.text,
+        tokens   : result.tokensGenerated,
+        wisdom   : result.wisdomScore,
+      });
+    } catch (e) {
+      apiError(res, 500, 'INFERENCE_ERROR', e.message);
+    }
+  });
+
+  console.info(`[Gateway] Route montée : POST ${path}`);
+}
 
 app.post('/api/evolution/train', async (req, res) => {
   try {
@@ -488,6 +692,35 @@ function handleWs(ws) {
 
       case 'metrics':
         response = { type: 'metrics_response', metrics: state.metrics.toJSON() };
+        break;
+
+      case 'gateway_status':
+        response = {
+          type             : 'gateway_status_response',
+          gatewayEnabled   : state.node.getStatus().gatewayEnabled,
+          exposedEndpoints : state.node.listExposedEndpoints(),
+          trafficLogs      : state.node.getTrafficLogs(20),
+        };
+        break;
+
+      case 'keys_list':
+        response = {
+          type: 'keys_list_response',
+          keys: state.node.listApiKeys(),
+        };
+        break;
+
+      case 'rotate_key':
+        if (!cmd.key) {
+          response = { type: 'error', message: "Champ 'key' requis." };
+        } else {
+          try {
+            const newKey = state.node.rotateApiKey(cmd.key);
+            response = { type: 'rotate_key_response', newKey };
+          } catch (e) {
+            response = { type: 'error', message: e.message };
+          }
+        }
         break;
 
       default:
@@ -615,9 +848,14 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.info(`✅ SkyCloud Server démarré sur http://0.0.0.0:${PORT}`);
-  console.info(`   JWT HS256 | Sliding Window | Métriques EMA | Pagination | WebSocket`);
+  console.info(`   ApiKeyStore scopes | Traffic Logs | Gateway Endpoints | WebSocket`);
   if (state.jwtSecret === 'change-me-in-prod') {
     console.warn('   ⚠️  JWT secret par défaut — définir SKYNODE_JWT_SECRET en production');
+  }
+
+  // Monter les endpoints Gateway déjà enregistrés (persistés entre redémarrages)
+  for (const ep of state.node.listExposedEndpoints()) {
+    mountInferenceEndpoint(ep.name);
   }
 });
 
