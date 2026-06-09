@@ -8,7 +8,7 @@
 "use strict";
 
 import { UserRewards }  from '../../core/src/rewards.js';
-import { NodeState }    from '../../core/src/node_types.js';
+import { NodeState }    from '../../node/src/node_types.js';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
