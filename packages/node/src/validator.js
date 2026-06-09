@@ -11,7 +11,7 @@ import { randomUUID }          from 'crypto';
 import { ZipMemory }           from '../../memory/src/zip_memory.js';
 import { UserRewards }         from '../../core/src/rewards.js';
 import { ContributionProof }   from './pouw.js';
-import { NodeState, reputationTierFromScore } from '../../core/src/node_types.js';
+import { NodeState, reputationTierFromScore } from '../../node/src/node_types.js';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
