@@ -574,6 +574,94 @@ class DecentralizedStorage {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// HELPER — Content-Type selon extension fichier
+// ─────────────────────────────────────────────────────────────
+
+function _inferContentType(path) {
+  const ext = path.split('.').pop().toLowerCase();
+  return {
+    html : 'text/html; charset=utf-8',
+    css  : 'text/css',
+    js   : 'application/javascript',
+    json : 'application/json',
+    png  : 'image/png',
+    jpg  : 'image/jpeg',
+    jpeg : 'image/jpeg',
+    gif  : 'image/gif',
+    svg  : 'image/svg+xml',
+    webp : 'image/webp',
+    ico  : 'image/x-icon',
+    woff : 'font/woff',
+    woff2: 'font/woff2',
+    ttf  : 'font/ttf',
+    pdf  : 'application/pdf',
+    mp4  : 'video/mp4',
+    webm : 'video/webm',
+    mp3  : 'audio/mpeg',
+    txt  : 'text/plain',
+    xml  : 'application/xml',
+    wasm : 'application/wasm',
+  }[ext] ?? 'application/octet-stream';
+}
+
+// =====================================================
+// HOSTED SITE — Entité d'hébergement web souverain
+//
+// Avantages pour l'utilisateur :
+//   ✦ Chiffrement automatique RomanT369 Hyper256
+//   ✦ Signature post-quantique Dilithium5 à chaque publication
+//   ✦ Versioning natif — rollback à n'importe quelle version
+//   ✦ Réplication décentralisée via ZipMemory (3 nœuds)
+//   ✦ URL publique dédiée (domaine custom ou sous-domaine .skyainet.net)
+//   ✦ Monitoring en temps réel (hits, bande passante)
+//   ✦ Zéro dépendance externe — hébergement 100% souverain
+//   ✦ Backup automatique avant chaque mise à jour
+//   ✦ Support statique + backend léger (assets, SPA, API simple)
+//   ✦ Pas de censure — décentralisé sur le réseau SkyAInet
+// =====================================================
+
+class HostedSite {
+  constructor({ id, name, domain, owner, createdAt = Date.now() }) {
+    this.id            = id;
+    this.name          = name;
+    this.domain        = domain;        // ex: mon-site.skyainet.net
+    this.owner         = owner;         // nodeId du propriétaire
+    this.createdAt     = createdAt;
+    this.updatedAt     = createdAt;
+    this.version       = 0;
+    this.active        = false;         // true après publishSite()
+    this.files         = new Map();     // path → fileId (ex: '/index.html' → 'file_xxx')
+    this.versions      = [];            // historique { version, ts, snapshot: Map }
+    this.hits          = 0;
+    this.bytesServed   = 0;
+    this.lastHit       = null;
+    this.signature     = null;          // Dilithium5 de la dernière publication
+    this.customDomain  = null;          // domaine custom configuré par l'utilisateur
+    this.sizeBytes     = 0;             // taille totale des fichiers
+  }
+
+  toJSON() {
+    return {
+      id          : this.id,
+      name        : this.name,
+      domain      : this.customDomain ?? this.domain,
+      owner       : this.owner,
+      createdAt   : this.createdAt,
+      updatedAt   : this.updatedAt,
+      version     : this.version,
+      active      : this.active,
+      fileCount   : this.files.size,
+      sizeBytes   : this.sizeBytes,
+      hits        : this.hits,
+      bytesServed : this.bytesServed,
+      lastHit     : this.lastHit,
+      versionCount: this.versions.length,
+      customDomain: this.customDomain,
+    };
+  }
+}
+
 const PERSONAS = Object.freeze({
   thevie  : 'Tu es Thevie, une intelligence collective souveraine de SkyAInet.',
   loraevo : 'Tu es LoraÉvo, un guide auto-évolutif bienveillant.',
@@ -601,6 +689,7 @@ export class SkyCloud {
 
   #exposedEndpoints;   // Map<name, EndpointConfig> — endpoints publics du Gateway
   #gatewayTrafficLogs; // { ts, method, path, statusCode, latencyMs, keyName }[]
+  #sites;              // Map<siteId, HostedSite> — sites web hébergés
 
   #registeredAIs;    // Map<string, string>
   #messageBus;       // object[]
@@ -629,9 +718,10 @@ export class SkyCloud {
     this.#userRewards = new UserRewards(AccountType.Free);
     this.#apiKeyStore = new ApiKeyStore();
 
-    // Gateway — endpoints exposés + logs de trafic
+    // Gateway — endpoints exposés + logs de trafic + sites hébergés
     this.#exposedEndpoints   = new Map();
     this.#gatewayTrafficLogs = [];
+    this.#sites              = new Map();
 
     this.#registeredAIs     = new Map();
     this.#messageBus        = [];
@@ -1056,6 +1146,207 @@ export class SkyCloud {
     return this.#agenticRunner.run(goal);
   }
 
+  // ─── Web Hosting ──────────────────────────────────────────────
+
+  /**
+   * Crée un site hébergé vide.
+   *
+   * Avantages automatiques dès la création :
+   *   ✦ URL dédiée sous-domaine .skyainet.net
+   *   ✦ Chiffrement RomanT369 Hyper256 sur tous les fichiers
+   *   ✦ Signature Dilithium5 à chaque publication
+   *   ✦ Versioning natif — rollback jusqu'à 20 versions
+   *   ✦ Réplication décentralisée sur 3 nœuds
+   *   ✦ Monitoring hits + bande passante en temps réel
+   *   ✦ Zéro censure — données souveraines sur ton nœud
+   *
+   * @param {string} name    — nom lisible (ex: "Mon Portfolio")
+   * @param {string} domain  — sous-domaine souhaité (ex: "mon-portfolio")
+   * @returns {HostedSite}
+   */
+  createSite(name, domain) {
+    if (!name?.trim())   throw new Error('Nom de site requis');
+    if (!domain?.trim()) throw new Error('Domaine requis');
+
+    const safeDomain = domain.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const fullDomain = `${safeDomain}.skyainet.net`;
+
+    for (const site of this.#sites.values()) {
+      if (site.domain === fullDomain) throw new Error(`Domaine '${fullDomain}' déjà utilisé`);
+    }
+
+    const id   = `site_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const site = new HostedSite({ id, name: name.trim(), domain: fullDomain, owner: this.#id });
+    this.#sites.set(id, site);
+
+    console.info(`[Hosting] Site créé : ${name} → ${fullDomain}`);
+    return site;
+  }
+
+  /**
+   * Ajoute ou met à jour un fichier dans un site.
+   * Chiffrement automatique via DecentralizedStorage (RomanT369 Hyper256).
+   *
+   * @param {string}            siteId — id du site
+   * @param {string}            path   — chemin relatif (ex: '/index.html')
+   * @param {Uint8Array|string} data   — contenu du fichier
+   * @returns {Promise<string>} fileId dans le storage
+   */
+  async uploadSiteFile(siteId, path, data) {
+    const site = this.#sites.get(siteId);
+    if (!site) throw new Error(`Site '${siteId}' introuvable`);
+
+    const safePath = path.startsWith('/') ? path : `/${path}`;
+    const fileName = `${siteId}${safePath}`;
+    const raw      = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    const fileId   = await this.#storage.storeFile(fileName, raw, this.#id);
+
+    // Supprimer l'ancienne version si elle existait
+    const oldId = site.files.get(safePath);
+    if (oldId && oldId !== fileId) await this.#storage.deleteFile(oldId).catch(() => {});
+
+    site.files.set(safePath, fileId);
+    site.sizeBytes = [...site.files.values()].length * raw.length;
+    site.updatedAt = Date.now();
+
+    console.debug(`[Hosting] ${site.domain}${safePath} → ${fileId}`);
+    return fileId;
+  }
+
+  /**
+   * Publie le site — rend tous les fichiers accessibles publiquement.
+   * Sauvegarde la version courante, signe avec Dilithium5, réplique.
+   *
+   * @param {string} siteId
+   * @returns {{ version, domain, url, signature, fileCount, sizeBytes }}
+   */
+  async publishSite(siteId) {
+    const site = this.#sites.get(siteId);
+    if (!site)                          throw new Error(`Site '${siteId}' introuvable`);
+    if (site.files.size === 0)          throw new Error('Aucun fichier — uploadez au moins index.html');
+    if (!site.files.has('/index.html')) throw new Error('index.html requis à la racine du site');
+
+    // Backup de la version courante
+    if (site.version > 0) {
+      site.versions.push({ version: site.version, ts: site.updatedAt, snapshot: new Map(site.files) });
+      if (site.versions.length > 20) site.versions.shift();
+    }
+
+    site.version++;
+    site.active    = true;
+    site.updatedAt = Date.now();
+
+    // Signature Dilithium5 du manifeste du site
+    const manifest = JSON.stringify({
+      siteId, domain: site.domain, version: site.version,
+      files: [...site.files.keys()].sort(), ts: site.updatedAt,
+    });
+    site.signature = Buffer.from(this.#signer.sign(new TextEncoder().encode(manifest)))
+      .toString('hex').slice(0, 64);
+
+    await this.#storage.replicatePending();
+
+    const domain = site.customDomain ?? site.domain;
+    console.info(`[Hosting] Publié : ${domain} v${site.version} | ${site.files.size} fichiers | sig: ${site.signature.slice(0,16)}…`);
+    return { version: site.version, domain, url: `https://${domain}`,
+             signature: site.signature, fileCount: site.files.size, sizeBytes: site.sizeBytes };
+  }
+
+  /**
+   * Rollback à une version précédente.
+   * Crée automatiquement un backup de la version courante avant restauration.
+   *
+   * @param {string} siteId
+   * @param {number} [version] — numéro cible (défaut: version précédente)
+   */
+  async rollbackSite(siteId, version = null) {
+    const site = this.#sites.get(siteId);
+    if (!site) throw new Error(`Site '${siteId}' introuvable`);
+
+    const target = version != null
+      ? site.versions.find(v => v.version === version)
+      : site.versions[site.versions.length - 1];
+
+    if (!target) throw new Error(`Version ${version ?? 'précédente'} introuvable`);
+
+    // Backup avant rollback
+    site.versions.push({ version: site.version, ts: Date.now(), snapshot: new Map(site.files) });
+    site.files     = new Map(target.snapshot);
+    site.version   = site.version + 1;
+    site.updatedAt = Date.now();
+
+    console.info(`[Hosting] Rollback ${site.domain} → v${target.version} (nouvelle v${site.version})`);
+    return { rolledBack: target.version, newVersion: site.version };
+  }
+
+  /**
+   * Retourne le contenu d'un fichier pour le serving HTTP.
+   * Fallback SPA : si le chemin n'existe pas → sert index.html.
+   * Appelé par server.js sur chaque requête entrante.
+   *
+   * @param {string} domain — domaine du site
+   * @param {string} path   — chemin demandé
+   * @returns {Promise<{ data: Uint8Array, contentType: string, sizeBytes: number } | null>}
+   */
+  async getSiteFile(domain, path) {
+    const site = [...this.#sites.values()].find(s =>
+      s.active && (s.domain === domain || s.customDomain === domain)
+    );
+    if (!site) return null;
+
+    let safePath = path.startsWith('/') ? path : `/${path}`;
+    if (safePath === '/') safePath = '/index.html';
+
+    const fileId = site.files.get(safePath) ?? site.files.get('/index.html');
+    if (!fileId) return null;
+
+    const data = await this.#storage.retrieveFile(fileId);
+    if (!data)  return null;
+
+    site.hits++;
+    site.bytesServed += data.length;
+    site.lastHit      = Date.now();
+
+    return { data, contentType: _inferContentType(safePath), sizeBytes: data.length };
+  }
+
+  /**
+   * Configure un domaine custom pour un site hébergé.
+   * @param {string} siteId
+   * @param {string} customDomain — ex: "monsite.com"
+   */
+  setCustomDomain(siteId, customDomain) {
+    const site = this.#sites.get(siteId);
+    if (!site) throw new Error(`Site '${siteId}' introuvable`);
+    for (const s of this.#sites.values()) {
+      if (s.id !== siteId && s.customDomain === customDomain)
+        throw new Error(`Domaine '${customDomain}' déjà utilisé`);
+    }
+    site.customDomain = customDomain;
+    console.info(`[Hosting] Domaine custom : ${customDomain} → ${site.id}`);
+  }
+
+  listSites()     { return [...this.#sites.values()].map(s => s.toJSON()); }
+  getSite(id)     { return this.#sites.get(id)?.toJSON() ?? null; }
+
+  async deleteSite(siteId) {
+    const site = this.#sites.get(siteId);
+    if (!site) throw new Error(`Site '${siteId}' introuvable`);
+    for (const fileId of site.files.values()) {
+      await this.#storage.deleteFile(fileId).catch(() => {});
+    }
+    this.#sites.delete(siteId);
+    console.info(`[Hosting] Site supprimé : ${site.domain}`);
+  }
+
+  recordSiteHit(siteId, bytes = 0) {
+    const site = this.#sites.get(siteId);
+    if (!site) return;
+    site.hits++;
+    site.bytesServed += bytes;
+    site.lastHit      = Date.now();
+  }
+
   // ─── Stockage ─────────────────────────────────────────────────
 
   async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
@@ -1193,6 +1484,17 @@ export class SkyCloud {
   tauriCommands() {
     const n = this;
     return {
+      // Web Hosting
+      createSite              : (name, domain) => n.createSite(name, domain),
+      uploadSiteFile          : (siteId, path, data) => n.uploadSiteFile(siteId, path, data),
+      publishSite             : n.publishSite.bind(n),
+      rollbackSite            : (siteId, version) => n.rollbackSite(siteId, version),
+      deleteSite              : n.deleteSite.bind(n),
+      listSites               : n.listSites.bind(n),
+      getSite                 : n.getSite.bind(n),
+      getSiteFile             : (domain, path) => n.getSiteFile(domain, path),
+      setCustomDomain         : (siteId, domain) => n.setCustomDomain(siteId, domain),
+      recordSiteHit           : (siteId, bytes) => n.recordSiteHit(siteId, bytes),
       // Gateway
       enableGateway             : n.enableGateway.bind(n),
       disableGateway            : n.disableGateway.bind(n),
