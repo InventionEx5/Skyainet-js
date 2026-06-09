@@ -558,7 +558,6 @@ app.get('/api/gateway/status', requireScope('gateway:read'), (req, res) => {
  */
 function mountInferenceEndpoint(name) {
   const path = `/api/inference/${name}`;
-  // Éviter le double-montage
   if (app._router?.stack?.some(l => l.route?.path === path)) return;
 
   app.post(path, requireScope('inference:read'), async (req, res) => {
@@ -597,6 +596,186 @@ function mountInferenceEndpoint(name) {
 
   console.info(`[Gateway] Route montée : POST ${path}`);
 }
+
+// =====================================================
+// ROUTES — WEB HOSTING
+//
+// REST API complète pour la gestion des sites hébergés.
+// Toutes les opérations transitent par SkyCloud.#sites
+// et DecentralizedStorage (chiffrement RomanT369 auto).
+//
+// Avantages exposés dans les réponses :
+//   • chiffrement RomanT369 Hyper256 automatique
+//   • signature Dilithium5 à chaque publication
+//   • versioning natif (20 versions max par site)
+//   • réplication décentralisée ZipMemory
+//   • monitoring hits + bande passante en temps réel
+// =====================================================
+
+// POST /api/hosting/sites — créer un nouveau site
+app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
+  const { name, domain } = req.body;
+  if (!name?.trim() || !domain?.trim())
+    return apiError(res, 400, 'BAD_REQUEST', "Champs 'name' et 'domain' requis.");
+  try {
+    const site = state.node.createSite(name, domain);
+    res.status(201).json({
+      success : true,
+      site    : site.toJSON(),
+      message : `Site créé — URL publique : https://${site.domain}`,
+      benefits: [
+        'Chiffrement automatique RomanT369 Hyper256',
+        'Signature Dilithium5 à chaque publication',
+        'Versioning natif — jusqu\'à 20 versions',
+        'Réplication décentralisée sur 3 nœuds',
+        'Monitoring hits + bande passante en temps réel',
+        'Zéro censure — données souveraines',
+      ],
+    });
+  } catch (e) {
+    apiError(res, 409, 'CONFLICT', e.message);
+  }
+});
+
+// GET /api/hosting/sites — liste tous les sites
+app.get('/api/hosting/sites', requireScope('storage:read'), (req, res) => {
+  res.json({ success: true, sites: state.node.listSites() });
+});
+
+// GET /api/hosting/sites/:siteId — détails d'un site
+app.get('/api/hosting/sites/:siteId', requireScope('storage:read'), (req, res) => {
+  const site = state.node.getSite(req.params.siteId);
+  if (!site) return apiError(res, 404, 'NOT_FOUND', 'Site introuvable.');
+  res.json({ success: true, site });
+});
+
+// POST /api/hosting/sites/:siteId/files — uploader un fichier
+app.post('/api/hosting/sites/:siteId/files', requireScope('storage:write'), async (req, res) => {
+  const { path, data, encoding = 'utf8' } = req.body;
+  if (!path?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'path' requis.");
+  if (!data)         return apiError(res, 400, 'BAD_REQUEST', "Champ 'data' requis.");
+  try {
+    let raw;
+    if (Array.isArray(data)) {
+      raw = Buffer.from(data.map(v => Math.max(0, Math.min(255, Number(v) || 0))));
+    } else if (encoding === 'base64') {
+      raw = Buffer.from(data, 'base64');
+    } else {
+      raw = Buffer.from(String(data), 'utf8');
+    }
+    const fileId = await state.node.uploadSiteFile(req.params.siteId, path, raw);
+    res.status(201).json({ success: true, fileId, path, sizeBytes: raw.length });
+  } catch (e) {
+    apiError(res, 500, 'UPLOAD_ERROR', e.message);
+  }
+});
+
+// POST /api/hosting/sites/:siteId/publish — publier un site
+app.post('/api/hosting/sites/:siteId/publish', requireScope('storage:write'), async (req, res) => {
+  try {
+    const result = await state.node.publishSite(req.params.siteId);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    apiError(res, 400, 'PUBLISH_ERROR', e.message);
+  }
+});
+
+// POST /api/hosting/sites/:siteId/rollback — rollback à une version
+app.post('/api/hosting/sites/:siteId/rollback', requireScope('storage:write'), async (req, res) => {
+  const { version } = req.body;
+  try {
+    const result = await state.node.rollbackSite(req.params.siteId, version ?? null);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    apiError(res, 400, 'ROLLBACK_ERROR', e.message);
+  }
+});
+
+// PUT /api/hosting/sites/:siteId/domain — configurer un domaine custom
+app.put('/api/hosting/sites/:siteId/domain', requireScope('storage:write'), (req, res) => {
+  const { customDomain } = req.body;
+  if (!customDomain?.trim())
+    return apiError(res, 400, 'BAD_REQUEST', "Champ 'customDomain' requis.");
+  try {
+    state.node.setCustomDomain(req.params.siteId, customDomain.trim());
+    res.json({ success: true, customDomain: customDomain.trim(),
+               message: `Domaine custom configuré — pointez votre DNS vers ce nœud.` });
+  } catch (e) {
+    apiError(res, 409, 'CONFLICT', e.message);
+  }
+});
+
+// DELETE /api/hosting/sites/:siteId — supprimer un site
+app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (req, res) => {
+  try {
+    await state.node.deleteSite(req.params.siteId);
+    res.json({ success: true, message: 'Site supprimé avec tous ses fichiers.' });
+  } catch (e) {
+    apiError(res, 404, 'NOT_FOUND', e.message);
+  }
+});
+
+// =====================================================
+// SERVING — Sites web hébergés
+//
+// Routes publiques — pas d'authentification requise.
+// Elles doivent être déclarées APRÈS les routes /api/*
+// pour éviter les conflits.
+//
+// Pattern :
+//   GET /sites/:domain       → index.html
+//   GET /sites/:domain/*     → fichier demandé (fallback SPA → index.html)
+//   GET /:domain/*           → (optionnel) domaine custom à la racine
+// =====================================================
+
+// Middleware de serving — commun aux deux routes /sites/*
+async function serveSiteMiddleware(req, res) {
+  const { domain } = req.params;
+  // req.params[0] = le reste du chemin (ex: '/css/style.css')
+  const filePath = '/' + (req.params[0] ?? '');
+  const start    = Date.now();
+
+  try {
+    const result = await state.node.getSiteFile(domain, filePath);
+
+    if (!result) {
+      return res.status(404).send(`
+        <html><body style="font-family:monospace;padding:2rem;background:#0a0a0f;color:#fff">
+          <h2>404 — Site introuvable</h2>
+          <p>Le site <strong>${domain}</strong> n'est pas hébergé sur ce nœud SkyCloud.</p>
+          <p style="color:#00f3ff">Powered by SkyAInet × RomanT369 Hyper256</p>
+        </body></html>`);
+    }
+
+    // Enregistrer le hit de monitoring
+    state.node.recordSiteHit(req.params.siteId ?? domain, result.sizeBytes);
+
+    // Log de trafic
+    state.node.logTraffic({
+      method    : 'GET',
+      path      : `/sites/${domain}${filePath}`,
+      statusCode: 200,
+      latencyMs : Date.now() - start,
+      keyName   : 'public',
+      ip        : (req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.ip || 'unknown',
+    });
+
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('X-SkyCloud-Domain', domain);
+    res.setHeader('X-SkyCloud-Encrypted', 'RomanT369-Hyper256');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(Buffer.from(result.data));
+
+  } catch (e) {
+    console.error(`[Hosting] Erreur serving ${domain}${filePath} :`, e.message);
+    res.status(500).send('Internal error');
+  }
+}
+
+// GET /sites/:domain        → index.html
+app.get('/sites/:domain', serveSiteMiddleware);
+// GET /sites/:domain/*      → fichier demandé
+app.get('/sites/:domain/*', serveSiteMiddleware);
 
 app.post('/api/evolution/train', async (req, res) => {
   try {
@@ -707,6 +886,44 @@ function handleWs(ws) {
         response = {
           type: 'keys_list_response',
           keys: state.node.listApiKeys(),
+        };
+        break;
+
+      case 'hosting_list':
+        response = { type: 'hosting_list_response', sites: state.node.listSites() };
+        break;
+
+      case 'hosting_create':
+        if (!cmd.name || !cmd.domain) {
+          response = { type: 'error', message: "Champs 'name' et 'domain' requis." };
+        } else {
+          try {
+            const site = state.node.createSite(cmd.name, cmd.domain);
+            response = { type: 'hosting_create_response', site: site.toJSON() };
+          } catch (e) {
+            response = { type: 'error', message: e.message };
+          }
+        }
+        break;
+
+      case 'hosting_publish':
+        if (!cmd.siteId) {
+          response = { type: 'error', message: "Champ 'siteId' requis." };
+        } else {
+          try {
+            const result = await state.node.publishSite(cmd.siteId);
+            response = { type: 'hosting_publish_response', ...result };
+          } catch (e) {
+            response = { type: 'error', message: e.message };
+          }
+        }
+        break;
+
+      case 'hosting_stats':
+        response = {
+          type  : 'hosting_stats_response',
+          sites : state.node.listSites(),
+          total : state.node.listSites().length,
         };
         break;
 
@@ -848,12 +1065,11 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.info(`✅ SkyCloud Server démarré sur http://0.0.0.0:${PORT}`);
-  console.info(`   ApiKeyStore scopes | Traffic Logs | Gateway Endpoints | WebSocket`);
+  console.info(`   ApiKeyStore scopes | Traffic Logs | Gateway Endpoints | Web Hosting | WebSocket`);
+  console.info(`   Sites hébergés : GET /sites/:domain/* — chiffrement RomanT369 Hyper256`);
   if (state.jwtSecret === 'change-me-in-prod') {
     console.warn('   ⚠️  JWT secret par défaut — définir SKYNODE_JWT_SECRET en production');
   }
-
-  // Monter les endpoints Gateway déjà enregistrés (persistés entre redémarrages)
   for (const ep of state.node.listExposedEndpoints()) {
     mountInferenceEndpoint(ep.name);
   }
