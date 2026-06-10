@@ -690,6 +690,7 @@ export class SkyCloud {
   #exposedEndpoints;   // Map<name, EndpointConfig> — endpoints publics du Gateway
   #gatewayTrafficLogs; // { ts, method, path, statusCode, latencyMs, keyName }[]
   #sites;              // Map<siteId, HostedSite> — sites web hébergés
+  #autoTrainInterval;  // ReturnType<setInterval> | null — LoRA auto-training
 
   #registeredAIs;    // Map<string, string>
   #messageBus;       // object[]
@@ -722,6 +723,7 @@ export class SkyCloud {
     this.#exposedEndpoints   = new Map();
     this.#gatewayTrafficLogs = [];
     this.#sites              = new Map();
+    this.#autoTrainInterval  = null;
 
     this.#registeredAIs     = new Map();
     this.#messageBus        = [];
@@ -1135,6 +1137,57 @@ sendMessage(from, to, content, apiKey = null) {
     await this.#evolutionManager.runTraditionalTraining();
     this.#engine.resetCache();
   }
+
+  /**
+   * Active l'entraînement LoRA automatique en arrière-plan.
+   * Déclenche triggerTraditionalTraining() à intervalle régulier
+   * OU dès que le bus de leçons dépasse le seuil configuré.
+   *
+   * @param {object} opts
+   * @param {number} opts.intervalHours — intervalle en heures (défaut: 3)
+   * @param {number} opts.busThreshold  — déclencher aussi si le bus dépasse ce seuil (défaut: 20)
+   */
+  enableAutoTraining(opts = {}) {
+    if (this.#autoTrainInterval) return { enabled: true, alreadyActive: true };
+    const intervalMs   = (opts.intervalHours ?? 3) * 3_600_000;
+    const busThreshold = opts.busThreshold ?? 20;
+
+    const run = async () => {
+      const busSize = this.#messageBus.filter(m => !m._vaccinated).length;
+      if (busSize === 0) return;
+      console.info(`[AutoTrain] Déclenchement — ${busSize} leçons dans le bus`);
+      try {
+        await this.triggerTraditionalTraining();
+        this.#evolutionCycles++;
+        console.info('[AutoTrain] Cycle LoRA terminé ✓');
+      } catch (e) {
+        console.warn('[AutoTrain] Erreur :', e.message);
+      }
+    };
+
+    const timeInterval      = setInterval(run, intervalMs);
+    const thresholdInterval = setInterval(async () => {
+      const busSize = this.#messageBus.filter(m => !m._vaccinated).length;
+      if (busSize >= busThreshold) await run();
+    }, 5 * 60_000);
+
+    this.#autoTrainInterval = { time: timeInterval, threshold: thresholdInterval };
+    console.info(`[AutoTrain] Activé — intervalle: ${opts.intervalHours ?? 3}h | seuil bus: ${busThreshold}`);
+    return { enabled: true, intervalHours: opts.intervalHours ?? 3, busThreshold };
+  }
+
+  /** Désactive l'entraînement LoRA automatique. */
+  disableAutoTraining() {
+    if (!this.#autoTrainInterval) return { enabled: false };
+    clearInterval(this.#autoTrainInterval.time);
+    clearInterval(this.#autoTrainInterval.threshold);
+    this.#autoTrainInterval = null;
+    console.info('[AutoTrain] Désactivé');
+    return { enabled: false };
+  }
+
+  /** Retourne true si l'auto-training est actif. */
+  get isAutoTrainingEnabled() { return this.#autoTrainInterval !== null; }
 
   // ─── Mode agentique ───────────────────────────────────────────
 
@@ -1614,6 +1667,9 @@ sendMessage(from, to, content, apiKey = null) {
       injectChatLesson          : n.injectChatLesson.bind(n),
       runDreamCycle             : n.runDreamCycle.bind(n),
       triggerTraditionalTraining: n.triggerTraditionalTraining.bind(n),
+      enableAutoTraining        : opts => n.enableAutoTraining(opts),
+      disableAutoTraining       : ()   => n.disableAutoTraining(),
+      isAutoTrainingEnabled     : ()   => n.isAutoTrainingEnabled,
       runAgenticTask            : n.runAgenticTask.bind(n),
       // Smart Contracts — LoraÉvo
       generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
