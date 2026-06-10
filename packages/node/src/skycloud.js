@@ -20,6 +20,7 @@ import { SpeculativeDecoder, SpeculativeConfig }  from '../../t369-inference/src
 
 import { DreamCycle }  from '../../../model/src/thevie/dream_cycle.js';
 import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
+import { NodeCommunication, Topic } from './node_communication.js';
 
 // =====================================================
 // CONSTANTES
@@ -692,6 +693,7 @@ export class SkyCloud {
   #sites;              // Map<siteId, HostedSite> — sites web hébergés
   #autoTrainInterval;  // ReturnType<setInterval> | null — LoRA auto-training
   #autoDreamInterval;  // ReturnType<setInterval> | null — Dream Cycle automatique
+  #communication;      // NodeCommunication — redistribution inter-nœuds
 
   #registeredAIs;    // Map<string, string>
   #messageBus;       // object[]
@@ -726,6 +728,7 @@ export class SkyCloud {
     this.#sites              = new Map();
     this.#autoTrainInterval  = null;
     this.#autoDreamInterval  = null;
+    this.#communication      = new NodeCommunication(this.#id);
 
     this.#registeredAIs     = new Map();
     this.#messageBus        = [];
@@ -1061,6 +1064,18 @@ enableGateway(port = 8080) {
   injectChatLesson(userPrompt, aiResponse, meta = {}) {
     this.#chatAsLesson(userPrompt, aiResponse, meta);
     this.#recordAIChatMessage();
+
+    // Vitesse 1 — Micro-update sur la paire conversation
+    // Déclenché en arrière-plan, non-bloquant
+    if (userPrompt?.trim()) {
+      const lessonContent = aiResponse
+        ? `Q: ${userPrompt}\nA: ${aiResponse}`
+        : userPrompt;
+      this.#ensureEvolutionManager();
+      this.#evolutionManager.microUpdate(lessonContent).catch(e =>
+        console.debug(`[MicroUpdate] Chat skip: ${e.message}`)
+      );
+    }
   }
 
   async generateWithAI(request) {
@@ -1111,6 +1126,13 @@ enableGateway(port = 8080) {
     this.#pushToBus({ from: 'user', to: 'thevie', content: lesson, timestamp: Date.now() });
 
     this.#ensureEvolutionManager();
+
+    // Vitesse 1 — Micro-update immédiat sur la leçon injectée
+    // Non-bloquant : fire-and-forget, erreurs silencieuses
+    this.#evolutionManager.microUpdate(lesson).catch(e =>
+      console.debug(`[MicroUpdate] Skip: ${e.message}`)
+    );
+
     await this.#evolutionManager.runDreamCycle();
     this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_DREAM_GAIN);
 
@@ -1132,6 +1154,14 @@ enableGateway(port = 8080) {
     this.#lastDreamCycle = Date.now();
     this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_DREAM_GAIN);
     this.#recordDreamCycleParticipation();
+
+    // Propagation automatique après Dream Cycle — fire-and-forget
+    // Envoie le top 10% du bus aux peers actifs connectés
+    const activePeers = this.peers.filter(p => p.isAlive());
+    if (activePeers.length > 0) {
+      this.propagateLessons(activePeers.map(p => p._comm).filter(Boolean))
+        .catch(e => console.debug(`[AutoPropagate] ${e.message}`));
+    }
   }
 
   async triggerTraditionalTraining() {
@@ -1233,6 +1263,92 @@ enableGateway(port = 8080) {
 
   /** Retourne true si l'auto-dream est actif. */
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
+
+  // ─── Redistribution inter-nœuds ───────────────────────────────
+
+  /**
+   * Diffuse une leçon qualifiée à tous les peers abonnés.
+   * Anti-boucle UUID intégré — jamais de re-broadcast.
+   *
+   * @param {object} lesson     — leçon avec { content, score/_score, id? }
+   * @param {number} threshold  — score minimum (défaut: 0.6)
+   * @returns {Promise<boolean>}
+   */
+  async broadcastLesson(lesson, threshold = 0.60) {
+    return this.#communication.broadcastLesson(lesson, threshold);
+  }
+
+  /**
+   * Échange bidirectionnel des top-N leçons avec un peer spécifique.
+   * Déclenché typiquement lors de l'établissement d'une connexion peer.
+   *
+   * @param {NodeCommunication} peerComm — NodeCommunication du peer
+   * @param {number}            topN     — nombre de leçons échangées (défaut: 20)
+   * @returns {Promise<{ sent, received, rejected }>}
+   */
+  async syncLessons(peerComm, topN = 20) {
+    return this.#communication.syncLessons(peerComm, this.#messageBus, topN);
+  }
+
+  /**
+   * Propage le top 10% du bus local à une liste de peers.
+   * Appelé automatiquement après chaque Dream Cycle.
+   * Chaque leçon passe par re-validation PII + anti-manipulation côté receveur.
+   *
+   * @param {NodeCommunication[]} peerComms — NodeCommunication des peers actifs
+   * @returns {Promise<{ propagated, skipped, peers }>}
+   */
+  async propagateLessons(peerComms = []) {
+    return this.#communication.propagateLessons(peerComms, this.#messageBus);
+  }
+
+  /**
+   * Demande active à un peer ses leçons filtrées par mot-clé / score / âge.
+   * Utile quand un nœud détecte un domaine de connaissance manquant.
+   *
+   * @param {NodeCommunication} peerComm — NodeCommunication du peer cible
+   * @param {object}            filter   — { keyword, minScore, maxAge, limit }
+   * @returns {Promise<{ lessons, rejected }>}
+   */
+  async requestLessons(peerComm, filter = {}) {
+    return this.#communication.requestLessons(peerComm, filter);
+  }
+
+  /**
+   * Abonne un handler aux leçons reçues d'autres nœuds.
+   * Déclenché chaque fois qu'une leçon est broadcastée sur le réseau.
+   *
+   * @param {function} handler — (envelope: Uint8Array) => void
+   * @returns {function} unsubscribe
+   */
+  onRemoteLesson(handler) {
+    return this.#communication.subscribe(Topic.LESSONS, async (envelope) => {
+      try {
+        const { content, lessonId } = await this.#communication.receiveRemoteLesson(envelope);
+        // Injecter la leçon reçue dans le bus local après re-validation
+        this.#pushToBus({
+          from       : 'remote',
+          to         : 'thevie',
+          content,
+          timestamp  : Date.now(),
+          _score     : 0.65,  // score conservateur pour les leçons externes
+          _remote    : true,
+          _lessonId  : lessonId,
+        });
+        if (typeof handler === 'function') handler({ content, lessonId });
+      } catch (e) {
+        console.debug(`[RemoteLesson] Rejetée : ${e.message}`);
+      }
+    });
+  }
+
+  /** Retourne les stats de communication inter-nœuds. */
+  getCommStats() {
+    return this.#communication.getStats();
+  }
+
+  /** Expose le NodeCommunication pour les peers qui en ont besoin (MixedNode). */
+  get communication() { return this.#communication; }
 
   // ─── Mode agentique ───────────────────────────────────────────
 
@@ -1550,7 +1666,19 @@ enableGateway(port = 8080) {
 
   addPeer(peerData)    { const p = new Peer(peerData); if (!this.peers.find(x => x.id === p.id)) this.peers.push(p); return p; }
   removePeer(peerId)   { this.peers = this.peers.filter(p => p.id !== peerId); }
-  async syncWithNetwork() { this.peers = this.peers.filter(p => p.isAlive()); return { peersActive: this.peers.length }; }
+  async syncWithNetwork() {
+    this.peers = this.peers.filter(p => p.isAlive());
+
+    // Synchronisation des leçons avec chaque peer actif
+    const active = this.peers.filter(p => p.isAlive() && p._comm instanceof NodeCommunication);
+    for (const peer of active) {
+      this.syncLessons(peer._comm).catch(e =>
+        console.debug(`[SyncNetwork] peer ${peer.id} : ${e.message}`)
+      );
+    }
+
+    return { peersActive: this.peers.length };
+  }
   getPeers()           { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   // ─── Gateway — serve site ─────────────────────────────────────
@@ -1718,6 +1846,12 @@ enableGateway(port = 8080) {
       enableAutoDream           : opts => n.enableAutoDream(opts),
       disableAutoDream          : ()   => n.disableAutoDream(),
       isAutoDreamEnabled        : ()   => n.isAutoDreamEnabled,
+      // Redistribution inter-nœuds
+      broadcastLesson           : (lesson, threshold) => n.broadcastLesson(lesson, threshold),
+      syncLessons               : (peerComm, topN)    => n.syncLessons(peerComm, topN),
+      propagateLessons          : peerComms            => n.propagateLessons(peerComms),
+      requestLessons            : (peerComm, filter)  => n.requestLessons(peerComm, filter),
+      getCommStats              : ()                   => n.getCommStats(),
       runAgenticTask            : n.runAgenticTask.bind(n),
       // Smart Contracts — LoraÉvo
       generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
