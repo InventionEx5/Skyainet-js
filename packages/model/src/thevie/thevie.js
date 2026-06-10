@@ -345,18 +345,6 @@ export class Thevie {
     // ── Mémoire ───────────────────────────────────────────────
     this.#memory.store(q, response);
 
-    // ── Mode agentique ────────────────────────────────────────
-    if (this.#shouldUseAgenticMode(q.content)) {
-      console.info('[Thevie] Mode agentique activé');
-      try {
-        const agentResponse = await this.#runAgenticTask(q.content);
-        response.content   = agentResponse;
-        response.quality   = Math.min(0.99, response.quality + 0.06);
-        response.expertUsed= 'agentic';
-      } catch (e) {
-        console.warn('[Thevie] Mode agentique échoué:', e.message);
-      }
-    }
 
     // ── Dream Cycle ───────────────────────────────────────────
     if (this.#dreamCycle.shouldTrigger(this.#totalQueries)) {
@@ -415,59 +403,9 @@ export class Thevie {
 
   // ─────────────────────────────────────────────────────────────
   // Détection mode agentique
-  // Déclenché sur les requêtes multi-étapes complexes
-  // ─────────────────────────────────────────────────────────────
-
-  #shouldUseAgenticMode(content) {
-    const lower = content.toLowerCase();
-    const agenticKeywords = [
-      'plan', 'étape', 'étapes', 'automatise', 'pipeline',
-      'plusieurs', 'séquence', 'workflow', 'tâche complexe',
-      'génère et', 'analyse puis', 'puis envoie',
-    ];
-    return agenticKeywords.some(k => lower.includes(k));
-  }
-
-  /**
-   * Mode agentique : décompose la tâche en sous-requêtes
-   * et les enchaîne via le moteur T369.
-   */
-  async #runAgenticTask(content) {
-    // Étape 1 : planification
-    const planResult = await this.#node.generateWithAI({
-      prompt    : `Décompose en 3 étapes concrètes et numérotées : ${content}`,
-      ai        : 'thevie',
-      maxTokens : 128,
-      useSpeculative: false,
-    });
-    const plan = planResult.text ?? '';
-
-    // Étape 2 : exécution de chaque étape
-    const steps = plan.split(/\d+\.\s+/).filter(s => s.trim().length > 10);
-    const results = [];
-    for (const step of steps.slice(0, 3)) {
-      const r = await this.#node.generateWithAI({
-        prompt    : `Exécute cette étape de façon précise : ${step}`,
-        ai        : 'thevie',
-        maxTokens : 256,
-        useSpeculative: false,
-      }).catch(() => ({ text: '' }));
-      if (r.text) results.push(r.text);
-    }
-
-    // Étape 3 : synthèse
-    const synthesis = await this.#node.generateWithAI({
-      prompt    : `Synthétise en une réponse cohérente :\n${results.join('\n')}`,
-      ai        : 'thevie',
-      maxTokens : 256,
-      useSpeculative: false,
-    }).catch(() => ({ text: results.join(' ') }));
-
-    return synthesis.text ?? results.join('\n');
-  }
-
   // ─────────────────────────────────────────────────────────────
   // Auto-amélioration récursive
+  // (Mode agentique supprimé — délégué à AgenticRunner dans agentic.js)
   // ─────────────────────────────────────────────────────────────
 
   async #recursiveSelfImprovement() {
@@ -985,7 +923,7 @@ export class Thevie {
   // GOUVERNANCE & RÉCOMPENSES
   // ═══════════════════════════════════════════════════════════════
 
-   /**
+  /**
    * Envoie le score éthique d'un nœud vers le treasury on-chain.
    * Prépare le terrain pour l'intégration blockchain.
    *
