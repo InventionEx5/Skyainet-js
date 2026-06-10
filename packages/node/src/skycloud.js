@@ -40,6 +40,162 @@ const DEFAULT_MODEL_CONFIG = Object.freeze({
 const MAX_MESSAGE_BUS     = 4096;
 const WISDOM_LEARN_GAIN   = 0.005;
 const WISDOM_DREAM_GAIN   = 0.002;
+
+// ─────────────────────────────────────────────────────────────────
+// PLANS D'ABONNEMENT SKY
+//
+// Trois contextes indépendants : Gateway, Keys, Storage.
+// Chaque contexte a 3 niveaux : Starter, Pro, Sovereign.
+// Le prélèvement est mensuel en SKY, depuis le wallet interne.
+// Un seul plan actif par contexte à la fois.
+// ─────────────────────────────────────────────────────────────────
+
+export const SUBSCRIPTION_PLANS = Object.freeze({
+  gateway: [
+    {
+      index      : 0,
+      name       : 'Starter',
+      priceMonthly: 25,
+      color      : 'sky',
+      features   : [
+        '3 hosted sites',
+        '10 GB storage',
+        '5 inference endpoints',
+        '1 custom domain',
+        'SSL Dilithium5',
+        'Basic traffic monitoring',
+        '100 API keys',
+      ],
+      limits: { sites: 3, storageGB: 10, endpoints: 5, customDomains: 1, apiKeys: 100 },
+    },
+    {
+      index      : 1,
+      name       : 'Pro',
+      priceMonthly: 75,
+      color      : 'violet',
+      features   : [
+        'Unlimited hosted sites',
+        '500 GB storage',
+        '20 inference endpoints',
+        '5 custom domains',
+        'Advanced traffic logs',
+        '2-node replication',
+        'Network priority',
+        '1 000 API keys',
+      ],
+      limits: { sites: Infinity, storageGB: 500, endpoints: 20, customDomains: 5, apiKeys: 1000 },
+    },
+    {
+      index      : 2,
+      name       : 'Sovereign',
+      priceMonthly: 250,
+      color      : 'amber',
+      features   : [
+        'Everything unlimited',
+        '3-node replication',
+        'Guaranteed bandwidth',
+        '99.9% SLA',
+        'Priority support',
+        'Early access to new features',
+        'Dedicated API key namespace',
+      ],
+      limits: { sites: Infinity, storageGB: Infinity, endpoints: Infinity, customDomains: Infinity, apiKeys: Infinity },
+    },
+  ],
+
+  keys: [
+    {
+      index      : 0,
+      name       : 'Starter',
+      priceMonthly: 10,
+      color      : 'sky',
+      features   : [
+        '100 requests / day',
+        '3 active API keys',
+        'inference:read scope',
+        'Configurable TTL',
+        'Usage logs (last 100)',
+      ],
+      limits: { reqPerDay: 100, maxKeys: 3, scopes: ['inference:read'] },
+    },
+    {
+      index      : 1,
+      name       : 'Pro',
+      priceMonthly: 40,
+      color      : 'violet',
+      features   : [
+        '5 000 requests / day',
+        '20 active API keys',
+        'All scopes unlocked',
+        'Up to 300 req/min rate limit',
+        'Automatic key rotation',
+        'Webhook on expiration',
+      ],
+      limits: { reqPerDay: 5000, maxKeys: 20, scopes: 'all', rateLimit: 300 },
+    },
+    {
+      index      : 2,
+      name       : 'Sovereign',
+      priceMonthly: 120,
+      color      : 'amber',
+      features   : [
+        'Unlimited requests',
+        'Unlimited API keys',
+        'Custom rate limits',
+        'Full admin scope',
+        'Webhook on expiration',
+        'Dedicated key namespace',
+      ],
+      limits: { reqPerDay: Infinity, maxKeys: Infinity, scopes: 'all' },
+    },
+  ],
+
+  storage: [
+    {
+      index      : 0,
+      name       : 'Starter',
+      priceMonthly: 15,
+      color      : 'sky',
+      features   : [
+        '5 GB decentralized storage',
+        'RomanT369 Hyper256 encryption',
+        '1-node replication',
+        'ZipMemory compression',
+        'Basic file versioning',
+      ],
+      limits: { storageGB: 5, replicationNodes: 1 },
+    },
+    {
+      index      : 1,
+      name       : 'Pro',
+      priceMonthly: 65,
+      color      : 'violet',
+      features   : [
+        '500 GB decentralized storage',
+        'Storage Shield — 3-node replication',
+        'Advanced compression',
+        'Automatic daily backup',
+        'Priority write speed',
+      ],
+      limits: { storageGB: 500, replicationNodes: 3 },
+    },
+    {
+      index      : 2,
+      name       : 'Sovereign',
+      priceMonthly: 180,
+      color      : 'amber',
+      features   : [
+        'Unlimited storage',
+        '5-node replication',
+        'Hourly automatic backup',
+        'Direct storage API access',
+        'Inference priority queue',
+        'Dedicated storage namespace',
+      ],
+      limits: { storageGB: Infinity, replicationNodes: 5 },
+    },
+  ],
+});
 const CHAT_LESSON_MIN_SCORE = 0.45;   // seuil d'entrée dans le bus
 const BUS_PRUNE_EVERY     = 512;      // tri qualité toutes les N insertions
 const BUS_PRUNE_KEEP_RATE = 0.75;     // garder le top 75% lors du tri
@@ -639,6 +795,9 @@ export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
   #startTime; #lastDreamCycle;
+  #walletBalance;    // number — solde SKY du wallet interne
+  #subscriptions;    // Map<context, ActiveSubscription>
+  #debitIntervals;   // Map<context, ReturnType<setInterval>>
 
   #engine;           // T369InferenceEngine
   #signer;           // Dilithium5Signer
@@ -681,6 +840,9 @@ export class SkyCloud {
     this.#storage     = new DecentralizedStorage();
     this.#zipMemory   = new ZipMemory('./data/zip_memory');
     this.#userRewards = new UserRewards(AccountType.Free);
+    this.#walletBalance   = 0;          // alimenté par claimRewards()
+    this.#subscriptions   = new Map();  // context → ActiveSubscription
+    this.#debitIntervals  = new Map();  // context → intervalId
     this.#apiKeyStore = new ApiKeyStore();
 
     // Gateway — endpoints exposés + logs de trafic + sites hébergés
@@ -709,7 +871,6 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-
   get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
@@ -903,7 +1064,8 @@ export class SkyCloud {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-sendMessage(from, to, content, apiKey = null) {
+
+  sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1012,9 +1174,7 @@ sendMessage(from, to, content, apiKey = null) {
 
 
   // ─── Génération ───────────────────────────────────────────────
-
-
-  /**
+/**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -1707,13 +1867,265 @@ sendMessage(from, to, content, apiKey = null) {
     console.info(`[SkyCloud] IA externe : ${enabled ? 'activée' : 'désactivée'}`);
   }
 
-  // ─── Récompenses ──────────────────────────────────────────────
+  // ─── Wallet & Récompenses ─────────────────────────────────────
 
-  claimRewards()      { return this.#userRewards.claim?.() ?? { claimed: 0 }; }
-  getRewardsStats()   { return { totalEarned: this.#userRewards.totalSkyEarned ?? 0 }; }
+  /**
+   * Retourne le solde SKY du wallet interne + les stats de récompenses.
+   */
+  getRewardsStats() {
+    const base = {
+      pendingRewards          : this.#userRewards.pendingRewards   ?? 0,
+      totalSkyEarned          : this.#userRewards.totalSkyEarned   ?? 0,
+      conversationQualityScore: this.#userRewards.qualityScore     ?? 0,
+      totalLearnContributions : this.#userRewards.learnCount       ?? 0,
+      totalDreamCycles        : this.#evolutionCycles,
+      walletBalance           : this.#walletBalance,
+    };
+    return base;
+  }
 
-  #recordAIChatMessage()        { this.#userRewards.recordMessage?.(); }
-  #recordLearnContribution(q)   { this.#userRewards.updateQualityScore?.(0, q); }
+  /**
+   * Réclame les récompenses en attente et les transfère dans le wallet SKY.
+   * Le wallet est la source de prélèvement des abonnements mensuels.
+   */
+  claimRewards() {
+    const result  = this.#userRewards.claim?.() ?? { claimed: 0 };
+    const claimed = result.claimed ?? 0;
+    if (claimed > 0) {
+      this.#walletBalance += claimed;
+      console.info(`[Wallet] +${claimed} SKY claimed — balance: ${this.#walletBalance} SKY`);
+    }
+    return { ...result, walletBalance: this.#walletBalance };
+  }
+
+  /** Retourne le solde SKY du wallet. */
+  get walletBalance() { return this.#walletBalance; }
+
+  /**
+   * Crédite directement le wallet (pour les tests ou les airdrops).
+   * @param {number} amount
+   */
+  creditWallet(amount) {
+    if (amount <= 0) throw new Error('Amount must be positive');
+    this.#walletBalance += amount;
+    console.info(`[Wallet] +${amount} SKY credited — balance: ${this.#walletBalance} SKY`);
+    return { walletBalance: this.#walletBalance };
+  }
+
+  // ─── Abonnements ──────────────────────────────────────────────
+
+  /**
+   * Souscrit à un plan d'abonnement SKY.
+   *
+   * Logique :
+   *   1. Vérifie que le contexte et l'index sont valides
+   *   2. Vérifie que le wallet a assez de SKY pour le premier mois
+   *   3. Annule l'abonnement actif sur ce contexte s'il en existe un
+   *   4. Débite immédiatement le premier mois
+   *   5. Enregistre l'abonnement et planifie le prélèvement mensuel
+   *
+   * @param {'gateway'|'keys'|'storage'} context
+   * @param {0|1|2}                       planIndex
+   * @returns {{ success, subscription, walletBalance, nextBillingAt }}
+   */
+  subscribeToPlan(context, planIndex) {
+    // Validation
+    const plans = SUBSCRIPTION_PLANS[context];
+    if (!plans) throw new Error(`Context invalide : '${context}'. Valides : gateway, keys, storage`);
+    const plan = plans[planIndex];
+    if (!plan)  throw new Error(`Plan index ${planIndex} invalide pour le contexte '${context}'`);
+
+    // Vérification solde
+    if (this.#walletBalance < plan.priceMonthly) {
+      throw new Error(
+        `Solde insuffisant — ${plan.priceMonthly} SKY requis, wallet: ${this.#walletBalance} SKY`
+      );
+    }
+
+    // Annuler l'abonnement actif sur ce contexte
+    if (this.#subscriptions.has(context)) {
+      this.#cancelDebit(context);
+    }
+
+    // Premier prélèvement immédiat
+    this.#walletBalance -= plan.priceMonthly;
+
+    const now           = Date.now();
+    const nextBillingAt = now + 30 * 24 * 3_600_000;  // +30 jours
+
+    const subscription = {
+      id          : `sub_${context}_${now}`,
+      context,
+      planIndex,
+      planName    : plan.name,
+      priceMonthly: plan.priceMonthly,
+      startedAt   : now,
+      nextBillingAt,
+      active      : true,
+      totalDebited: plan.priceMonthly,
+      debitCount  : 1,
+    };
+
+    this.#subscriptions.set(context, subscription);
+
+    // Planifier les prélèvements mensuels suivants
+    this.#scheduleAutoDebit(context, plan.priceMonthly);
+
+    console.info(
+      `[Subscription] ✓ ${context}/${plan.name} — ` +
+      `-${plan.priceMonthly} SKY | wallet: ${this.#walletBalance} SKY | ` +
+      `next: ${new Date(nextBillingAt).toLocaleDateString()}`
+    );
+
+    return {
+      success      : true,
+      subscription,
+      walletBalance: this.#walletBalance,
+      nextBillingAt,
+    };
+  }
+
+  /**
+   * Annule un abonnement actif.
+   * Rembourse le solde résiduel du mois en cours (prorata journalier).
+   *
+   * @param {'gateway'|'keys'|'storage'} context
+   * @returns {{ success, refundedSKY, walletBalance }}
+   */
+  cancelSubscription(context) {
+    const sub = this.#subscriptions.get(context);
+    if (!sub || !sub.active) {
+      throw new Error(`Aucun abonnement actif sur le contexte '${context}'`);
+    }
+
+    // Calcul du remboursement prorata
+    const now          = Date.now();
+    const elapsed      = now - (sub.nextBillingAt - 30 * 24 * 3_600_000);
+    const daysElapsed  = Math.floor(elapsed / (24 * 3_600_000));
+    const daysTotal    = 30;
+    const daysLeft     = Math.max(0, daysTotal - daysElapsed);
+    const refund       = Math.floor((sub.priceMonthly / daysTotal) * daysLeft);
+
+    // Arrêter le débit automatique
+    this.#cancelDebit(context);
+
+    // Rembourser
+    this.#walletBalance += refund;
+    sub.active    = false;
+    sub.cancelledAt = now;
+    sub.refundedSKY = refund;
+
+    console.info(
+      `[Subscription] ✗ ${context}/${sub.planName} annulé — ` +
+      `remboursement: ${refund} SKY (${daysLeft}j restants) | wallet: ${this.#walletBalance} SKY`
+    );
+
+    return {
+      success      : true,
+      refundedSKY  : refund,
+      daysLeft,
+      walletBalance: this.#walletBalance,
+    };
+  }
+
+  /**
+   * Retourne tous les abonnements actifs.
+   * @returns {ActiveSubscription[]}
+   */
+  getActiveSubscriptions() {
+    return [...this.#subscriptions.values()].filter(s => s.active);
+  }
+
+  /**
+   * Retourne l'abonnement actif pour un contexte donné, ou null.
+   * @param {'gateway'|'keys'|'storage'} context
+   */
+  getSubscription(context) {
+    const sub = this.#subscriptions.get(context);
+    return sub?.active ? sub : null;
+  }
+
+  /**
+   * Retourne le catalogue complet des plans.
+   * Utile pour le frontend — pas besoin d'importer SUBSCRIPTION_PLANS directement.
+   */
+  getSubscriptionPlans() {
+    return SUBSCRIPTION_PLANS;
+  }
+
+  // ─── Prélèvement automatique (privé) ──────────────────────────
+
+  /**
+   * Planifie le prélèvement mensuel automatique pour un abonnement.
+   * Utilise setInterval avec 30 jours (en production : persister la date
+   * dans ZipMemory pour survivre aux redémarrages).
+   *
+   * @param {string} context
+   * @param {number} amount  — montant SKY à prélever chaque mois
+   */
+  #scheduleAutoDebit(context, amount) {
+    const MONTH_MS = 30 * 24 * 3_600_000;
+
+    const intervalId = setInterval(() => {
+      this.#autoDebit(context, amount);
+    }, MONTH_MS);
+
+    this.#debitIntervals.set(context, intervalId);
+  }
+
+  /**
+   * Exécute un prélèvement mensuel automatique.
+   * Si le wallet est insuffisant : abonnement suspendu + log d'alerte.
+   * L'abonnement reste en mémoire mais passe à `active: false`.
+   *
+   * @param {string} context
+   * @param {number} amount
+   */
+  #autoDebit(context, amount) {
+    const sub = this.#subscriptions.get(context);
+    if (!sub || !sub.active) {
+      this.#cancelDebit(context);
+      return;
+    }
+
+    if (this.#walletBalance < amount) {
+      // Solde insuffisant — suspension
+      sub.active    = false;
+      sub.suspendedAt = Date.now();
+      sub.suspendReason = 'insufficient_balance';
+      this.#cancelDebit(context);
+
+      console.warn(
+        `[AutoDebit] ⚠ Abonnement ${context}/${sub.planName} suspendu — ` +
+        `solde insuffisant (${this.#walletBalance} SKY < ${amount} SKY requis)`
+      );
+      return;
+    }
+
+    // Prélèvement OK
+    this.#walletBalance     -= amount;
+    sub.totalDebited        += amount;
+    sub.debitCount++;
+    sub.nextBillingAt        = Date.now() + 30 * 24 * 3_600_000;
+
+    console.info(
+      `[AutoDebit] ✓ ${context}/${sub.planName} — ` +
+      `-${amount} SKY | wallet: ${this.#walletBalance} SKY | ` +
+      `débit #${sub.debitCount}`
+    );
+  }
+
+  /** Arrête le prélèvement automatique d'un contexte. */
+  #cancelDebit(context) {
+    const id = this.#debitIntervals.get(context);
+    if (id) {
+      clearInterval(id);
+      this.#debitIntervals.delete(context);
+    }
+  }
+
+  #recordAIChatMessage()           { this.#userRewards.recordMessage?.(); }
+  #recordLearnContribution(q)      { this.#userRewards.updateQualityScore?.(0, q); }
   #recordDreamCycleParticipation() { this.#userRewards.recordMessage?.(); }
 
   // ─── Status ───────────────────────────────────────────────────
@@ -1814,8 +2226,17 @@ sendMessage(from, to, content, apiKey = null) {
       getRegisteredAis          : () => [...n.registeredAIs.keys()],
       toggleExternalAi          : enabled => n.enableExternalAI(enabled),
       // Rewards
+      // Rewards & Wallet
       claimRewards              : n.claimRewards.bind(n),
       getRewardsStats           : n.getRewardsStats.bind(n),
+      creditWallet              : amount => n.creditWallet(amount),
+      get_wallet_balance        : ()     => ({ walletBalance: n.walletBalance }),
+      // Abonnements SKY
+      subscribeToPlan           : (context, planIndex) => n.subscribeToPlan(context, planIndex),
+      cancelSubscription        : context              => n.cancelSubscription(context),
+      getActiveSubscriptions    : ()                   => n.getActiveSubscriptions(),
+      getSubscription           : context              => n.getSubscription(context),
+      getSubscriptionPlans      : ()                   => n.getSubscriptionPlans(),
       // Learn / Evolution
       injectLesson              : n.injectLesson.bind(n),
       injectChatLesson          : n.injectChatLesson.bind(n),
