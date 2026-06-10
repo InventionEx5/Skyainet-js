@@ -21,6 +21,7 @@ import { SpeculativeDecoder, SpeculativeConfig }  from '../../t369-inference/src
 import { DreamCycle }  from '../../../model/src/thevie/dream_cycle.js';
 import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
 import { NodeCommunication, Topic } from './node_communication.js';
+import { AgenticRunner } from './agentic.js';
 
 // =====================================================
 // CONSTANTES
@@ -267,46 +268,6 @@ class T369InferenceEngine {
 // AGENT AGENTIQUE — implémentation inline (ThevieAgent absent du projet)
 // Planification → Exécution par étapes → Synthèse
 // =====================================================
-
-class AgenticRunner {
-  #engine;   // T369InferenceEngine
-
-  constructor(engine) { this.#engine = engine; }
-
-  async run(goal) {
-    if (!this.#engine.isReady) throw new Error('Moteur non prêt pour le mode agentique');
-
-    // Étape 1 : planification
-    const planResult = await this.#engine.generate(
-      `[SYSTEM] Tu es un planificateur. Décompose en 3 étapes numérotées et concrètes.\n[GOAL] ${goal}\n[PLAN]`,
-      { maxTokens: 128, temperature: 0.4, useSpeculative: false }
-    );
-    const plan = planResult.text;
-
-    // Étape 2 : exécution de chaque étape
-    const steps   = plan.split(/\d+\.\s+/).filter(s => s.trim().length > 10).slice(0, 3);
-    const results = [];
-    for (const step of steps) {
-      const r = await this.#engine.generate(
-        `[SYSTEM] Tu exécutes une tâche précise.\n[TASK] ${step.trim()}\n[OUTPUT]`,
-        { maxTokens: 256, temperature: 0.7, useSpeculative: false }
-      ).catch(() => ({ text: '' }));
-      if (r.text) results.push(r.text);
-    }
-
-    // Étape 3 : synthèse
-    const synthesis = await this.#engine.generate(
-      `[SYSTEM] Synthétise en une réponse cohérente.\n${results.join('\n')}\n[SYNTHESIS]`,
-      { maxTokens: 256, temperature: 0.6, useSpeculative: false }
-    ).catch(() => ({ text: results.join('\n') }));
-
-    return { goal, plan, steps: results, result: synthesis.text };
-  }
-
-  getStatus() {
-    return { engineReady: this.#engine.isReady, mode: 'agentic' };
-  }
-}
 
 // =====================================================
 // API KEY STORE
@@ -785,6 +746,8 @@ export class SkyCloud {
     if (this.#engine.isReady) {
       this.#loraEvo.connectToInference(this.#engine);
       this.#dreamCycle.injectModel(this.#engine.model);
+      // Connecter AgenticRunner au moteur si déjà instancié
+      if (this.#agenticRunner) this.#agenticRunner.connectEngine(this.#engine);
     }
   }
 
@@ -837,7 +800,8 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -939,8 +903,7 @@ enableGateway(port = 8080) {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-
-  sendMessage(from, to, content, apiKey = null) {
+sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1352,11 +1315,29 @@ enableGateway(port = 8080) {
 
   // ─── Mode agentique ───────────────────────────────────────────
 
-  async runAgenticTask(goal) {
+  async runAgenticTask(goal, onStep = null, opts = {}) {
     if (!this.#agenticRunner) {
-      this.#agenticRunner = new AgenticRunner(this.#engine);
+      this.#agenticRunner = new AgenticRunner(this, this.#engine.isReady ? this.#engine : null);
     }
-    return this.#agenticRunner.run(goal);
+    return this.#agenticRunner.run(goal, onStep, opts);
+  }
+
+  /** Retourne le catalogue des outils Agentic. */
+  getAgenticToolCatalog() {
+    if (!this.#agenticRunner) {
+      this.#agenticRunner = new AgenticRunner(this);
+    }
+    return this.#agenticRunner.getToolCatalog();
+  }
+
+  /** Retourne l'historique des sessions Agentic. */
+  listAgenticSessions() {
+    return this.#agenticRunner?.listSessions() ?? [];
+  }
+
+  /** Retourne les stats Agentic. */
+  getAgenticStats() {
+    return this.#agenticRunner?.getStats() ?? { sessions: 0, toolCount: 0, engineReady: false };
   }
 
   // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
@@ -1852,7 +1833,10 @@ enableGateway(port = 8080) {
       propagateLessons          : peerComms            => n.propagateLessons(peerComms),
       requestLessons            : (peerComm, filter)  => n.requestLessons(peerComm, filter),
       getCommStats              : ()                   => n.getCommStats(),
-      runAgenticTask            : n.runAgenticTask.bind(n),
+      runAgenticTask            : (goal, onStep, opts) => n.runAgenticTask(goal, onStep, opts),
+      getAgenticToolCatalog     : ()                   => n.getAgenticToolCatalog(),
+      listAgenticSessions       : ()                   => n.listAgenticSessions(),
+      getAgenticStats           : ()                   => n.getAgenticStats(),
       // Smart Contracts — LoraÉvo
       generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
       deploySmartContract       : contractId  => n.deploySmartContract(contractId),
