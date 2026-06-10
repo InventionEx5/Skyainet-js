@@ -933,8 +933,7 @@ export class SkyCloud {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-
-  sendMessage(from, to, content, apiKey = null) {
+sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1144,6 +1143,87 @@ export class SkyCloud {
       this.#agenticRunner = new AgenticRunner(this.#engine);
     }
     return this.#agenticRunner.run(goal);
+  }
+
+  // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
+
+  /**
+   * Génère un Smart Contract Solidity via LoraÉvo.
+   * Comme Thevie crée des nœuds, LoraÉvo crée des Smart Contracts.
+   *
+   * @param {string} description  — description en langage naturel
+   * @param {object} options
+   * @param {string}  options.type          — 'ERC20'|'NFT'|'DAO'|'VESTING'|'STAKING'|'MARKETPLACE'|'MULTISIG'
+   * @param {string}  options.network       — 'testnet'|'mainnet'|'local'
+   * @param {boolean} options.audit         — activer l'audit sécurité (défaut: true)
+   * @param {boolean} options.deploy        — déployer automatiquement après génération
+   * @param {number}  options.taxPercent    — taxe % (ERC20/Marketplace)
+   * @param {number}  options.vestingMonths — durée vesting en mois
+   * @param {number}  options.totalSupply   — supply totale (ERC20)
+   * @param {string}  options.tokenName     — nom du token
+   * @param {string}  options.tokenSymbol   — symbole du token
+   * @param {number}  options.royaltyPercent— royalties % (NFT)
+   * @param {number}  options.apyPercent    — APY staking
+   * @param {number}  options.signaturesRequired — seuil multi-sig
+   * @returns {Promise<GeneratedContract>}
+   */
+  async generateSmartContract(description, options = {}) {
+    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
+    return this.#loraEvo.generateSmartContract(description, options);
+  }
+
+  /**
+   * Déploie un contrat généré sur le réseau configuré.
+   * @param {string} contractId
+   * @returns {Promise<{ contractAddress, txHash, deployedAt }>}
+   */
+  async deploySmartContract(contractId) {
+    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
+    return this.#loraEvo.deployContract(contractId);
+  }
+
+  /**
+   * Retourne la liste de tous les contrats générés.
+   * @returns {ContractSummary[]}
+   */
+  listSmartContracts() {
+    return this.#loraEvo?.listContracts() ?? [];
+  }
+
+  /**
+   * Retourne un contrat complet avec son code Solidity.
+   * @param {string} contractId
+   * @returns {GeneratedContract | null}
+   */
+  getSmartContract(contractId) {
+    return this.#loraEvo?.getContract(contractId) ?? null;
+  }
+
+  /**
+   * Supprime un contrat de la liste locale.
+   * @param {string} contractId
+   */
+  deleteSmartContract(contractId) {
+    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
+    this.#loraEvo.deleteContract(contractId);
+  }
+
+  /**
+   * Retourne les stats Smart Contracts de LoraÉvo.
+   * @returns {{ contractsGenerated, contractsDeployed, types }}
+   */
+  getSmartContractStats() {
+    const contracts = this.listSmartContracts();
+    const byType    = contracts.reduce((acc, c) => {
+      acc[c.type] = (acc[c.type] ?? 0) + 1;
+      return acc;
+    }, {});
+    return {
+      contractsGenerated: contracts.length,
+      contractsDeployed : contracts.filter(c => c.deployStatus === 'deployed').length,
+      skySpent          : contracts.reduce((s, c) => s + (c.skyFee ?? 0), 0),
+      byType,
+    };
   }
 
   // ─── Web Hosting ──────────────────────────────────────────────
@@ -1452,21 +1532,26 @@ export class SkyCloud {
 
   getNodeMetrics() {
     const upSec = Math.floor((Date.now() - this.#startTime) / 1000);
+    const scStats = this.getSmartContractStats();
     return {
-      node_id          : this.#id,
-      state            : this.#state,
-      engine_ready     : this.#engine.isReady,
-      engine_stats     : this.#engine.stats(),
-      wisdom_score     : +this.#wisdomScore.toFixed(4),
-      total_requests   : this.#totalRequests,
-      evolution_cycles : this.#evolutionCycles,
-      last_dream_cycle : this.#lastDreamCycle,
-      peers_connected  : this.peers.filter(p => p.isAlive()).length,
-      registered_ais   : [...this.#registeredAIs.keys()],
-      uptime_formatted : `${Math.floor(upSec / 3600)}h ${Math.floor((upSec % 3600) / 60)}m`,
-      api_keys_count   : this.#apiKeyStore.list().filter(k => !k.revoked).length,
-      exposed_endpoints: this.listExposedEndpoints(),
-      gateway_port     : this.#gatewayPort,
+      node_id               : this.#id,
+      state                 : this.#state,
+      engine_ready          : this.#engine.isReady,
+      engine_stats          : this.#engine.stats(),
+      wisdom_score          : +this.#wisdomScore.toFixed(4),
+      total_requests        : this.#totalRequests,
+      evolution_cycles      : this.#evolutionCycles,
+      last_dream_cycle      : this.#lastDreamCycle,
+      peers_connected       : this.peers.filter(p => p.isAlive()).length,
+      registered_ais        : [...this.#registeredAIs.keys()],
+      uptime_formatted      : `${Math.floor(upSec / 3600)}h ${Math.floor((upSec % 3600) / 60)}m`,
+      api_keys_count        : this.#apiKeyStore.list().filter(k => !k.revoked).length,
+      exposed_endpoints     : this.listExposedEndpoints(),
+      gateway_port          : this.#gatewayPort,
+      // Smart Contracts
+      contracts_generated   : scStats.contractsGenerated,
+      contracts_deployed    : scStats.contractsDeployed,
+      sky_spent_contracts   : scStats.skySpent,
     };
   }
 
@@ -1530,6 +1615,13 @@ export class SkyCloud {
       runDreamCycle             : n.runDreamCycle.bind(n),
       triggerTraditionalTraining: n.triggerTraditionalTraining.bind(n),
       runAgenticTask            : n.runAgenticTask.bind(n),
+      // Smart Contracts — LoraÉvo
+      generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
+      deploySmartContract       : contractId  => n.deploySmartContract(contractId),
+      listSmartContracts        : ()          => n.listSmartContracts(),
+      getSmartContract          : contractId  => n.getSmartContract(contractId),
+      deleteSmartContract       : contractId  => n.deleteSmartContract(contractId),
+      getSmartContractStats     : ()          => n.getSmartContractStats(),
       // Réseau
       syncWithNetwork           : n.syncWithNetwork.bind(n),
       getPeers                  : n.getPeers.bind(n),
