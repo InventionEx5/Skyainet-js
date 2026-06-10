@@ -453,7 +453,7 @@ Done: <brief summary of what was accomplished>`;
   // Moins précis mais fonctionnel pour les cas simples.
   // ═══════════════════════════════════════════════════════════════
 
-  #heuristicStep(goal, context, stepNum) {
+    #heuristicStep(goal, context, stepNum) {
     const lower       = goal.toLowerCase();
     const hasContext  = context.length > 100;
     const actionsDone = (context.match(/Action:/g) ?? []).length;
