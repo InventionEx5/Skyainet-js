@@ -691,6 +691,7 @@ export class SkyCloud {
   #gatewayTrafficLogs; // { ts, method, path, statusCode, latencyMs, keyName }[]
   #sites;              // Map<siteId, HostedSite> — sites web hébergés
   #autoTrainInterval;  // ReturnType<setInterval> | null — LoRA auto-training
+  #autoDreamInterval;  // ReturnType<setInterval> | null — Dream Cycle automatique
 
   #registeredAIs;    // Map<string, string>
   #messageBus;       // object[]
@@ -724,6 +725,7 @@ export class SkyCloud {
     this.#gatewayTrafficLogs = [];
     this.#sites              = new Map();
     this.#autoTrainInterval  = null;
+    this.#autoDreamInterval  = null;
 
     this.#registeredAIs     = new Map();
     this.#messageBus        = [];
@@ -832,8 +834,7 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-
-  enableGateway(port = 8080) {
+enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -935,7 +936,8 @@ export class SkyCloud {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-sendMessage(from, to, content, apiKey = null) {
+
+  sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1188,6 +1190,49 @@ sendMessage(from, to, content, apiKey = null) {
 
   /** Retourne true si l'auto-training est actif. */
   get isAutoTrainingEnabled() { return this.#autoTrainInterval !== null; }
+
+  /**
+   * Active le Dream Cycle automatique en arrière-plan.
+   * Tourne indépendamment de l'auto-training LoRA.
+   * Intervalle recommandé : 45 min (plus léger que le LoRA Training).
+   *
+   * @param {object} opts
+   * @param {number} opts.intervalMinutes — intervalle en minutes (défaut: 45)
+   * @param {number} opts.minLessons      — déclencher seulement si le bus a au moins N leçons (défaut: 3)
+   */
+  enableAutoDream(opts = {}) {
+    if (this.#autoDreamInterval) return { enabled: true, alreadyActive: true };
+    const intervalMs  = (opts.intervalMinutes ?? 45) * 60_000;
+    const minLessons  = opts.minLessons ?? 3;
+
+    const run = async () => {
+      const busSize = this.#messageBus.length;
+      if (busSize < minLessons) return;
+      console.info(`[AutoDream] Déclenchement — ${busSize} leçons dans le bus`);
+      try {
+        await this.runEvolutionCycle();
+        console.info('[AutoDream] Dream Cycle terminé ✓');
+      } catch (e) {
+        console.warn('[AutoDream] Erreur :', e.message);
+      }
+    };
+
+    this.#autoDreamInterval = setInterval(run, intervalMs);
+    console.info(`[AutoDream] Activé — intervalle: ${opts.intervalMinutes ?? 45}min | min leçons: ${minLessons}`);
+    return { enabled: true, intervalMinutes: opts.intervalMinutes ?? 45, minLessons };
+  }
+
+  /** Désactive le Dream Cycle automatique. */
+  disableAutoDream() {
+    if (!this.#autoDreamInterval) return { enabled: false };
+    clearInterval(this.#autoDreamInterval);
+    this.#autoDreamInterval = null;
+    console.info('[AutoDream] Désactivé');
+    return { enabled: false };
+  }
+
+  /** Retourne true si l'auto-dream est actif. */
+  get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Mode agentique ───────────────────────────────────────────
 
@@ -1670,6 +1715,9 @@ sendMessage(from, to, content, apiKey = null) {
       enableAutoTraining        : opts => n.enableAutoTraining(opts),
       disableAutoTraining       : ()   => n.disableAutoTraining(),
       isAutoTrainingEnabled     : ()   => n.isAutoTrainingEnabled,
+      enableAutoDream           : opts => n.enableAutoDream(opts),
+      disableAutoDream          : ()   => n.disableAutoDream(),
+      isAutoDreamEnabled        : ()   => n.isAutoDreamEnabled,
       runAgenticTask            : n.runAgenticTask.bind(n),
       // Smart Contracts — LoraÉvo
       generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
