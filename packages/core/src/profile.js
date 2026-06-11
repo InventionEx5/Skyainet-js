@@ -185,6 +185,7 @@ export class UserProfile {
   get verificationLevel()        { return this.#verificationLevel; }
   get walletAddress()            { return this.#walletAddress; }
   get stakeAmount()              { return this.#stakeAmount; }
+  set _stakeAmount(v)            { this.#stakeAmount = Math.max(0, v); }
   get dailyMessages()            { return this.#nodeEcon.userRewards.dailyMessages; }
   get maxDailyMessages()         { return this.#nodeEcon.userRewards.getMaxDailyMessages(); }
   get qualityScore()             { return this.#nodeEcon.userRewards.conversationQualityScore; }
