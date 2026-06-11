@@ -159,15 +159,66 @@ export class NodeEconomics {
   recordDreamCycle(quality)                { this.userRewards.recordDreamCycle(quality); }
   recordHighQualityInteraction(quality)    { this.userRewards.recordHighQualityInteraction(quality); }
 
-  claimMonthlyRewards() {
+  /**
+   * Réclame les rewards en attente et les transfère dans le wallet SKY.
+   *
+   * Connexion wallet (optionnelle) :
+   *   — Si `wallet` est fourni et implémente `creditLocal(amount)`,
+   *     les SKY sont crédités immédiatement dans le wallet de l'utilisateur.
+   *   — En production, remplacer creditLocal par un vrai transfer ERC-20
+   *     via treasury.sendToUser(wallet.address, amount).
+   *
+   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @returns {Promise<{ amount: number, walletBalance: number|null, payoutRecord: object }>}
+   */
+  async claimMonthlyRewards(wallet = null) {
     const amount = this.userRewards.claimMonthlyRewards();
-    if (amount > 0) {
-      this.totalEarnedSky += amount;
-      this.lastPayout      = Date.now();
-      this.#payoutHistory.push({ ts: Date.now(), amount });
-      if (this.#payoutHistory.length > 24) this.#payoutHistory.shift(); // 24 mois max
+    if (amount <= 0) return { amount: 0, walletBalance: wallet?.cachedBalance ?? null, payoutRecord: null };
+
+    this.totalEarnedSky += amount;
+    this.lastPayout      = Date.now();
+    const payoutRecord   = { ts: this.lastPayout, amount };
+    this.#payoutHistory.push(payoutRecord);
+    if (this.#payoutHistory.length > 24) this.#payoutHistory.shift();
+
+    // ── Connexion wallet ──────────────────────────────────────────
+    let walletBalance = null;
+    if (wallet && typeof wallet.creditLocal === 'function') {
+      try {
+        walletBalance = wallet.creditLocal(amount);
+        console.info(`[Economics] Claim ${amount} SKY → wallet ${wallet.address ?? 'local'} | balance: ${walletBalance} SKY`);
+      } catch (e) {
+        console.warn(`[Economics] creditLocal échoué : ${e.message}`);
+      }
+    } else {
+      console.info(`[Economics] Claim ${amount} SKY — pas de wallet connecté (local only)`);
     }
-    return amount;
+
+    return { amount, walletBalance, payoutRecord };
+  }
+
+  /**
+   * Reçoit la part utilisateur d'une distribution treasury (55% users)
+   * et la crédite dans le wallet.
+   *
+   * Appelée par TreasuryManager.distributeRewards() pour chaque nœud contributeur.
+   *
+   * @param {number} amount  — montant SKY à créditer
+   * @param {import('./wallet.js').SkyWallet|null} wallet
+   */
+  async receiveDistribution(amount, wallet = null) {
+    if (amount <= 0) return;
+    this.userRewards.totalSkyEarned += amount;
+    this.totalEarnedSky             += amount;
+
+    if (wallet && typeof wallet.creditLocal === 'function') {
+      try {
+        wallet.creditLocal(amount);
+        console.info(`[Economics] Distribution reçue : +${amount} SKY → wallet ${wallet.address ?? 'local'}`);
+      } catch (e) {
+        console.warn(`[Economics] receiveDistribution creditLocal échoué : ${e.message}`);
+      }
+    }
   }
 
   getSubscriptionBonus()   { return this.userRewards.getSubscriptionBonus(); }
