@@ -12,6 +12,8 @@ import morgan                from 'morgan';
 import jwt                   from 'jsonwebtoken';
 import { WebSocketServer }   from 'ws';
 import crypto                from 'crypto';
+import { exec }              from 'child_process';
+import { existsSync }        from 'fs';
 
 import { SkyCloud as SkyCloud }    from './skycloud.js';
 import { ALL_SCOPES, SCOPE_LABELS } from './skycloud.js';
@@ -954,7 +956,6 @@ function handleWs(ws) {
 
   ws.on('error', err => console.error('[WS]', err.message));
 }
-
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
@@ -1062,16 +1063,151 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 // DÉMARRAGE
 // =====================================================
 
+// ─── Route générique apiHandlers ──────────────────────────────
+// Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
+// Complète les routes spécifiques ci-dessus.
+// Les routes spécifiques ont la priorité (Express les matche en premier).
+{
+  const handlers = state.node.apiHandlers();
+
+  // Mapping commandes → méthode HTTP pour GET sémantique
+  const GET_CMDS = new Set([
+    'get_status', 'get_node_metrics', 'get_rewards_stats',
+    'get_wallet_balance', 'get_user_profile', 'get_profile_nav_badge',
+    'get_current_language', 'list_available_models',
+    'get_active_subscriptions', 'get_subscription_plans',
+    'list_sites', 'list_files', 'list_api_keys',
+    'list_exposed_endpoints', 'get_traffic_logs',
+    'list_smart_contracts', 'get_smart_contract_stats',
+    'get_comm_stats', 'get_agentic_stats', 'list_agentic_sessions',
+    'is_auto_training_enabled', 'is_auto_dream_enabled',
+  ]);
+
+  app.all('/api/cmd/:name', auth, async (req, res) => {
+    const name = req.params.name;
+    const fn   = handlers[name];
+
+    if (!fn) {
+      return apiError(res, 404, 'UNKNOWN_CMD', `Unknown command: ${name}`);
+    }
+
+    // Arguments : query params pour GET, body pour POST/PUT
+    const args = GET_CMDS.has(name)
+      ? Object.values(req.query)
+      : Object.values(req.body ?? {});
+
+    try {
+      const result = await fn(...args);
+      res.json({ ok: true, result: result ?? null });
+    } catch (e) {
+      apiError(res, 500, 'CMD_ERROR', e.message);
+    }
+  });
+
+  console.info(`[Server] apiHandlers exposés — ${Object.keys(handlers).length} commandes sur /api/cmd/:name`);
+}
+
+// ── Routes PWA — assets en mémoire ou depuis le disque ────────
+// En mode binaire Bun compilé : readFileSync depuis le bundle
+// En mode dev : sendFile depuis le disque
+import { join as _join, dirname as _dirname } from 'path';
+import { fileURLToPath as _ftu } from 'url';
+import { readFileSync as _rfs, existsSync as _ex } from 'fs';
+
+const _root = _dirname(_dirname(_dirname(_ftu(import.meta.url))));
+
+// Charger les assets — depuis le bundle (binaire) ou le disque (dev)
+function _asset(relPath, encoding = 'utf8') {
+    const full = _join(_root, relPath);
+    if (_ex(full)) return _rfs(full, encoding);
+    // En mode binaire, les assets sont embarqués — chemin relatif direct
+    try { return _rfs(relPath, encoding); } catch { return null; }
+}
+
+const _sw       = _asset('sw.js');
+const _manifest = _asset('manifest.json');
+const _offline  = _asset('offline.html');
+
+// Servir les assets PWA (en mémoire si disponible, sinon disque)
+app.get('/sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.setHeader('Service-Worker-Allowed', '/');
+    res.setHeader('Cache-Control', 'no-cache');
+    if (_sw) return res.send(_sw);
+    res.sendFile(_join(_root, 'sw.js'));
+});
+
+app.get('/manifest.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/manifest+json');
+    res.setHeader('Cache-Control', 'no-cache');
+    if (_manifest) return res.send(_manifest);
+    res.sendFile(_join(_root, 'manifest.json'));
+});
+
+app.get('/offline.html', (req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    if (_offline) return res.send(_offline);
+    res.sendFile(_join(_root, 'offline.html'));
+});
+
+// Icônes et autres assets statiques
+app.use('/icons', express.static(_join(_root, 'icons')));
+
+// Pages HTML — servis depuis la racine (dev) ou le bundle (binaire)
+const _HTML_PAGES = ['skyainet.html', 'skycloud.html', 'thevie.html',
+                     'messaging.html', 'node.html', 'marketplace.html',
+                     'governance.html', 'settings.html'];
+
+for (const page of _HTML_PAGES) {
+    app.get(`/${page}`, (req, res) => {
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Service-Worker-Allowed', '/');
+        const content = _asset(page);
+        if (content) return res.type('html').send(content);
+        res.sendFile(_join(_root, page));
+    });
+}
+
+// Fallback → skyainet.html pour toutes les routes inconnues
+app.get('/', (req, res) => res.redirect('/skyainet.html'));
+
+// Assets statiques restants (JS, CSS, fonts)
+app.use(express.static(_root, {
+    index   : false,
+    dotfiles: 'ignore',
+    setHeaders(res, filePath) {
+        if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+        } else {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+        res.setHeader('Service-Worker-Allowed', '/');
+    },
+}));
+
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.info(`✅ SkyCloud Server démarré sur http://0.0.0.0:${PORT}`);
-  console.info(`   ApiKeyStore scopes | Traffic Logs | Gateway Endpoints | Web Hosting | WebSocket`);
-  console.info(`   Sites hébergés : GET /sites/:domain/* — chiffrement RomanT369 Hyper256`);
+  const url = `http://localhost:${PORT}/skyainet.html`;
+  console.info(`\n✅ SkyAInet Node démarré`);
+  console.info(`   PWA  → ${url}`);
+  console.info(`   API  → http://localhost:${PORT}/api/status`);
+  console.info(`   WS   → ws://localhost:${PORT}/ws`);
   if (state.jwtSecret === 'change-me-in-prod') {
     console.warn('   ⚠️  JWT secret par défaut — définir SKYNODE_JWT_SECRET en production');
   }
   for (const ep of state.node.listExposedEndpoints()) {
     mountInferenceEndpoint(ep.name);
+  }
+
+  // Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
+  if (process.env.SKYAINET_NO_BROWSER !== '1') {
+    const { exec: _exec } = await import('child_process');
+    const cmd = process.platform === 'win32'  ? `start "" "${url}"`
+              : process.platform === 'darwin' ? `open "${url}"`
+              :                                  `xdg-open "${url}"`;
+    _exec(cmd, err => {
+      if (err) console.info(`   Ouvrir manuellement : ${url}`);
+    });
   }
 });
 
