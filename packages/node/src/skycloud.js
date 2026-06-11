@@ -22,6 +22,7 @@ import { DreamCycle }  from '../../../model/src/thevie/dream_cycle.js';
 import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
 import { NodeCommunication, Topic } from './node_communication.js';
 import { AgenticRunner } from './agentic.js';
+import { ModelRegistry } from '../../../model/src/thevie/model_registry.js';
 
 // =====================================================
 // CONSTANTES
@@ -442,7 +443,7 @@ class T369InferenceEngine {
 //   admin            — accès total (toutes les routes)
 // =====================================================
 
-const ALL_SCOPES = Object.freeze([
+ const ALL_SCOPES = Object.freeze([
   'inference:read', 'inference:write',
   'storage:read',   'storage:write',
   'gateway:read',   'gateway:admin',
@@ -695,7 +696,6 @@ class DecentralizedStorage {
 // ─────────────────────────────────────────────────────────────
 // HELPER — Content-Type selon extension fichier
 // ─────────────────────────────────────────────────────────────
-
 function _inferContentType(path) {
   const ext = path.split('.').pop().toLowerCase();
   return {
@@ -824,6 +824,7 @@ export class SkyCloud {
   #dreamCycle;       // DreamCycle
   #loraEvo;          // LoraEvo
   #agenticRunner;    // AgenticRunner (lazy)
+  #modelRegistry;    // ModelRegistry — catalogue des modèles locaux + cloud
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -862,7 +863,8 @@ export class SkyCloud {
     this.#engine         = new T369InferenceEngine(modelConfig);
     this.#dreamCycle     = new DreamCycle();
     this.#loraEvo        = new LoraEvo();
-    this.#agenticRunner  = null;   // initialisé lazily dans runAgenticTask()
+    this.#agenticRunner  = null;
+    this.#modelRegistry  = new ModelRegistry();
     this.#evolutionManager = null;
 
     this.peers = [];
@@ -871,6 +873,7 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
+
   get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
@@ -952,8 +955,47 @@ export class SkyCloud {
    * @param {string} [targetAI]
    * @param {string} [scope]    — ex: 'inference:read'
    */
+  /**
+   * Valide une clé API.
+   * Vérifie en plus que les modèles cloud ne sont pas appelés
+   * si External AI Access est désactivé dans Gateway.
+   */
   validateApiKey(key, targetAI = '', scope = '') {
-    return this.#apiKeyStore.validate(key, targetAI, scope);
+    const result = this.#apiKeyStore.validate(key, targetAI, scope);
+    if (!result.valid) return result;
+
+    // Vérifier si le modèle cible est un modèle cloud
+    if (targetAI && !this.#externalAIEnabled) {
+      const model = this.#modelRegistry.getModel(targetAI);
+      if (model && !model.isLocal) {
+        return {
+          valid : false,
+          reason: `External AI '${targetAI}' is disabled — enable External AI Access in Gateway first`,
+        };
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Retourne la liste de tous les modèles disponibles (locaux + cloud).
+   * Utilisé par le frontend pour peupler la checklist Allowed AIs.
+   * Les modèles cloud sont marqués isLocal: false.
+   */
+  listAvailableModels() {
+    return this.#modelRegistry.listModels().map(m => ({
+      name       : m.name,
+      backend    : m.backend,
+      isLocal    : m.isLocal,
+      avgQuality : m.avgQuality,
+      specialties: m.specialties,
+    }));
+  }
+
+  /** Enregistre un appel modèle pour les métriques dynamiques. */
+  recordModelCall(modelName, latencyMs, success = true) {
+    this.#modelRegistry.recordCall(modelName, latencyMs, success);
   }
 
   revokeApiKey(key)      { this.#apiKeyStore.revoke(key); }
@@ -961,8 +1003,7 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-
-  enableGateway(port = 8080) {
+enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1174,7 +1215,9 @@ export class SkyCloud {
 
 
   // ─── Génération ───────────────────────────────────────────────
-/**
+
+
+  /**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -2211,6 +2254,8 @@ export class SkyCloud {
       // API Keys
       generateApiKey            : (name, opts) => n.generateApiKey(name, opts),
       validateApiKey            : (key, ai, scope) => n.validateApiKey(key, ai, scope),
+      listAvailableModels       : ()               => n.listAvailableModels(),
+      recordModelCall           : (name, ms, ok)   => n.recordModelCall(name, ms, ok),
       revokeApiKey              : n.revokeApiKey.bind(n),
       rotateApiKey              : n.rotateApiKey.bind(n),
       listApiKeys               : n.listApiKeys.bind(n),
