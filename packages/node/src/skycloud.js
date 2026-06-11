@@ -23,6 +23,9 @@ import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
 import { NodeCommunication, Topic } from './node_communication.js';
 import { AgenticRunner } from './agentic.js';
 import { ModelRegistry } from '../../../model/src/thevie/model_registry.js';
+import { NodeEconomics }  from '../../core/src/economics.js';
+import { SkyWallet }      from '../../financial/src/wallet.js';
+import { TreasuryManager }from '../../financial/src/treasury.js';
 
 // =====================================================
 // CONSTANTES
@@ -443,7 +446,7 @@ class T369InferenceEngine {
 //   admin            — accès total (toutes les routes)
 // =====================================================
 
- const ALL_SCOPES = Object.freeze([
+const ALL_SCOPES = Object.freeze([
   'inference:read', 'inference:write',
   'storage:read',   'storage:write',
   'gateway:read',   'gateway:admin',
@@ -696,6 +699,7 @@ class DecentralizedStorage {
 // ─────────────────────────────────────────────────────────────
 // HELPER — Content-Type selon extension fichier
 // ─────────────────────────────────────────────────────────────
+
 function _inferContentType(path) {
   const ext = path.split('.').pop().toLowerCase();
   return {
@@ -825,6 +829,9 @@ export class SkyCloud {
   #loraEvo;          // LoraEvo
   #agenticRunner;    // AgenticRunner (lazy)
   #modelRegistry;    // ModelRegistry — catalogue des modèles locaux + cloud
+  #skyWallet;        // SkyWallet — wallet ERC-20 de l'utilisateur (optionnel)
+  #nodeEcon;         // NodeEconomics — rewards + abonnements + payouts
+  #treasury;         // TreasuryManager — distribution globale (optionnel)
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -865,6 +872,9 @@ export class SkyCloud {
     this.#loraEvo        = new LoraEvo();
     this.#agenticRunner  = null;
     this.#modelRegistry  = new ModelRegistry();
+    this.#skyWallet      = null;                          // connecter via connectWallet()
+    this.#nodeEcon       = new NodeEconomics(AccountType.Free);
+    this.#treasury       = null;                          // connecter via connectTreasury()
     this.#evolutionManager = null;
 
     this.peers = [];
@@ -902,8 +912,7 @@ export class SkyCloud {
   }
 
   // ─── Initialisation ──────────────────────────────────────────
-
-  async initEngine(weightsPath = null) {
+async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
 
     // Connecter LoraEvo au moteur dès qu'il est prêt
@@ -1003,7 +1012,8 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1431,8 +1441,7 @@ enableGateway(port = 8080) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-
-  /**
+/**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -1866,8 +1875,7 @@ enableGateway(port = 8080) {
   getPeers()           { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   // ─── Gateway — serve site ─────────────────────────────────────
-
-  /**
+/**
    * Sert un site souverain chiffré avec signature Dilithium5.
    * Port de serve_site() dans skycloud.rs.
    * @param {string} siteId
@@ -1928,29 +1936,74 @@ enableGateway(port = 8080) {
   }
 
   /**
-   * Réclame les récompenses en attente et les transfère dans le wallet SKY.
-   * Le wallet est la source de prélèvement des abonnements mensuels.
+   * Réclame les rewards en attente et les transfère dans le wallet SKY.
+   *
+   * Flux complet :
+   *   UserRewards.pendingRewards → NodeEconomics.claimMonthlyRewards(wallet)
+   *   → SkyWallet.creditLocal(amount)
+   *   → #walletBalance mis à jour
+   *
+   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @returns {Promise<{ claimed: number, walletBalance: number }>}
    */
-  claimRewards() {
-    const result  = this.#userRewards.claim?.() ?? { claimed: 0 };
-    const claimed = result.claimed ?? 0;
+  async claimRewards(wallet = null) {
+    // Utiliser le wallet injecté ou le wallet interne du nœud
+    const targetWallet = wallet ?? this.#skyWallet ?? null;
+
+    const result  = await this.#nodeEcon.claimMonthlyRewards(targetWallet).catch(() => ({ amount: 0, walletBalance: null }));
+    const claimed = result.amount ?? 0;
+
     if (claimed > 0) {
-      this.#walletBalance += claimed;
-      console.info(`[Wallet] +${claimed} SKY claimed — balance: ${this.#walletBalance} SKY`);
+      // Mettre à jour le solde interne même si pas de wallet blockchain
+      if (result.walletBalance != null) {
+        this.#walletBalance = result.walletBalance;
+      } else {
+        this.#walletBalance += claimed;
+      }
+      console.info(`[SkyCloud] Claim ${claimed} SKY → walletBalance: ${this.#walletBalance} SKY`);
     }
-    return { ...result, walletBalance: this.#walletBalance };
+
+    return { claimed, walletBalance: this.#walletBalance };
   }
 
-  /** Retourne le solde SKY du wallet. */
-  get walletBalance() { return this.#walletBalance; }
+  get walletBalance() { return this.#skyWallet?.cachedBalance ?? this.#walletBalance; }
 
   /**
-   * Crédite directement le wallet (pour les tests ou les airdrops).
+   * Connecte un SkyWallet à ce nœud.
+   * Toutes les opérations wallet (claim, abonnements, débits auto) utiliseront ce wallet.
+   *
+   * @param {SkyWallet} wallet
+   */
+  connectWallet(wallet) {
+    if (!(wallet instanceof SkyWallet)) throw new TypeError('Expected SkyWallet instance');
+    this.#skyWallet   = wallet;
+    this.#walletBalance = wallet.cachedBalance;
+    console.info(`[SkyCloud] SkyWallet connecté — address: ${wallet.address}`);
+    return { address: wallet.address, balance: wallet.cachedBalance };
+  }
+
+  /**
+   * Connecte un TreasuryManager pour la distribution globale des revenus.
+   * @param {TreasuryManager} treasury
+   */
+  connectTreasury(treasury) {
+    if (!(treasury instanceof TreasuryManager)) throw new TypeError('Expected TreasuryManager instance');
+    this.#treasury = treasury;
+    console.info('[SkyCloud] TreasuryManager connecté');
+  }
+
+  /**
+   * Crédite directement le wallet (airdrops, rewards manuels).
+   * Passe par SkyWallet.creditLocal() si un wallet est connecté.
    * @param {number} amount
    */
   creditWallet(amount) {
     if (amount <= 0) throw new Error('Amount must be positive');
-    this.#walletBalance += amount;
+    if (this.#skyWallet) {
+      this.#walletBalance = this.#skyWallet.creditLocal(amount);
+    } else {
+      this.#walletBalance += amount;
+    }
     console.info(`[Wallet] +${amount} SKY credited — balance: ${this.#walletBalance} SKY`);
     return { walletBalance: this.#walletBalance };
   }
@@ -1971,17 +2024,20 @@ enableGateway(port = 8080) {
    * @param {0|1|2}                       planIndex
    * @returns {{ success, subscription, walletBalance, nextBillingAt }}
    */
-  subscribeToPlan(context, planIndex) {
+  subscribeToPlan(context, planIndex, wallet = null) {
     // Validation
     const plans = SUBSCRIPTION_PLANS[context];
     if (!plans) throw new Error(`Context invalide : '${context}'. Valides : gateway, keys, storage`);
     const plan = plans[planIndex];
     if (!plan)  throw new Error(`Plan index ${planIndex} invalide pour le contexte '${context}'`);
 
-    // Vérification solde
-    if (this.#walletBalance < plan.priceMonthly) {
+    // Vérification solde — wallet blockchain prioritaire, sinon solde interne
+    const targetWallet   = wallet ?? this.#skyWallet ?? null;
+    const availableBalance = targetWallet?.cachedBalance ?? this.#walletBalance;
+
+    if (availableBalance < plan.priceMonthly) {
       throw new Error(
-        `Solde insuffisant — ${plan.priceMonthly} SKY requis, wallet: ${this.#walletBalance} SKY`
+        `Solde insuffisant — ${plan.priceMonthly} SKY requis, wallet: ${availableBalance} SKY`
       );
     }
 
@@ -1990,11 +2046,22 @@ enableGateway(port = 8080) {
       this.#cancelDebit(context);
     }
 
-    // Premier prélèvement immédiat
-    this.#walletBalance -= plan.priceMonthly;
+    // Premier prélèvement — débiter le wallet
+    if (targetWallet && typeof targetWallet.debitLocal === 'function') {
+      try {
+        this.#walletBalance = targetWallet.debitLocal(plan.priceMonthly, `${plan.name} — ${context}`);
+        console.info(`[SkyCloud] Abonnement débit SkyWallet : −${plan.priceMonthly} SKY | balance: ${this.#walletBalance} SKY`);
+      } catch (e) {
+        // Fallback sur le solde interne si le wallet rejette
+        console.warn(`[SkyCloud] debitLocal échoué (${e.message}) — fallback solde interne`);
+        this.#walletBalance -= plan.priceMonthly;
+      }
+    } else {
+      this.#walletBalance -= plan.priceMonthly;
+    }
 
     const now           = Date.now();
-    const nextBillingAt = now + 30 * 24 * 3_600_000;  // +30 jours
+    const nextBillingAt = now + 30 * 24 * 3_600_000;
 
     const subscription = {
       id          : `sub_${context}_${now}`,
@@ -2010,9 +2077,7 @@ enableGateway(port = 8080) {
     };
 
     this.#subscriptions.set(context, subscription);
-
-    // Planifier les prélèvements mensuels suivants
-    this.#scheduleAutoDebit(context, plan.priceMonthly);
+    this.#scheduleAutoDebit(context, plan.priceMonthly, targetWallet);
 
     console.info(
       `[Subscription] ✓ ${context}/${plan.name} — ` +
@@ -2106,55 +2171,60 @@ enableGateway(port = 8080) {
    * @param {string} context
    * @param {number} amount  — montant SKY à prélever chaque mois
    */
-  #scheduleAutoDebit(context, amount) {
+  #scheduleAutoDebit(context, amount, wallet = null) {
     const MONTH_MS = 30 * 24 * 3_600_000;
-
     const intervalId = setInterval(() => {
-      this.#autoDebit(context, amount);
+      this.#autoDebit(context, amount, wallet ?? this.#skyWallet ?? null);
     }, MONTH_MS);
-
     this.#debitIntervals.set(context, intervalId);
   }
 
   /**
    * Exécute un prélèvement mensuel automatique.
-   * Si le wallet est insuffisant : abonnement suspendu + log d'alerte.
-   * L'abonnement reste en mémoire mais passe à `active: false`.
+   * Débite le SkyWallet si disponible, sinon le solde interne.
+   * Si solde insuffisant : abonnement suspendu + log d'alerte.
    *
    * @param {string} context
    * @param {number} amount
+   * @param {import('./wallet.js').SkyWallet|null} wallet
    */
-  #autoDebit(context, amount) {
+  #autoDebit(context, amount, wallet = null) {
     const sub = this.#subscriptions.get(context);
-    if (!sub || !sub.active) {
-      this.#cancelDebit(context);
-      return;
-    }
+    if (!sub || !sub.active) { this.#cancelDebit(context); return; }
 
-    if (this.#walletBalance < amount) {
-      // Solde insuffisant — suspension
-      sub.active    = false;
-      sub.suspendedAt = Date.now();
+    const available = wallet?.cachedBalance ?? this.#walletBalance;
+
+    if (available < amount) {
+      sub.active        = false;
+      sub.suspendedAt   = Date.now();
       sub.suspendReason = 'insufficient_balance';
       this.#cancelDebit(context);
-
       console.warn(
         `[AutoDebit] ⚠ Abonnement ${context}/${sub.planName} suspendu — ` +
-        `solde insuffisant (${this.#walletBalance} SKY < ${amount} SKY requis)`
+        `solde insuffisant (${available} SKY < ${amount} SKY requis)`
       );
       return;
     }
 
-    // Prélèvement OK
-    this.#walletBalance     -= amount;
-    sub.totalDebited        += amount;
+    // Prélèvement — wallet blockchain prioritaire
+    if (wallet && typeof wallet.debitLocal === 'function') {
+      try {
+        this.#walletBalance = wallet.debitLocal(amount, `AutoDebit — ${sub.planName}`);
+      } catch (e) {
+        console.warn(`[AutoDebit] debitLocal échoué (${e.message}) — fallback solde interne`);
+        this.#walletBalance -= amount;
+      }
+    } else {
+      this.#walletBalance -= amount;
+    }
+
+    sub.totalDebited  += amount;
     sub.debitCount++;
-    sub.nextBillingAt        = Date.now() + 30 * 24 * 3_600_000;
+    sub.nextBillingAt  = Date.now() + 30 * 24 * 3_600_000;
 
     console.info(
       `[AutoDebit] ✓ ${context}/${sub.planName} — ` +
-      `-${amount} SKY | wallet: ${this.#walletBalance} SKY | ` +
-      `débit #${sub.debitCount}`
+      `-${amount} SKY | wallet: ${this.#walletBalance} SKY | débit #${sub.debitCount}`
     );
   }
 
@@ -2227,8 +2297,7 @@ enableGateway(port = 8080) {
   }
 
   // ─── Tauri Commands ───────────────────────────────────────────
-
-  tauriCommands() {
+tauriCommands() {
     const n = this;
     return {
       // Web Hosting
