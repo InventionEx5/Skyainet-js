@@ -1,15 +1,17 @@
-#!/usr/bin/env node
-// packages/node/src/start.js
+// start.js — Point d'entrée SkyAInet PWA
 // =====================================================
-// Lance le serveur Node.js et ouvre automatiquement
-// l'interface dans le browser de l'utilisateur.
+// Lance le serveur Node.js, ouvre le browser,
+// démarre le tray icon, active l'autostart et
+// vérifie les mises à jour silencieusement.
 //
 // Usage :
-//   node start.js              ← mode normal
-//   node start.js --daemon     ← mode daemon (no browser)
-//   node start.js --port 9090  ← port personnalisé
+//   bun start.js              ← mode normal (browser auto)
+//   bun start.js --daemon     ← mode daemon (pas de browser)
+//   bun start.js --port 9090  ← port personnalisé
+//   bun start.js --no-tray    ← sans icône tray
+//   bun start.js --no-update  ← sans vérification mise à jour
 //
-// Point d'entrée SkyAInet PWA + SkyAInet × Nikola T369
+// SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
