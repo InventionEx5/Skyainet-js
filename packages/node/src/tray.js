@@ -15,7 +15,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join }  from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ICON_PATH  = join(__dirname, 'assets', 'icon-tray.png');
+const _trayRoot  = dirname(fileURLToPath(import.meta.url));
+const ICON_PATH  = join(_trayRoot, '..', '..', 'public-ui', 'icons', 'icon-tray.png');
 
 // Éléments du menu tray
 const MENU_OPEN    = 'Open SkyAInet';
