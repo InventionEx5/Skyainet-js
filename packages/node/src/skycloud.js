@@ -26,6 +26,8 @@ import { ModelRegistry } from '../../../model/src/thevie/model_registry.js';
 import { NodeEconomics }  from '../../core/src/economics.js';
 import { SkyWallet }      from '../../financial/src/wallet.js';
 import { TreasuryManager }from '../../financial/src/treasury.js';
+import { UserProfile, VerificationLevel } from '../../core/src/profile.js';
+import { i18n as skyI18n, I18nManager }   from '../../core/src/i18n.js';
 
 // =====================================================
 // CONSTANTES
@@ -567,7 +569,7 @@ class ApiKeyStore {
   /**
    * Rotation d'une clé : crée une nouvelle clé avec les mêmes paramètres,
    * révoque l'ancienne. Retourne la nouvelle clé brute.
-   */
+  */
   rotate(oldKey) {
     const entry = this.#keys.get(oldKey);
     if (!entry) throw new Error('Clé introuvable pour rotation');
@@ -832,6 +834,8 @@ export class SkyCloud {
   #skyWallet;        // SkyWallet — wallet ERC-20 de l'utilisateur (optionnel)
   #nodeEcon;         // NodeEconomics — rewards + abonnements + payouts
   #treasury;         // TreasuryManager — distribution globale (optionnel)
+  #userProfile;      // UserProfile — profil agrégé de l'utilisateur
+  #i18n;             // I18nManager — traductions partagées
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -872,9 +876,11 @@ export class SkyCloud {
     this.#loraEvo        = new LoraEvo();
     this.#agenticRunner  = null;
     this.#modelRegistry  = new ModelRegistry();
-    this.#skyWallet      = null;                          // connecter via connectWallet()
+    this.#skyWallet      = null;
     this.#nodeEcon       = new NodeEconomics(AccountType.Free);
-    this.#treasury       = null;                          // connecter via connectTreasury()
+    this.#treasury       = null;
+    this.#userProfile    = new UserProfile({ nodeEcon: this.#nodeEcon });
+    this.#i18n           = skyI18n;   // singleton partagé avec toutes les pages
     this.#evolutionManager = null;
 
     this.peers = [];
@@ -912,7 +918,8 @@ export class SkyCloud {
   }
 
   // ─── Initialisation ──────────────────────────────────────────
-async initEngine(weightsPath = null) {
+
+  async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
 
     // Connecter LoraEvo au moteur dès qu'il est prêt
@@ -1441,7 +1448,8 @@ async initEngine(weightsPath = null) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-/**
+
+  /**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -1527,7 +1535,7 @@ async initEngine(weightsPath = null) {
 
   // ─── Mode agentique ───────────────────────────────────────────
 
-  async runAgenticTask(goal, onStep = null, opts = {}) {
+    async runAgenticTask(goal, onStep = null, opts = {}) {
     if (!this.#agenticRunner) {
       this.#agenticRunner = new AgenticRunner(this, this.#engine.isReady ? this.#engine : null);
     }
@@ -1875,7 +1883,8 @@ async initEngine(weightsPath = null) {
   getPeers()           { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   // ─── Gateway — serve site ─────────────────────────────────────
-/**
+
+  /**
    * Sert un site souverain chiffré avec signature Dilithium5.
    * Port de serve_site() dans skycloud.rs.
    * @param {string} siteId
@@ -1978,6 +1987,10 @@ async initEngine(weightsPath = null) {
     if (!(wallet instanceof SkyWallet)) throw new TypeError('Expected SkyWallet instance');
     this.#skyWallet   = wallet;
     this.#walletBalance = wallet.cachedBalance;
+    // Lier l'adresse au profil + passer au niveau de vérification Wallet
+    if (wallet.address) {
+      this.#userProfile.connectWallet(wallet.address);
+    }
     console.info(`[SkyCloud] SkyWallet connecté — address: ${wallet.address}`);
     return { address: wallet.address, balance: wallet.cachedBalance };
   }
@@ -1991,6 +2004,85 @@ async initEngine(weightsPath = null) {
     this.#treasury = treasury;
     console.info('[SkyCloud] TreasuryManager connecté');
   }
+
+  // ─── Profil utilisateur ───────────────────────────────────────
+
+  /**
+   * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
+   */
+  getUserProfile() {
+    return this.#userProfile.getSummary();
+  }
+
+  /**
+   * Retourne le badge nav (tier + pending).
+   */
+  getProfileNavBadge() {
+    return this.#userProfile.getNavBadge();
+  }
+
+  /**
+   * Met à jour le score de réputation (appelé par ValidatorNode.attachProfile).
+   * @param {number} score — [0, 1]
+   */
+  updateReputation(score) {
+    this.#userProfile.updateReputation(score);
+  }
+
+  /**
+   * Change le type de compte (Free / Pro / NodeOwner).
+   * @param {string} accountType
+   */
+  setAccountType(accountType) {
+    this.#userProfile.setAccountType(accountType);
+    // Mettre à jour aussi le nodeEcon sous-jacent
+    this.#nodeEcon.userRewards.accountType = accountType;
+  }
+
+  /**
+   * Met à jour le niveau de vérification du compte.
+   * @param {string} level — VerificationLevel
+   */
+  setVerificationLevel(level) {
+    this.#userProfile.setVerificationLevel(level);
+  }
+
+  /**
+   * Connecte l'adresse wallet au profil (after connectWallet).
+   * @param {string} address
+   */
+  linkWalletToProfile(address) {
+    this.#userProfile.connectWallet(address);
+  }
+
+  // ─── i18n ─────────────────────────────────────────────────────
+
+  /**
+   * Retourne le gestionnaire i18n partagé.
+   */
+  getI18n() {
+    return this.#i18n;
+  }
+
+  /**
+   * Traduit une clé dans la langue courante.
+   * @param {string} key   — ex: 'nav.online'
+   * @param {object} [vars]— variables d'interpolation
+   */
+  translate(key, vars = {}) {
+    return this.#i18n.t(key, vars);
+  }
+
+  /**
+   * Change la langue active pour toutes les pages.
+   * @param {'en'|'fr'|'es'} lang
+   */
+  setLanguage(lang) {
+    this.#i18n.setLang(lang);
+    this.#i18n.save();
+  }
+
+  get currentLanguage() { return this.#i18n.lang; }
 
   /**
    * Crédite directement le wallet (airdrops, rewards manuels).
@@ -2297,7 +2389,8 @@ async initEngine(weightsPath = null) {
   }
 
   // ─── Tauri Commands ───────────────────────────────────────────
-tauriCommands() {
+
+  tauriCommands() {
     const n = this;
     return {
       // Web Hosting
@@ -2386,6 +2479,23 @@ tauriCommands() {
       getNodeStats              : n.getStatus.bind(n),
       getNodeMetrics            : n.getNodeMetrics.bind(n),
       setNodeState              : n.setNodeState.bind(n),
+      // Profil utilisateur
+      get_user_profile          : ()        => n.getUserProfile(),
+      get_profile_nav_badge     : ()        => n.getProfileNavBadge(),
+      update_reputation         : score     => n.updateReputation(score),
+      set_account_type          : type      => n.setAccountType(type),
+      set_verification_level    : level     => n.setVerificationLevel(level),
+      link_wallet_to_profile    : address   => n.linkWalletToProfile(address),
+      // i18n
+      translate                 : (key, vars) => n.translate(key, vars),
+      set_language              : lang      => n.setLanguage(lang),
+      get_current_language      : ()        => n.currentLanguage,
+      // Wallet
+      connect_wallet            : wallet    => n.connectWallet(wallet),
+      connect_treasury          : treasury  => n.connectTreasury(treasury),
+      get_wallet_summary        : async ()  => n.#skyWallet ? n.#skyWallet.getSummary() : { balance: n.walletBalance },
+      send_sky                  : (to, amt, label) => n.#skyWallet?.sendSKY(to, amt, label),
+      get_tx_history            : limit     => n.#skyWallet?.getTransactionHistory(limit),
       // Internals (debug)
       getLoraEvoStatus          : () => n.#loraEvo?.getStatus(),
       getDreamCycleStats        : () => n.#dreamCycle?.getStats(),
