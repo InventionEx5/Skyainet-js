@@ -74,7 +74,7 @@ try {
 }
 
 // ── Build ─────────────────────────────────────────────────────
-const entrypoint = join(__dirname, 'start.js');
+const entrypoint = join(__dirname, 'packages', 'node', 'src', 'start.js');
 let   allOk      = true;
 
 for (const { target, outfile } of toBuild) {
