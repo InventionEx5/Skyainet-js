@@ -1114,7 +1114,8 @@ import { join as _join, dirname as _dirname } from 'path';
 import { fileURLToPath as _ftu } from 'url';
 import { readFileSync as _rfs, existsSync as _ex } from 'fs';
 
-const _root = _dirname(_dirname(_dirname(_ftu(import.meta.url))));
+const _projectRoot = _dirname(_dirname(_dirname(_ftu(import.meta.url))));
+const _root        = _join(_projectRoot, 'public-ui');  // assets PWA dans public-ui/
 
 // Charger les assets — depuis le bundle (binaire) ou le disque (dev)
 function _asset(relPath, encoding = 'utf8') {
