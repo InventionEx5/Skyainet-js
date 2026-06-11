@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// packages/node/src/start.js — Point d'entrée SkyAInet PWA
+// packages/node/src/start.js
 // =====================================================
 // Lance le serveur Node.js et ouvre automatiquement
 // l'interface dans le browser de l'utilisateur.
@@ -9,7 +9,7 @@
 //   node start.js --daemon     ← mode daemon (no browser)
 //   node start.js --port 9090  ← port personnalisé
 //
-// SkyAInet × Nikola T369
+// Point d'entrée SkyAInet PWA + SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
