@@ -165,8 +165,19 @@ export class TreasuryManager {
 
   // ─── Distribution ─────────────────────────────────────────────
 
-  async distributeRewards(totalAmount, rewards = null) {
-    if (!totalAmount || totalAmount <= 0) return { burn: 0, users: 0, dao: 0, dev: 0 };
+  /**
+   * Distribue les revenus selon 15% burn / 55% users / 25% DAO / 5% dev.
+   *
+   * @param {number} totalAmount
+   * @param {object|null} rewards            — rétrocompatibilité UserRewards
+   * @param {Array<{
+   *   wallet?: import('./wallet.js').SkyWallet,
+   *   economics?: import('../../core/src/economics.js').NodeEconomics,
+   *   share?: number
+   * }>} recipients — nœuds recevant les 55% users, pondérés par share
+   */
+  async distributeRewards(totalAmount, rewards = null, recipients = []) {
+    if (!totalAmount || totalAmount <= 0) return { burn: 0, users: 0, dao: 0, dev: 0, distributions: [] };
 
     const total = BigInt(Math.floor(Number(totalAmount)));
     const burn  = total * BURN_RATE  / 100n;
@@ -179,15 +190,56 @@ export class TreasuryManager {
     this.#totalDaoReserve += dao;
     this.#totalDevTeam    += dev;
 
+    // Rétrocompatibilité
     if (rewards && typeof rewards.totalSkyEarned === 'number') {
       rewards.totalSkyEarned += Number(users);
     }
 
-    const record = { ts: Date.now(), burn: Number(burn), users: Number(users), dao: Number(dao), dev: Number(dev) };
+    const record = {
+      ts: Date.now(),
+      burn : Number(burn),
+      users: Number(users),
+      dao  : Number(dao),
+      dev  : Number(dev),
+      distributions: [],
+    };
+
+    // ── Dispatch des 55% users aux wallets des nœuds ─────────────
+    if (recipients.length > 0) {
+      const usersAmount = Number(users);
+      const totalShares = recipients.reduce((s, r) => s + (r.share ?? 1), 0);
+
+      for (const recipient of recipients) {
+        const share     = recipient.share ?? 1;
+        const allocated = Math.floor((share / totalShares) * usersAmount);
+        if (allocated <= 0) continue;
+
+        const dist = { address: recipient.wallet?.address ?? 'unknown', amount: allocated, status: 'pending' };
+
+        try {
+          if (recipient.economics && typeof recipient.economics.receiveDistribution === 'function') {
+            await recipient.economics.receiveDistribution(allocated, recipient.wallet ?? null);
+            dist.status = 'credited';
+          } else if (recipient.wallet && typeof recipient.wallet.creditLocal === 'function') {
+            recipient.wallet.creditLocal(allocated);
+            dist.status = 'credited';
+          } else {
+            dist.status = 'no_wallet';
+          }
+          console.info(`[Treasury] +${allocated} SKY → ${dist.address.slice(0, 10)}…`);
+        } catch (e) {
+          dist.status = 'failed';
+          dist.error  = e.message;
+          console.warn(`[Treasury] Distribution échouée (${dist.address}) : ${e.message}`);
+        }
+        record.distributions.push(dist);
+      }
+    }
+
     this.#distributionHistory.push(record);
     if (this.#distributionHistory.length > 500) this.#distributionHistory.shift();
 
-    console.info(`[Treasury] Distribution — Burn:${burn} | Users:${users} | DAO:${dao} | Dev:${dev} SKY`);
+    console.info(`[Treasury] Burn:${burn} | Users:${users} | DAO:${dao} | Dev:${dev} SKY | wallets: ${record.distributions.length}`);
     return record;
   }
 
