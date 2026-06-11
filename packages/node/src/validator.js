@@ -11,7 +11,8 @@ import { randomUUID }          from 'crypto';
 import { ZipMemory }           from '../../memory/src/zip_memory.js';
 import { UserRewards }         from '../../core/src/rewards.js';
 import { ContributionProof }   from './pouw.js';
-import { NodeState, reputationTierFromScore } from '../../node/src/node_types.js';
+import { NodeState, reputationTierFromScore } from './node_types.js';
+import { UserProfile }         from '../../core/src/profile.js';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -38,6 +39,7 @@ const CONSENSUS_VOTE_MAX    = 120.0;    // poids de vote maximum
 export class ValidatorNode {
   #validationCache;   // ZipMemory — persistance légère des preuves validées
   #history;           // { proofHash, score, valid, ts }[] — anneau de 512
+  #profile;           // UserProfile | null — profil utilisateur attaché
 
   constructor(sovereignAlias, initialStake = 10_000) {
     if (!sovereignAlias?.trim()) throw new Error('sovereignAlias requis');
@@ -70,6 +72,9 @@ export class ValidatorNode {
     // Persistance
     this.#validationCache = new ZipMemory(`./data/validator/${this.sovereignAlias}_cache`);
     this.#history         = [];
+
+    // Profil — connecter via attachProfile()
+    this.#profile = null;
   }
 
   // ─── Validation ───────────────────────────────────────────────
@@ -123,6 +128,7 @@ export class ValidatorNode {
       // Montée de réputation avec bonus de streak (plafonné)
       const streakBonus = Math.min(this.consecutiveSuccess / 10, 0.5);
       this.reputation   = Math.min(REP_CAP, this.reputation + 0.018 * (1 + streakBonus));
+      this.#syncProfile();
 
       // Récompense — totalSkyEarned est la bonne propriété de UserRewards
       if (rewards instanceof UserRewards) {
@@ -141,6 +147,7 @@ export class ValidatorNode {
       this.failedValidations++;
       this.consecutiveSuccess = 0;
       this.reputation         = Math.max(REP_FLOOR + 0.07, this.reputation - 0.035);
+      this.#syncProfile();
       this.#applySlash(0.08);
 
       console.warn(`[Validator] ❌ ${proof.proofHash.slice(0, 20)} — score: ${finalScore.toFixed(3)}`);
@@ -174,6 +181,7 @@ export class ValidatorNode {
   addStake(amount) {
     if (amount <= 0) throw new Error('Montant invalide');
     this.stakeAmount += amount;
+    this.#syncProfile();
     console.info(`[Validator] Stake ajouté : +${amount} SKY → total: ${this.stakeAmount}`);
   }
 
@@ -219,6 +227,7 @@ export class ValidatorNode {
     this.stakeAmount  = Math.max(0, this.stakeAmount - slashAmount);
     this.reputation   = Math.max(REP_FLOOR, this.reputation - 0.12);
     this.slashCount++;
+    this.#syncProfile();
 
     console.warn(
       `[Validator] Slash #${this.slashCount} — -${slashAmount} SKY (-${(pct*100).toFixed(0)}%) | ` +
@@ -273,6 +282,42 @@ export class ValidatorNode {
   }
 
   getNodeType() { return 'Validator'; }
+
+  // ─── Connexion UserProfile ────────────────────────────────────
+
+  /**
+   * Attache un UserProfile au validateur.
+   * Toutes les mutations de reputation et stakeAmount
+   * se propagent automatiquement au profil.
+   *
+   * @param {UserProfile} profile
+   */
+  attachProfile(profile) {
+    if (!(profile instanceof UserProfile)) {
+      throw new TypeError('Expected UserProfile instance');
+    }
+    this.#profile = profile;
+    // Synchronisation initiale
+    this.#syncProfile();
+    console.info(`[ValidatorNode] UserProfile attaché — reputation: ${this.reputation.toFixed(4)}`);
+  }
+
+  detachProfile() {
+    this.#profile = null;
+  }
+
+  get profile() { return this.#profile; }
+
+  /** Propage reputation + stakeAmount courants vers UserProfile. */
+  #syncProfile() {
+    if (!this.#profile) return;
+    this.#profile.updateReputation(this.reputation);
+    // Mettre à jour le stakeAmount (propriété publique de UserProfile)
+    if (typeof this.#profile.stakeAmount !== undefined) {
+      // Accès via setter si disponible, sinon via nodeEcon
+      try { this.#profile._stakeAmount = this.stakeAmount; } catch { /* ok */ }
+    }
+  }
 
   healthReport() {
     return {
