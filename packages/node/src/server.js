@@ -956,6 +956,7 @@ function handleWs(ws) {
 
   ws.on('error', err => console.error('[WS]', err.message));
 }
+
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
@@ -1058,7 +1059,6 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     apiError(res, 500, 'RATE_ERROR', e.message);
   }
 });
-
 // =====================================================
 // DÉMARRAGE
 // =====================================================
@@ -1186,6 +1186,95 @@ app.use(express.static(_root, {
     },
 }));
 
+// ── Génération des icônes PWA ─────────────────────────────────
+// Génère tous les PNG depuis icon-source.svg au premier démarrage.
+// Aucun PNG à committer sur Github — juste le SVG source.
+// Si le design change → supprimer les PNG → ils se régénèrent.
+
+const _ICON_SIZES = [
+    { size: 72,  name: 'icon-72.png'   },
+    { size: 96,  name: 'icon-96.png'   },
+    { size: 128, name: 'icon-128.png'  },
+    { size: 192, name: 'icon-192.png'  },
+    { size: 512, name: 'icon-512.png'  },
+    { size: 32,  name: 'icon-tray.png' },
+    { size: 72,  name: 'badge-72.png'  },
+];
+
+async function generateIcons() {
+    const svgPath  = _join(_root, 'icons', 'icon-source.svg');
+    const iconsDir = _join(_root, 'icons');
+
+    if (!_ex(svgPath)) {
+        console.warn('[Icons] icon-source.svg introuvable — icônes PWA non générées');
+        return;
+    }
+
+    // Vérifier si sharp est disponible
+    let sharp;
+    try {
+        const mod = await import('sharp');
+        sharp = mod.default;
+    } catch {
+        console.warn('[Icons] sharp non installé — exécuter : npm install sharp');
+        console.warn('[Icons] Les icônes PWA ne seront pas générées automatiquement.');
+        return;
+    }
+
+    const { mkdirSync, writeFileSync } = await import('fs');
+    mkdirSync(iconsDir, { recursive: true });
+
+    const svg       = _rfs(svgPath);
+    let   generated = 0;
+    let   skipped   = 0;
+
+    for (const { size, name } of _ICON_SIZES) {
+        const outPath = _join(iconsDir, name);
+        // Ne pas écraser un fichier existant (permet de mettre une icône custom)
+        if (_ex(outPath)) { skipped++; continue; }
+
+        try {
+            await sharp(svg)
+                .resize(size, size, { fit: 'contain', background: { r: 10, g: 10, b: 15, alpha: 1 } })
+                .png({ compressionLevel: 9, adaptiveFiltering: true })
+                .toFile(outPath);
+            generated++;
+        } catch (e) {
+            console.warn(`[Icons] Erreur génération ${name} : ${e.message}`);
+        }
+    }
+
+    // Générer icon.ico (Windows) depuis icon-32.png si sharp le supporte
+    const ico32 = _join(iconsDir, 'icon-tray.png');
+    const icoOut = _join(iconsDir, 'icon.ico');
+    if (_ex(ico32) && !_ex(icoOut)) {
+        try {
+            // ICO = PNG embarqué dans enveloppe ICO minimale
+            const pngBuf = _rfs(ico32);
+            const { writeFileSync: _wfs } = await import('fs');
+            // Header ICO : reserved(2) + type=1(2) + count=1(2) + dir_entry(16) + png_data
+            const header = Buffer.alloc(6);
+            header.writeUInt16LE(0, 0);   // reserved
+            header.writeUInt16LE(1, 2);   // type ICO
+            header.writeUInt16LE(1, 4);   // 1 image
+            const dir = Buffer.alloc(16);
+            dir.writeUInt8(32, 0);        // width
+            dir.writeUInt8(32, 1);        // height
+            dir.writeUInt8(0,  2);        // color count
+            dir.writeUInt8(0,  3);        // reserved
+            dir.writeUInt16LE(1, 4);      // planes
+            dir.writeUInt16LE(32, 6);     // bit count
+            dir.writeUInt32LE(pngBuf.length, 8);  // size
+            dir.writeUInt32LE(22, 12);    // offset (6 + 16)
+            _wfs(icoOut, Buffer.concat([header, dir, pngBuf]));
+            generated++;
+        } catch { /* ok — ico optionnel */ }
+    }
+
+    if (generated > 0) console.info(`[Icons] ${generated} icône(s) PWA générée(s) dans public-ui/icons/`);
+    if (skipped   > 0) console.info(`[Icons] ${skipped} icône(s) déjà présente(s) — conservées`);
+}
+
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
   const url = `http://localhost:${PORT}/skyainet.html`;
@@ -1199,6 +1288,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   for (const ep of state.node.listExposedEndpoints()) {
     mountInferenceEndpoint(ep.name);
   }
+
+  // Générer les icônes PWA depuis icon-source.svg (si non encore générées)
+  generateIcons().catch(e => console.warn('[Icons]', e.message));
 
   // Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
   if (process.env.SKYAINET_NO_BROWSER !== '1') {
