@@ -1,0 +1,1352 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SKYAINET — Sovereign AI Network</title>
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#4ade80">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="SkyAInet">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+    <!-- Description -->
+    <meta name="description" content="Decentralized Sovereign AI Network — SkyAInet × Nikola T369">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --bg     : #0a0a0f;
+            --surface: rgba(255,255,255,0.06);
+            --border : rgba(255,255,255,0.08);
+            --text   : #ffffff;
+            --muted  : rgba(255,255,255,0.45);
+        }
+        [data-theme="light"] {
+            --bg     : #f0fdf4;
+            --surface: rgba(0,0,0,0.05);
+            --border : rgba(0,0,0,0.10);
+            --text   : #0a1a0f;
+            --muted  : rgba(0,0,0,0.50);
+        }
+        /* Light mode — adapter les classes Tailwind white/* fixes */
+        [data-theme="light"] .text-white    { color: #0a1a0f !important; }
+        [data-theme="light"] .text-white\/60 { color: rgba(10,26,15,0.6) !important; }
+        [data-theme="light"] .text-white\/50 { color: rgba(10,26,15,0.5) !important; }
+        [data-theme="light"] .text-white\/40 { color: rgba(10,26,15,0.4) !important; }
+        [data-theme="light"] .text-white\/30 { color: rgba(10,26,15,0.3) !important; }
+        [data-theme="light"] .text-white\/25 { color: rgba(10,26,15,0.25) !important; }
+        [data-theme="light"] .text-white\/20 { color: rgba(10,26,15,0.2) !important; }
+        [data-theme="light"] .bg-white\/5  { background: rgba(0,0,0,0.04) !important; }
+        [data-theme="light"] .bg-white\/10 { background: rgba(0,0,0,0.07) !important; }
+        [data-theme="light"] .hover\:bg-white\/10:hover { background: rgba(0,0,0,0.07) !important; }
+        [data-theme="light"] .border-white\/10 { border-color: rgba(0,0,0,0.10) !important; }
+        [data-theme="light"] .border-white\/8  { border-color: rgba(0,0,0,0.08) !important; }
+        [data-theme="light"] .glass { box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            transition: background 0.3s, color 0.3s;
+        }
+        .glass {
+            background: var(--surface);
+            backdrop-filter: blur(24px);
+            border: 1px solid var(--border);
+        }
+        .tile { transition: border-color 0.15s ease, background 0.15s ease; }
+        .tile:hover { background: rgba(74,222,128,0.07); }
+        .popup {
+            animation: popIn 0.2s ease-out forwards;
+        }
+        @keyframes popIn {
+            from { opacity:0; transform: scale(0.94) translateY(10px); }
+            to   { opacity:1; transform: scale(1)    translateY(0);    }
+        }
+        @keyframes blink-green { 0%,100%{opacity:1} 50%{opacity:0.2} }
+        .blink-green { animation: blink-green 1.8s ease-in-out infinite; }
+
+        /* Badges réputation */
+        .badge-newcomer  { background:#1e293b; color:#94a3b8; }
+        .badge-reliable  { background:#14532d; color:#4ade80; }
+        .badge-trusted   { background:#065f46; color:#6ee7b7; }
+        .badge-sovereign { background:#164e63; color:#22d3ee; }
+        .badge-legend    { background:#3b0764; color:#c084fc; }
+
+        /* Scrollbar fine */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(74,222,128,0.3); border-radius: 2px; }
+    </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     NAV
+══════════════════════════════════════════════ -->
+<nav class="border-b border-white/10 bg-[#0a0a0f]/95 backdrop-blur-xl fixed w-full z-50"
+     id="main-nav" style="border-bottom: 1px solid var(--border)">
+    <div class="max-w-screen-xl mx-auto px-6 h-12 flex items-center justify-between">
+
+        <!-- Logo gauche — clique → popup Settings (langue + thème) -->
+        <button onclick="toggleSettingsPopup()"
+                class="flex items-center gap-x-2.5 hover:opacity-80 transition-opacity">
+            <div class="blink-green w-7 h-7 rounded-xl flex items-center justify-center"
+                 style="background:linear-gradient(135deg,#4ade80,#16a34a)">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="white">
+                    <!-- Étoile à cinq pointes -->
+                    <polygon points="12,2 13.8,8.2 20.2,8.2 15.1,12.1 16.9,18.3 12,14.8 7.1,18.3 8.9,12.1 3.8,8.2 10.2,8.2" opacity="0.9"/>
+                    <!-- Traînée diagonale droite -->
+                    <line x1="20" y1="4" x2="14" y2="10" stroke="white" stroke-width="1.2" stroke-linecap="round" opacity="0.5"/>
+                    <line x1="22" y1="6" x2="17" y2="11" stroke="white" stroke-width="0.7" stroke-linecap="round" opacity="0.3"/>
+                    <!-- Trait pointe haute droite — parallèle à la traînée principale -->
+                    <line x1="18" y1="2" x2="13" y2="7" stroke="white" stroke-width="1" stroke-linecap="round" opacity="0.55"/>
+                    <!-- Trait pointe basse droite — parallèle, décalé vers le bas -->
+                    <line x1="20" y1="8" x2="16" y2="14" stroke="white" stroke-width="0.7" stroke-linecap="round" opacity="0.3"/>
+                </svg>
+            </div>
+            <span class="font-semibold text-sm tracking-tight">SKYAINET</span>
+        </button>
+
+        <!-- Droite : statut + actions -->
+        <div class="flex items-center gap-x-3">
+            <!-- Statut online/offline -->
+            <div class="flex items-center gap-x-1.5 px-2.5 py-1 rounded-xl bg-white/5">
+                <div id="status-dot" class="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>
+                <span id="status-text" class="text-[10px] font-medium text-white/60">ONLINE</span>
+            </div>
+
+            <!-- Wallet — logo seul, toujours accessible -->
+            <button onclick="togglePopup('wallet')"
+                    id="nav-wallet-btn"
+                    title="Wallet"
+                    class="w-7 h-7 rounded-xl bg-white/5 hover:bg-white/10 transition-all flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" style="color:#4ade80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>
+            </button>
+
+            <!-- Profil -->
+            <button onclick="togglePopup('profile')"
+                    class="w-7 h-7 rounded-xl bg-white/5 hover:bg-white/10 transition-all flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" style="color:#4ade80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </button>
+
+            <!-- Rewards -->
+            <button onclick="togglePopup('rewards')"
+                    class="w-7 h-7 rounded-xl bg-white/5 hover:bg-white/10 transition-all flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" style="color:#4ade80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="5"/><path d="M10.85 2.05a5 5 0 0 1 3.5 8.2"/><path d="M10 9.2a5 5 0 1 0 5.8 5.8"/><path d="M3 2 1.88 4.12 0 5l1.88.88L3 8l1.12-2.12L6 5l-1.88-.88Z"/></svg>
+            </button>
+        </div>
+    </div>
+</nav>
+
+<!-- ══════════════════════════════════════════════
+     POPUP SETTINGS (langue + thème)
+     Attaché sous le logo gauche
+══════════════════════════════════════════════ -->
+<div id="popup-settings" class="hidden fixed top-14 left-6 z-[100] w-56">
+    <div class="glass rounded-2xl p-4 popup space-y-4">
+        <div class="text-[10px] uppercase tracking-widest" style="color:var(--muted)" data-i18n="nav.preferences">Preferences</div>
+
+        <!-- Langue -->
+        <div>
+            <div class="text-xs mb-2" style="color:var(--muted)" data-i18n="nav.language">Language</div>
+            <div class="grid grid-cols-3 gap-1.5">
+                <button onclick="setLang('en')" id="lang-en"
+                        class="py-1.5 rounded-lg text-xs font-semibold transition-all bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">EN</button>
+                <button onclick="setLang('fr')" id="lang-fr"
+                        class="py-1.5 rounded-lg text-xs font-semibold transition-all bg-white/5 text-white/50 hover:bg-white/10">FR</button>
+                <button onclick="setLang('es')" id="lang-es"
+                        class="py-1.5 rounded-lg text-xs font-semibold transition-all bg-white/5 text-white/50 hover:bg-white/10">ES</button>
+            </div>
+        </div>
+
+        <!-- Thème -->
+        <div>
+            <div class="text-xs mb-2" style="color:var(--muted)" data-i18n="nav.theme">Theme</div>
+            <div class="flex gap-x-1.5">
+                <button onclick="setTheme('dark')" id="theme-dark"
+                        class="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" style="color:currentColor;display:inline-block;vertical-align:middle;margin-right:4px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg> Dark
+                </button>
+                <button onclick="setTheme('light')" id="theme-light"
+                        class="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all bg-white/5 text-white/50 hover:bg-white/10">
+                    ☀ Light
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     POPUP WALLET
+══════════════════════════════════════════════ -->
+<div id="popup-wallet" class="hidden fixed top-14 right-6 z-[100] w-80">
+    <div class="glass rounded-2xl popup overflow-hidden">
+
+        <!-- Header -->
+        <div class="px-5 py-4 border-b border-white/8">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-semibold" style="color:#4ade80">SKY Wallet</span>
+                <button onclick="copyWalletAddress()" class="text-[10px] text-white/30 hover:text-white/60 font-mono flex items-center gap-x-1">
+                    <span id="wallet-address-short">0x…</span> ⎘
+                </button>
+            </div>
+            <div class="font-mono text-2xl font-bold" style="color:#4ade80" id="wallet-total-balance">0</div>
+            <div class="text-[10px] mt-0.5" style="color:var(--muted)" data-i18n="wallet.total">SKY — total balance</div>
+        </div>
+
+        <div class="px-5 py-4 space-y-4">
+
+            <!-- Pending rewards -->
+            <div class="flex items-center justify-between p-3 bg-white/5 rounded-xl">
+                <div>
+                    <div class="text-[10px]" style="color:var(--muted)" data-i18n="wallet.pending">Pending Rewards</div>
+                    <div class="font-mono text-lg font-bold text-yellow-400" id="wallet-pending">0 SKY</div>
+                </div>
+                <button onclick="claimRewards()"
+                        class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                        style="background:rgba(74,222,128,0.15);color:#4ade80;border:1px solid rgba(74,222,128,0.3)">
+                    Claim
+                </button>
+            </div>
+
+            <!-- Envoyer / Recevoir -->
+            <div class="grid grid-cols-2 gap-2">
+                <button onclick="showSendSKY()"
+                        class="py-2 rounded-xl text-xs font-semibold transition-all bg-white/5 hover:bg-white/10 flex items-center justify-center gap-x-1.5">
+                    <span style="color:#4ade80">↑</span> Send
+                </button>
+                <button onclick="showReceiveSKY()"
+                        class="py-2 rounded-xl text-xs font-semibold transition-all bg-white/5 hover:bg-white/10 flex items-center justify-center gap-x-1.5">
+                    <span style="color:#4ade80">↓</span> Receive
+                </button>
+            </div>
+
+            <!-- Panel Send (caché par défaut) -->
+            <div id="send-panel" class="hidden space-y-2">
+                <input type="text" id="send-address" placeholder="0x… destination address"
+                       class="w-full bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-xs font-mono">
+                <div class="flex gap-x-2">
+                    <input type="number" id="send-amount" placeholder="Amount (SKY)"
+                           class="flex-1 bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-xs font-mono">
+                    <button onclick="sendSKY()"
+                            class="px-3 py-2 rounded-xl text-xs font-bold"
+                            style="background:rgba(74,222,128,0.2);color:#4ade80;border:1px solid rgba(74,222,128,0.3)">
+                        Send
+                    </button>
+                </div>
+                <div id="send-status" class="text-[10px] text-center text-white/40 hidden"></div>
+            </div>
+
+            <!-- Panel Receive — adresse réelle ou connexion MetaMask -->
+            <div id="receive-panel" class="hidden">
+                <div id="receive-connected" class="hidden">
+                    <div class="text-[10px] mb-1.5" style="color:var(--muted)" data-i18n="wallet.yourAddress">Your wallet address</div>
+                    <div id="receive-address" class="font-mono text-[10px] text-white/60 bg-white/5 rounded-xl px-3 py-2 break-all select-all"></div>
+                    <button onclick="copyWalletAddress()"
+                            class="w-full mt-2 py-1.5 rounded-xl text-xs text-white/50 hover:text-white bg-white/5 transition-all">
+                        ⎘ Copy address
+                    </button>
+                </div>
+                <div id="receive-connect" class="space-y-2">
+                    <div class="text-[10px] text-white/40 mb-2">No wallet connected</div>
+                    <button onclick="connectWalletBrowser()"
+                            class="w-full py-2.5 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-x-2"
+                            style="background:rgba(74,222,128,0.15);border:1px solid rgba(74,222,128,0.3);color:#4ade80">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>
+                        Connect Wallet
+                    </button>
+                    <button onclick="connectWalletReadOnly()"
+                            class="w-full py-2 rounded-xl text-xs text-white/40 hover:text-white/70 bg-white/5 transition-all">
+                        Enter address manually
+                    </button>
+                    <div id="manual-address-input" class="hidden space-y-1.5">
+                        <input type="text" id="manual-address" placeholder="0x…"
+                               class="w-full bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-xs font-mono">
+                        <button onclick="saveManualAddress()"
+                                class="w-full py-1.5 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 transition-all">
+                            Save address
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transactions récentes -->
+            <div>
+                <div class="text-[10px] uppercase tracking-wider mb-2" style="color:var(--muted)" data-i18n="wallet.recentTx">Recent Transactions</div>
+                <div id="tx-list" class="space-y-1.5 max-h-36 overflow-y-auto">
+                    <div class="text-[10px] text-white/25 text-center py-2">No transactions yet</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     POPUP PROFIL
+══════════════════════════════════════════════ -->
+<div id="popup-profile" class="hidden fixed top-14 right-6 z-[100] w-72">
+    <div class="glass rounded-2xl p-5 popup space-y-4">
+
+        <div class="flex items-center gap-x-3">
+            <div class="w-10 h-10 rounded-2xl flex items-center justify-center"
+                 style="background:rgba(74,222,128,0.15);border:1px solid rgba(74,222,128,0.3)"><svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#4ade80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+            <div>
+                <div class="text-sm font-semibold" id="profile-account-type">Free</div>
+                <div class="text-[10px]" style="color:var(--muted)" data-i18n="profile.accountType">Account Type</div>
+            </div>
+            <button onclick="upgradeAccount()"
+                    class="ml-auto px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all"
+                    style="background:rgba(74,222,128,0.15);color:#4ade80;border:1px solid rgba(74,222,128,0.3)">
+                Upgrade
+            </button>
+        </div>
+
+        <!-- Réputation -->
+        <div class="space-y-2">
+            <div class="flex items-center justify-between">
+                <span class="text-[10px] uppercase tracking-wider" style="color:var(--muted)" data-i18n="profile.reputation">Reputation</span>
+                <span id="profile-rep-badge" class="text-[10px] px-2 py-0.5 rounded-full badge-reliable">Reliable</span>
+            </div>
+            <div class="bg-white/5 rounded-xl h-1.5 overflow-hidden">
+                <div id="profile-rep-bar" class="h-full rounded-xl transition-all"
+                     style="width:78%;background:linear-gradient(90deg,#4ade80,#22d3ee)"></div>
+            </div>
+            <div class="flex justify-between text-[9px] text-white/30">
+                <span>Newcomer</span><span>Reliable</span><span>Trusted</span><span>Sovereign</span><span>Legend</span>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="grid grid-cols-2 gap-2">
+            <div class="bg-white/5 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-white/40 mb-1">PoSI Score</div>
+                <div class="text-sm font-bold font-mono" id="profile-posi" style="color:#4ade80">—</div>
+            </div>
+            <div class="bg-white/5 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-white/40 mb-1">Thevie Evo</div>
+                <div class="text-sm font-bold font-mono" id="profile-thevie-evo" style="color:#4ade80">—</div>
+            </div>
+            <div class="bg-white/5 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-white/40 mb-1">Daily Usage</div>
+                <div class="text-sm font-bold font-mono" id="profile-daily" style="color:#4ade80">0/80</div>
+            </div>
+            <div class="bg-white/5 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-white/40 mb-1">Quality Score</div>
+                <div class="text-sm font-bold font-mono" id="profile-quality" style="color:#4ade80">—</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     POPUP REWARDS
+══════════════════════════════════════════════ -->
+<div id="popup-rewards" class="hidden fixed top-14 right-6 z-[100] w-80">
+    <div class="glass rounded-2xl popup overflow-hidden">
+
+        <!-- Header -->
+        <div class="px-5 py-4 border-b border-white/8">
+            <div class="text-xs font-semibold mb-1" style="color:#4ade80" data-i18n="rewards.title">SKY Rewards</div>
+            <div class="flex items-baseline gap-x-2">
+                <span class="font-mono text-2xl font-bold text-yellow-400" id="rew-pending">0</span>
+                <span class="text-xs" style="color:var(--muted)" data-i18n="rewards.pending">SKY pending</span>
+            </div>
+            <button onclick="claimRewards()"
+                    class="mt-3 w-full py-2.5 rounded-xl text-xs font-bold transition-all"
+                    style="background:linear-gradient(135deg,rgba(74,222,128,0.2),rgba(34,211,238,0.1));color:#4ade80;border:1px solid rgba(74,222,128,0.3)">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" style="color:#4ade80;display:inline-block;vertical-align:middle;margin-right:6px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 15h2a2 2 0 1 0 0-4h-3c-.6 0-1.1.2-1.4.6L3 17"/><path d="m7 21 1.6-1.4c.3-.4.8-.6 1.4-.6h4c1.1 0 2.1-.4 2.8-1.2l4.6-4.4a2 2 0 0 0-2.75-2.91l-4.2 3.9"/><path d="m2 16 6 6"/><circle cx="16" cy="5" r="3"/><path d="M14.1 7.4 11 10.5"/></svg> Claim Monthly Rewards
+            </button>
+        </div>
+
+        <div class="px-5 py-4 space-y-4">
+
+            <!-- Totaux -->
+            <div class="grid grid-cols-2 gap-2">
+                <div class="bg-white/5 rounded-xl p-3 text-center">
+                    <div class="text-[10px] text-white/40 mb-1">Total Earned</div>
+                    <div class="text-base font-bold font-mono" style="color:#4ade80" id="rew-total">0 SKY</div>
+                </div>
+                <div class="bg-white/5 rounded-xl p-3 text-center">
+                    <div class="text-[10px] text-white/40 mb-1">Sub Bonus</div>
+                    <div class="text-base font-bold font-mono text-violet-400" id="rew-sub-bonus">+0 SKY</div>
+                </div>
+            </div>
+
+            <!-- Sources de gains -->
+            <div>
+                <div class="text-[10px] uppercase tracking-wider mb-2" style="color:var(--muted)" data-i18n="rewards.sources">Reward Sources</div>
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-x-2">
+                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                            <span class="text-white/60">Learn Contributions</span>
+                            <span class="text-[10px] text-white/30">× 12 SKY</span>
+                        </div>
+                        <span class="font-mono font-semibold" style="color:#4ade80" id="rew-learn-count">0</span>
+                    </div>
+                    <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-x-2">
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                            <span class="text-white/60">Dream Cycles</span>
+                            <span class="text-[10px] text-white/30">× 22 SKY</span>
+                        </div>
+                        <span class="font-mono font-semibold text-blue-400" id="rew-dream-count">0</span>
+                    </div>
+                    <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-x-2">
+                            <span class="w-1.5 h-1.5 rounded-full bg-yellow-400"></span>
+                            <span class="text-white/60">Quality Interactions</span>
+                            <span class="text-[10px] text-white/30">× 8 SKY</span>
+                        </div>
+                        <span class="font-mono font-semibold text-yellow-400" id="rew-quality-count">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Limite journalière -->
+            <div>
+                <div class="flex items-center justify-between text-[10px] text-white/40 mb-1.5">
+                    <span class="uppercase tracking-wider">Daily Limit</span>
+                    <span id="rew-daily-label">0 / 80 today</span>
+                </div>
+                <div class="bg-white/5 rounded-xl h-1.5 overflow-hidden">
+                    <div id="rew-daily-bar" class="h-full rounded-xl transition-all"
+                         style="width:0%;background:linear-gradient(90deg,#4ade80,#fbbf24)"></div>
+                </div>
+            </div>
+
+            <!-- Historique des payouts -->
+            <div>
+                <div class="text-[10px] uppercase tracking-wider mb-2" style="color:var(--muted)" data-i18n="rewards.history">Payout History</div>
+                <div id="rew-history" class="space-y-1.5 max-h-32 overflow-y-auto">
+                    <div class="text-[10px] text-white/25 text-center py-2">No payouts yet</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     MAIN
+══════════════════════════════════════════════ -->
+<div class="max-w-screen-xl mx-auto px-6 pt-16 pb-10">
+
+    <!-- Hero -->
+    <div class="mb-8 mt-4 text-center">
+        <h1 class="text-3xl font-bold tracking-tight">Welcome to SKYAINET</h1>
+        <p class="mt-2 text-base" style="color:var(--muted)">Decentralized Sovereign AI Network</p>
+    </div>
+
+    <!-- Grille 2×4 — boutons étoiles à cinq pointes -->
+    <div class="grid grid-cols-2 gap-3 max-w-xs mx-auto">
+
+        <button onclick="navigateTo('thevie.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#4ade80]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#92400e" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3Z"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Thevie</div>
+                <div class="text-[10px] mt-0.5" style="color:#4ade80" data-i18n="page.chatFriends">Chat and Friends</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('messaging.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#fbbf24]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#fbbf24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">SkyChat</div>
+                <div class="text-[10px] mt-0.5" style="color:#fbbf24" data-i18n="page.messaging">Messaging</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('skycloud.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#1d4ed8]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#1d4ed8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Skycloud</div>
+                <div class="text-[10px] mt-0.5" style="color:#1d4ed8" data-i18n="page.nodeServer">Node Server</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('node.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#38bdf8]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#38bdf8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Node</div>
+                <div class="text-[10px] mt-0.5" style="color:#38bdf8" data-i18n="page.network">Network</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('marketplace.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#ef4444]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#ef4444" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><line x1="3" x2="21" y1="6" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Marketplace</div>
+                <div class="text-[10px] mt-0.5" style="color:#ef4444" data-i18n="page.trade">Trade</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('governance.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#9ca3af]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#9ca3af" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21H17"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Governance</div>
+                <div class="text-[10px] mt-0.5" style="color:#9ca3af" data-i18n="page.dao">DAO · Vote</div>
+            </div>
+        </button>
+
+        <button onclick="navigateTo('settings.html')"
+                class="tile glass rounded-2xl p-4 flex items-center gap-x-3 border border-transparent hover:border-[#f97316]/30 text-left">
+            <div class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style="background:#4ade8018;border:1px solid #4ade8033">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" style="color:#f97316" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div>
+                <div class="text-sm font-semibold">Settings</div>
+                <div class="text-[10px] mt-0.5" style="color:#f97316" data-i18n="page.config">Configuration</div>
+            </div>
+        </button>
+
+        <!-- Cassette info — non cliquable, même taille que les boutons -->
+        <div class="glass rounded-2xl p-4 border border-white/6 overflow-hidden flex items-center gap-x-3">
+            <div id="ticker-dot" class="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></div>
+            <div id="ticker-text" class="text-[11px] text-white/50 font-mono leading-tight transition-opacity duration-400 min-w-0">
+                Loading…
+            </div>
+        </div>
+
+    </div>
+</div>
+<!-- ══════════════════════════════════════════════
+     SCRIPT
+══════════════════════════════════════════════ -->
+<script>
+"use strict";
+
+// ─── État local ────────────────────────────────
+const _state = {
+    lang            : localStorage.getItem('sky_lang')    ?? 'en',
+    theme           : localStorage.getItem('sky_theme')   ?? 'dark',
+    walletAddress   : localStorage.getItem('sky_wallet')  ?? '',
+    walletBalance   : 0,
+    pendingRewards  : 0,
+    totalSkyEarned  : 0,
+    accountType     : 'Free',
+    reputation      : 0.78,
+    dailyMessages   : 0,
+    maxDaily        : 80,
+    qualityScore    : 0.65,
+    thevieEvo       : 0.25,
+    learnCount      : 0,
+    dreamCount      : 0,
+    qualityCount    : 0,
+    subscriptionBonus: 0,
+    payoutHistory   : JSON.parse(localStorage.getItem('sky_payouts') ?? '[]'),
+    transactions    : JSON.parse(localStorage.getItem('sky_txs')    ?? '[]'),
+};
+
+// ─── Traductions ───────────────────────────────
+// ─── i18n — même API que i18n.js (packages/core/src/i18n.js) ──
+// Noms propres NON traduits : SKYAINET, Thevie, SkyChat, Skycloud,
+// Node, Marketplace, Governance, SKY, LoraÉvo, T369, RomanT369.
+const _I18N_CATALOG = {
+    // ── Page d'accueil ───────────────────────────────────────
+    'home.welcome'       : { en:'Welcome to SKYAINET',                  fr:'Bienvenue sur SKYAINET',                es:'Bienvenido a SKYAINET'                },
+    'home.subtitle'      : { en:'Decentralized Sovereign AI Network',   fr:'Réseau IA Souverain Décentralisé',      es:'Red IA Soberana Descentralizada'      },
+    'home.openPage'      : { en:'How would you like to open this page?',fr:'Comment souhaitez-vous ouvrir cette page ?',es:'¿Cómo desea abrir esta página?'   },
+    'home.sameTab'       : { en:'↩ Same tab',                          fr:'↩ Même onglet',                        es:'↩ Misma pestaña'                      },
+    'home.newTab'        : { en:'⧉ New tab',                           fr:'⧉ Nouvel onglet',                      es:'⧉ Nueva pestaña'                      },
+    'home.cancel'        : { en:'Cancel',                               fr:'Annuler',                              es:'Cancelar'                             },
+    // ── Navigation ───────────────────────────────────────────
+    'nav.online'         : { en:'ONLINE',                               fr:'EN LIGNE',                             es:'EN LÍNEA'                             },
+    'nav.offline'        : { en:'OFFLINE',                              fr:'HORS LIGNE',                           es:'SIN CONEXIÓN'                         },
+    'nav.preferences'    : { en:'Preferences',                          fr:'Préférences',                          es:'Preferencias'                         },
+    'nav.language'       : { en:'Language',                             fr:'Langue',                               es:'Idioma'                               },
+    'nav.theme'          : { en:'Theme',                                fr:'Thème',                                es:'Tema'                                 },
+    'nav.dark'           : { en:'Dark',                                 fr:'Sombre',                               es:'Oscuro'                               },
+    'nav.light'          : { en:'Light',                                fr:'Clair',                                es:'Claro'                                },
+    // ── Wallet ───────────────────────────────────────────────
+    'wallet.title'       : { en:'SKY Wallet',                           fr:'Portefeuille SKY',                     es:'Billetera SKY'                        },
+    'wallet.notConnected': { en:'Not connected',                        fr:'Non connecté',                         es:'No conectado'                         },
+    'wallet.total'       : { en:'SKY — total balance',                 fr:'SKY — solde total',                    es:'SKY — saldo total'                    },
+    'wallet.pending'     : { en:'Pending Rewards',                      fr:'Récompenses en attente',               es:'Recompensas pendientes'               },
+    'wallet.claim'       : { en:'Claim',                                fr:'Réclamer',                             es:'Reclamar'                             },
+    'wallet.send'        : { en:'Send',                                 fr:'Envoyer',                              es:'Enviar'                               },
+    'wallet.receive'     : { en:'Receive',                              fr:'Recevoir',                             es:'Recibir'                              },
+    'wallet.copy'        : { en:'⎘ Copy address',                       fr:'⎘ Copier l\'adresse',                  es:'⎘ Copiar dirección'                   },
+    'wallet.connectWallet': { en:'Connect Wallet',                      fr:'Connecter Wallet',                     es:'Conectar Wallet'                      },
+    'wallet.noWallet'    : { en:'No Web3 wallet detected',              fr:'Aucun wallet Web3 détecté',            es:'Sin wallet Web3 detectado'            },
+    'wallet.yourAddress' : { en:'Your wallet address',                  fr:'Votre adresse',                        es:'Su dirección'                         },
+    'wallet.manualEntry' : { en:'Enter address manually',               fr:'Entrer l\'adresse manuellement',       es:'Ingresar dirección manualmente'       },
+    'wallet.saveAddress' : { en:'Save address',                         fr:'Enregistrer l\'adresse',               es:'Guardar dirección'                    },
+    'wallet.noTx'        : { en:'No transactions yet',                  fr:'Aucune transaction',                   es:'Sin transacciones'                    },
+    'wallet.recentTx'    : { en:'Recent Transactions',                  fr:'Transactions récentes',                es:'Transacciones recientes'              },
+    // ── Profil ───────────────────────────────────────────────
+    'profile.title'      : { en:'Profile',                              fr:'Profil',                               es:'Perfil'                               },
+    'profile.accountType': { en:'Account Type',                         fr:'Type de compte',                       es:'Tipo de cuenta'                       },
+    'profile.upgrade'    : { en:'Upgrade',                              fr:'Améliorer',                            es:'Mejorar'                              },
+    'profile.reputation' : { en:'Reputation',                           fr:'Réputation',                           es:'Reputación'                           },
+    'profile.posi'       : { en:'PoSI Score',                           fr:'Score PoSI',                           es:'Puntuación PoSI'                      },
+    'profile.thevieEvo'  : { en:'Thevie Evo',                           fr:'Évo. Thevie',                          es:'Evo. Thevie'                          },
+    'profile.daily'      : { en:'Daily Usage',                          fr:'Usage journalier',                     es:'Uso diario'                           },
+    'profile.quality'    : { en:'Quality Score',                        fr:'Score qualité',                        es:'Puntuación calidad'                   },
+    // ── Tiers réputation ─────────────────────────────────────
+    'tier.newcomer'      : { en:'Newcomer',                             fr:'Nouveau',                              es:'Nuevo'                                },
+    'tier.reliable'      : { en:'Reliable',                             fr:'Fiable',                               es:'Fiable'                               },
+    'tier.trusted'       : { en:'Trusted',                              fr:'De confiance',                         es:'De confianza'                         },
+    'tier.sovereign'     : { en:'Sovereign',                            fr:'Souverain',                            es:'Soberano'                             },
+    'tier.legend'        : { en:'Legend',                               fr:'Légende',                              es:'Leyenda'                              },
+    // ── Rewards ──────────────────────────────────────────────
+    'rewards.title'      : { en:'SKY Rewards',                          fr:'Récompenses SKY',                      es:'Recompensas SKY'                      },
+    'rewards.pending'    : { en:'SKY pending',                          fr:'SKY en attente',                       es:'SKY pendientes'                       },
+    'rewards.claim'      : { en:'Claim Monthly Rewards',                fr:'Réclamer les récompenses mensuelles',  es:'Reclamar recompensas mensuales'       },
+    'rewards.totalEarned': { en:'Total Earned',                         fr:'Total gagné',                          es:'Total ganado'                         },
+    'rewards.subBonus'   : { en:'Sub Bonus',                            fr:'Bonus abonnement',                     es:'Bono suscripción'                     },
+    'rewards.sources'    : { en:'Reward Sources',                       fr:'Sources de gains',                     es:'Fuentes de ganancias'                 },
+    'rewards.learn'      : { en:'Learn Contributions',                  fr:'Contributions Learn',                  es:'Contribuciones Learn'                 },
+    'rewards.dream'      : { en:'Dream Cycles',                         fr:'Cycles Dream',                         es:'Ciclos Dream'                         },
+    'rewards.quality'    : { en:'Quality Interactions',                 fr:'Interactions qualité',                 es:'Interacciones calidad'                },
+    'rewards.daily'      : { en:'Daily Limit',                          fr:'Limite journalière',                   es:'Límite diario'                        },
+    'rewards.history'    : { en:'Payout History',                       fr:'Historique des paiements',             es:'Historial de pagos'                   },
+    'rewards.noPayout'   : { en:'No payouts yet',                       fr:'Aucun paiement',                       es:'Sin pagos aún'                        },
+    // ── Boutons pages ─────────────────────────────────────────
+    'page.chatFriends'   : { en:'Chat and Friends',                     fr:'Chat et Amis',                         es:'Chat y Amigos'                        },
+    'page.messaging'     : { en:'Messaging',                            fr:'Messagerie',                           es:'Mensajería'                           },
+    'page.nodeServer'    : { en:'Node Server',                          fr:'Serveur Nœud',                         es:'Servidor Nodo'                        },
+    'page.network'       : { en:'Network',                              fr:'Réseau',                               es:'Red'                                  },
+    'page.trade'         : { en:'Trade',                                fr:'Commerce',                             es:'Comercio'                             },
+    'page.dao'           : { en:'DAO · Vote',                           fr:'DAO · Vote',                           es:'DAO · Voto'                           },
+    'page.config'        : { en:'Configuration',                        fr:'Configuration',                        es:'Configuración'                        },
+};
+
+const i18n = {
+    _lang: localStorage.getItem('sky_lang') ?? 'en',
+    get lang() { return this._lang; },
+    setLang(l) {
+        this._lang = ['en','fr','es'].includes(l) ? l : 'en';
+        localStorage.setItem('sky_lang', this._lang);
+    },
+    t(key) {
+        const entry = _I18N_CATALOG[key];
+        return entry ? (entry[this._lang] ?? entry.en ?? key) : key;
+    },
+};
+
+// ─── API — connexion server.js (Bun + PWA) ─────
+const API_BASE = window.location.origin.startsWith('http')
+    ? window.location.origin
+    : 'http://localhost:8080';
+
+/**
+ * Appel REST vers server.js.
+ * Utilisé pour claimRewards, getUserProfile, sendSKY, etc.
+ * Fallback silencieux si le nœud est offline.
+ */
+async function skyApi(cmd, body = null) {
+    try {
+        const isGet = !body;
+        const res = await fetch(`${API_BASE}/api/cmd/${cmd}`, {
+            method : isGet ? 'GET' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body   : isGet ? undefined : JSON.stringify(body),
+            signal : AbortSignal.timeout(8000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return data.result ?? data;
+    } catch (e) {
+        console.debug(`[skyApi] ${cmd} offline : ${e.message}`);
+        return null;
+    }
+}
+
+// ─── Init ──────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    applyTheme(_state.theme);
+    // Charger le wallet sauvegardé
+    const _savedWallet = localStorage.getItem('sky_wallet');
+    if (_savedWallet) _state.walletAddress = _savedWallet;
+    // Si MetaMask disponible — lire le compte actif silencieusement
+    if (window.ethereum) {
+        window.ethereum.request({ method: 'eth_accounts' })
+            .then(accs => {
+                if (accs?.length && !_state.walletAddress) {
+                    _state.walletAddress = accs[0];
+                    localStorage.setItem('sky_wallet', accs[0]);
+                }
+            }).catch(() => {});
+    }
+    // Charger la langue depuis i18n (localStorage)
+    _state.lang = i18n.lang;
+    applyLang(_state.lang);
+    initConnectivity();
+    trySyncSkycloud();   // REST en premier, localStorage en fallback
+    refreshWallet();
+    refreshProfile();
+    refreshRewards();
+});
+
+// ─── Thème ─────────────────────────────────────
+function setTheme(t) {
+    _state.theme = t;
+    localStorage.setItem('sky_theme', t);
+    applyTheme(t);
+}
+function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    document.getElementById('main-nav').style.backgroundColor =
+        t === 'light' ? 'rgba(240,253,244,0.97)' : 'rgba(10,10,15,0.95)';
+    document.getElementById('main-nav').style.color = t === 'light' ? '#0a1a0f' : '#ffffff';
+    // Mettre à jour les boutons de thème
+    ['dark','light'].forEach(th => {
+        const btn = document.getElementById(`theme-${th}`);
+        if (!btn) return;
+        const active = th === t;
+        btn.className = `flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+            active ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                   : 'bg-white/5 text-white/50 hover:bg-white/10'
+        }`;
+    });
+}
+
+// ─── Langue ────────────────────────────────────
+function setLang(l) {
+    _state.lang = l;
+    i18n.setLang(l);   // persiste dans localStorage + notifie
+    applyLang(l);
+    // Synchroniser la langue avec server.js
+    skyApi('set_language', { lang: l }).catch(() => {});
+}
+function applyLang(l) {
+    i18n.setLang(l);
+
+    // ── Page principale ──────────────────────────────────────
+    const h1 = document.querySelector('h1');
+    const sub = document.querySelector('h1 + p');
+    if (h1)  h1.textContent  = i18n.t('home.welcome');
+    if (sub) sub.textContent = i18n.t('home.subtitle');
+
+    // ── Nav ──────────────────────────────────────────────────
+    const statusEl = document.getElementById('status-text');
+    if (statusEl) {
+        const isOnline = statusEl.dataset.online === 'true';
+        statusEl.textContent = isOnline ? i18n.t('nav.online') : i18n.t('nav.offline');
+    }
+
+    // ── Popup Settings ───────────────────────────────────────
+    _translateEl('[data-i18n="nav.preferences"]', 'nav.preferences');
+    _translateEl('[data-i18n="nav.language"]',    'nav.language');
+    _translateEl('[data-i18n="nav.theme"]',       'nav.theme');
+    _translateEl('#theme-dark span',              'nav.dark');
+    _translateEl('#theme-light span',             'nav.light');
+
+    // ── Popup Wallet ─────────────────────────────────────────
+    _translateEl('[data-i18n="wallet.title"]',        'wallet.title');
+    _translateEl('[data-i18n="wallet.total"]',        'wallet.total');
+    _translateEl('[data-i18n="wallet.pending"]',      'wallet.pending');
+    _translateEl('[data-i18n="wallet.send"]',         'wallet.send');
+    _translateEl('[data-i18n="wallet.receive"]',      'wallet.receive');
+    _translateEl('[data-i18n="wallet.copy"]',         'wallet.copy');
+    _translateEl('[data-i18n="wallet.noTx"]',         'wallet.noTx');
+    _translateEl('[data-i18n="wallet.recentTx"]',     'wallet.recentTx');
+    _translateEl('[data-i18n="wallet.yourAddress"]',  'wallet.yourAddress');
+    _translateEl('[data-i18n="wallet.manualEntry"]',  'wallet.manualEntry');
+    _translateEl('[data-i18n="wallet.saveAddress"]',  'wallet.saveAddress');
+    _translateEl('[data-i18n="wallet.connectWallet"]','wallet.connectWallet');
+    _translateEl('[data-i18n="wallet.noWallet"]',     'wallet.noWallet');
+    _translateEl('[data-i18n="wallet.claim"]',        'wallet.claim');
+
+    // ── Popup Profil ─────────────────────────────────────────
+    _translateEl('[data-i18n="profile.accountType"]', 'profile.accountType');
+    _translateEl('[data-i18n="profile.upgrade"]',     'profile.upgrade');
+    _translateEl('[data-i18n="profile.reputation"]',  'profile.reputation');
+    _translateEl('[data-i18n="profile.posi"]',        'profile.posi');
+    _translateEl('[data-i18n="profile.thevieEvo"]',   'profile.thevieEvo');
+    _translateEl('[data-i18n="profile.daily"]',       'profile.daily');
+    _translateEl('[data-i18n="profile.quality"]',     'profile.quality');
+
+    // ── Popup Rewards ────────────────────────────────────────
+    _translateEl('[data-i18n="rewards.title"]',       'rewards.title');
+    _translateEl('[data-i18n="rewards.pending"]',     'rewards.pending');
+    _translateEl('[data-i18n="rewards.claim"]',       'rewards.claim');
+    _translateEl('[data-i18n="rewards.totalEarned"]', 'rewards.totalEarned');
+    _translateEl('[data-i18n="rewards.subBonus"]',    'rewards.subBonus');
+    _translateEl('[data-i18n="rewards.sources"]',     'rewards.sources');
+    _translateEl('[data-i18n="rewards.learn"]',       'rewards.learn');
+    _translateEl('[data-i18n="rewards.dream"]',       'rewards.dream');
+    _translateEl('[data-i18n="rewards.quality"]',     'rewards.quality');
+    _translateEl('[data-i18n="rewards.daily"]',       'rewards.daily');
+    _translateEl('[data-i18n="rewards.history"]',     'rewards.history');
+    _translateEl('[data-i18n="rewards.noPayout"]',    'rewards.noPayout');
+
+    // ── Boutons pages ─────────────────────────────────────────
+    _translateEl('[data-i18n="page.chatFriends"]',   'page.chatFriends');
+    _translateEl('[data-i18n="page.messaging"]',     'page.messaging');
+    _translateEl('[data-i18n="page.nodeServer"]',    'page.nodeServer');
+    _translateEl('[data-i18n="page.network"]',       'page.network');
+    _translateEl('[data-i18n="page.trade"]',         'page.trade');
+    _translateEl('[data-i18n="page.dao"]',           'page.dao');
+    _translateEl('[data-i18n="page.config"]',        'page.config');
+    // Mettre à jour les boutons de langue
+    ['en','fr','es'].forEach(lang => {
+        const btn = document.getElementById(`lang-${lang}`);
+        if (!btn) return;
+        const active = lang === l;
+        btn.className = `py-1.5 rounded-lg text-xs font-semibold transition-all ${
+            active ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                   : 'bg-white/5 text-white/50 hover:bg-white/10'
+        }`;
+    });
+}
+
+// ─── Connectivité ──────────────────────────────
+function initConnectivity() {
+    const update = () => {
+        const online = navigator.onLine;
+        const dot    = document.getElementById('status-dot');
+        const txt    = document.getElementById('status-text');
+        if (!dot || !txt) return;
+        dot.className = `w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-400' : 'bg-red-400'}`;
+        txt.dataset.online = online;
+        txt.textContent = online ? i18n.t('nav.online') : i18n.t('nav.offline');
+        txt.className   = `text-[10px] font-medium ${online ? 'text-white/60' : 'text-red-400'}`;
+    };
+    update();
+    window.addEventListener('online',  update);
+    window.addEventListener('offline', update);
+    // Ping server.js + sync état toutes les 30s
+    setInterval(() => {
+        update();
+        trySyncSkycloud();
+    }, 30_000);
+}
+
+// ─── Traduction — helper ───────────────────────
+function _translateEl(selector, key) {
+    const el = document.querySelector(selector);
+    if (el) el.textContent = i18n.t(key);
+}
+
+// ─── Popups ────────────────────────────────────
+const _popups = ['wallet','profile','rewards','settings'];
+function togglePopup(id) {
+    const el = document.getElementById(`popup-${id}`);
+    if (!el) return;
+    const wasHidden = el.classList.contains('hidden');
+    // Fermer tous les popups
+    _popups.forEach(p => document.getElementById(`popup-${p}`)?.classList.add('hidden'));
+    if (wasHidden) {
+        el.classList.remove('hidden');
+        if (id === 'wallet')  refreshWallet();
+        if (id === 'profile') refreshProfile();
+        if (id === 'rewards') refreshRewards();
+    }
+}
+function toggleSettingsPopup() { togglePopup('settings'); }
+
+// Fermer au clic extérieur
+document.addEventListener('click', e => {
+    if (e.target.closest('[onclick*="togglePopup"]') ||
+        e.target.closest('[onclick*="toggleSettingsPopup"]') ||
+        e.target.closest('[id^="popup-"]') ||
+        e.target.closest('[id^="send-"]') ||
+        e.target.closest('[id^="receive-"]')) return;
+    _popups.forEach(p => document.getElementById(`popup-${p}`)?.classList.add('hidden'));
+});
+
+// ─── WALLET ────────────────────────────────────
+
+function refreshWallet() {
+    const addr = _state.walletAddress;
+    // Nav
+    const shortEl = document.getElementById('wallet-address-short');
+    if (shortEl) {
+        shortEl.textContent = addr
+            ? `${addr.slice(0,6)}…${addr.slice(-4)}`
+            : 'Not connected';
+        shortEl.style.color = addr ? '' : 'rgba(255,255,255,0.3)';
+    }
+    document.getElementById('wallet-total-balance').textContent = _state.walletBalance;
+    document.getElementById('wallet-pending').textContent       = `${_state.pendingRewards} SKY`;
+    // nav wallet — logo seul, pas de label à mettre à jour
+    // Panel Receive — afficher selon état connexion
+    const connected = document.getElementById('receive-connected');
+    const notConn   = document.getElementById('receive-connect');
+    const addrEl    = document.getElementById('receive-address');
+    if (addr && connected && notConn) {
+        connected.classList.remove('hidden');
+        notConn.classList.add('hidden');
+        if (addrEl) addrEl.textContent = addr;
+    } else if (connected && notConn) {
+        connected.classList.add('hidden');
+        notConn.classList.remove('hidden');
+    }
+    renderTransactions();
+}
+
+function copyWalletAddress() {
+    const addr = _state.walletAddress;
+    if (!addr) { showToast('No wallet connected'); return; }
+    navigator.clipboard.writeText(addr)
+        .then(() => showToast('Address copied ✓'))
+        .catch(() => showToast('Copy failed'));
+}
+
+/** Connexion via MetaMask ou tout wallet injecté (EIP-1193). */
+async function connectWalletBrowser() {
+    if (!window.ethereum) {
+        showToast('No Web3 wallet detected — install MetaMask');
+        window.open('https://metamask.io/download/', '_blank');
+        return;
+    }
+    try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        if (!accounts?.length) { showToast('Connection refused'); return; }
+        const addr = accounts[0];
+        _state.walletAddress = addr;
+        localStorage.setItem('sky_wallet', addr);
+        // Lire le vrai solde SKY on-chain via server.js
+        const summary = await skyApi('get_wallet_summary');
+        if (summary?.balance != null) _state.walletBalance = summary.balance;
+        // Lier au profil + nœud
+        await skyApi('link_wallet_to_profile', { address: addr });
+        refreshWallet();
+        // Fermer le popup wallet si ouvert pour montrer la nav mise à jour
+        document.getElementById('popup-wallet')?.classList.add('hidden');
+        showToast(`✓ Wallet connected — ${addr.slice(0,6)}…${addr.slice(-4)}`);
+        // Écouter les changements de compte MetaMask
+        window.ethereum.on('accountsChanged', accs => {
+            if (accs.length) {
+                _state.walletAddress = accs[0];
+                localStorage.setItem('sky_wallet', accs[0]);
+                refreshWallet();
+            } else {
+                // Déconnexion
+                _state.walletAddress = '';
+                localStorage.removeItem('sky_wallet');
+                refreshWallet();
+            }
+        });
+    } catch (e) {
+        showToast(`Connection failed: ${e.message}`);
+    }
+}
+
+/** Connexion manuelle par adresse (lecture seule). */
+function connectWalletReadOnly() {
+    const input = document.getElementById('manual-address-input');
+    input?.classList.toggle('hidden');
+}
+
+async function saveManualAddress() {
+    const addr = document.getElementById('manual-address')?.value.trim();
+    if (!addr || !addr.startsWith('0x') || addr.length < 42) {
+        showToast('Invalid address'); return;
+    }
+    _state.walletAddress = addr;
+    localStorage.setItem('sky_wallet', addr);
+    // Lire le solde on-chain
+    const summary = await skyApi('get_wallet_summary');
+    if (summary?.balance != null) _state.walletBalance = summary.balance;
+    await skyApi('link_wallet_to_profile', { address: addr });
+    refreshWallet();
+    document.getElementById('manual-address-input')?.classList.add('hidden');
+    showToast(`Address saved — ${addr.slice(0,6)}…${addr.slice(-4)} (read-only)`);
+}
+
+function showSendSKY() {
+    document.getElementById('send-panel').classList.toggle('hidden');
+    document.getElementById('receive-panel').classList.add('hidden');
+}
+function showReceiveSKY() {
+    document.getElementById('receive-panel').classList.toggle('hidden');
+    document.getElementById('send-panel').classList.add('hidden');
+}
+
+async function sendSKY() {
+    const to     = document.getElementById('send-address').value.trim();
+    const amount = parseFloat(document.getElementById('send-amount').value);
+    const status = document.getElementById('send-status');
+
+    if (!to.startsWith('0x') || to.length < 42) {
+        status.textContent = '✗ Invalid address'; status.classList.remove('hidden'); return;
+    }
+    if (!amount || amount <= 0 || amount > _state.walletBalance) {
+        status.textContent = '✗ Invalid amount'; status.classList.remove('hidden'); return;
+    }
+
+    status.textContent = '↻ Sending…'; status.classList.remove('hidden');
+
+    // Appel REST → wallet.js → viem ou MetaMask
+    const result = await skyApi('send_sky', { to, amount, label: `To ${to.slice(0,8)}…` });
+
+    const hash = result?.txHash ?? null;  // null si pas de tx on-chain confirmée
+    if (result?.walletBalance != null) _state.walletBalance = result.walletBalance;
+    else _state.walletBalance -= amount;
+
+    const tx = { type:'send', to, amount, ts: Date.now(), hash };
+    _state.transactions.unshift(tx);
+    if (_state.transactions.length > 20) _state.transactions.pop();
+    localStorage.setItem('sky_txs', JSON.stringify(_state.transactions));
+
+    status.textContent = `✓ Sent ${amount} SKY`;
+    document.getElementById('send-address').value = '';
+    document.getElementById('send-amount').value  = '';
+    refreshWallet();
+    showToast(`${amount} SKY sent ✓`);
+}
+
+function renderTransactions() {
+    const el = document.getElementById('tx-list');
+    if (!_state.transactions.length) {
+        el.innerHTML = '<div class="text-[10px] text-white/25 text-center py-2">No transactions yet</div>';
+        return;
+    }
+    el.innerHTML = _state.transactions.slice(0, 5).map(tx => {
+        const date  = new Date(tx.ts).toLocaleDateString();
+        const isSend = tx.type === 'send';
+        const color  = isSend ? '#f87171' : '#4ade80';
+        const sign   = isSend ? '↑ −' : '↓ +';
+        const label  = tx.label ?? (isSend ? `To ${tx.to?.slice(0,8)}…` : 'Received');
+        const hashEl = tx.hash
+            ? `<a href="https://etherscan.io/tx/${tx.hash}" target="_blank"
+                  class="text-white/20 hover:text-white/50 underline" title="${tx.hash}">
+                  ${tx.hash.slice(0,10)}…</a>`
+            : `<span class="text-white/15">pending</span>`;
+        return `<div class="space-y-0.5">
+            <div class="flex items-center justify-between text-[10px]">
+                <div class="flex items-center gap-x-1.5">
+                    <span style="color:${color}">${sign}${tx.amount} SKY</span>
+                    <span class="text-white/30">${label}</span>
+                </div>
+                <span class="text-white/20">${date}</span>
+            </div>
+            <div class="pl-0.5">${hashEl}</div>
+        </div>`;
+    }).join('');
+}
+
+// ─── PROFIL ────────────────────────────────────
+function refreshProfile() {
+    document.getElementById('profile-account-type').textContent = _state.accountType;
+    document.getElementById('profile-posi').textContent         = computePoSI().toFixed(3);
+    document.getElementById('profile-thevie-evo').textContent   = `${(_state.thevieEvo * 100).toFixed(1)}%`;
+    document.getElementById('profile-daily').textContent        = `${_state.dailyMessages}/${_state.maxDaily}`;
+    document.getElementById('profile-quality').textContent      = _state.qualityScore.toFixed(2);
+
+    // Réputation
+    const score = _state.reputation;
+    document.getElementById('profile-rep-bar').style.width = `${score * 100}%`;
+    const tier  = reputationTier(score);
+    const badge = document.getElementById('profile-rep-badge');
+    badge.textContent  = tier.label;
+    badge.className    = `text-[10px] px-2 py-0.5 rounded-full badge-${tier.css}`;
+}
+
+function computePoSI() {
+    const c = Math.min(_state.learnCount / 2500, 1) * 0.42;
+    const r = Math.max(0, Math.min(1, _state.reputation)) * 0.33;
+    const d = Math.min(_state.dreamCount / 100, 1) * 0.25;
+    return Math.min(c + r + d, 1.0);
+}
+
+function reputationTier(score) {
+    if (score >= 0.95) return { label:'Legend',   css:'legend'   };
+    if (score >= 0.85) return { label:'Sovereign', css:'sovereign' };
+    if (score >= 0.70) return { label:'Trusted',   css:'trusted'   };
+    if (score >= 0.50) return { label:'Reliable',  css:'reliable'  };
+    return               { label:'Newcomer',  css:'newcomer'  };
+}
+
+function upgradeAccount() {
+    showToast('Redirecting to upgrade…');
+    setTimeout(() => window.location.href = 'settings.html', 800);
+}
+
+// ─── REWARDS ───────────────────────────────────
+
+function refreshRewards() {
+    document.getElementById('rew-pending').textContent      = _state.pendingRewards;
+    document.getElementById('rew-total').textContent        = `${_state.totalSkyEarned} SKY`;
+    document.getElementById('rew-sub-bonus').textContent    = `+${_state.subscriptionBonus} SKY`;
+    document.getElementById('rew-learn-count').textContent  = _state.learnCount;
+    document.getElementById('rew-dream-count').textContent  = _state.dreamCount;
+    document.getElementById('rew-quality-count').textContent= _state.qualityCount;
+
+    const pct = Math.min((_state.dailyMessages / _state.maxDaily) * 100, 100);
+    document.getElementById('rew-daily-bar').style.width  = `${pct}%`;
+    document.getElementById('rew-daily-label').textContent =
+        `${_state.dailyMessages} / ${_state.maxDaily} today`;
+
+    renderPayoutHistory();
+}
+
+function renderPayoutHistory() {
+    const el = document.getElementById('rew-history');
+    if (!_state.payoutHistory.length) {
+        el.innerHTML = '<div class="text-[10px] text-white/25 text-center py-2">No payouts yet</div>';
+        return;
+    }
+    el.innerHTML = _state.payoutHistory.slice().reverse().slice(0, 12).map(p => {
+        const date = new Date(p.ts).toLocaleDateString(undefined, { month:'short', year:'numeric' });
+        return `<div class="flex justify-between text-[10px]">
+            <span class="text-white/50">${date}</span>
+            <span class="font-mono font-semibold" style="color:#4ade80">+${p.amount} SKY</span>
+        </div>`;
+    }).join('');
+}
+
+async function claimRewards() {
+    if (_state.pendingRewards === 0) { showToast('No rewards to claim'); return; }
+
+    // ── Appel REST server.js ────────────────────
+    const result = await skyApi('claim_rewards', {});
+
+    const claimed = result?.claimed ?? _state.pendingRewards;
+    if (result?.walletBalance != null) _state.walletBalance = result.walletBalance;
+    else _state.walletBalance += claimed;
+
+    const payout = { ts: Date.now(), amount: claimed };
+    _state.totalSkyEarned += claimed;
+    _state.pendingRewards  = 0;
+    _state.payoutHistory.push(payout);
+    if (_state.payoutHistory.length > 24) _state.payoutHistory.shift();
+    localStorage.setItem('sky_payouts', JSON.stringify(_state.payoutHistory));
+
+    _state.transactions.unshift({ type:'receive', amount: claimed, label:'Rewards claim', ts: Date.now() });
+    localStorage.setItem('sky_txs', JSON.stringify(_state.transactions));
+
+    refreshWallet();
+    refreshRewards();
+    showToast(`✓ ${claimed} SKY claimed — added to wallet`);
+}
+
+// ─── Sync Skycloud ─────────────────────────────
+// Priorité 1 : REST vers server.js (Bun + PWA)
+// Priorité 2 : localStorage (fallback hors ligne)
+async function trySyncSkycloud() {
+    // ── Tentative REST ──────────────────────────
+    const [rewards, profile, wallet] = await Promise.all([
+        skyApi('get_rewards_stats'),
+        skyApi('get_user_profile'),
+        skyApi('get_wallet_summary'),
+    ]);
+
+    if (rewards || profile || wallet) {
+        // Données fraîches depuis server.js
+        if (rewards) {
+            if (rewards.pendingRewards        != null) _state.pendingRewards    = rewards.pendingRewards;
+            if (rewards.totalSkyEarned        != null) _state.totalSkyEarned   = rewards.totalSkyEarned;
+            if (rewards.totalLearnContributions!= null) _state.learnCount       = rewards.totalLearnContributions;
+            if (rewards.totalDreamCycles      != null) _state.dreamCount        = rewards.totalDreamCycles;
+            if (rewards.conversationQualityScore!=null) _state.qualityScore     = rewards.conversationQualityScore;
+            if (rewards.subscriptionBonus     != null) _state.subscriptionBonus = rewards.subscriptionBonus;
+        }
+        if (profile) {
+            if (profile.accountType           != null) _state.accountType       = profile.accountType;
+            if (profile.reputation            != null) _state.reputation        = profile.reputation;
+            if (profile.thevieEvolution       != null) _state.thevieEvo        = profile.thevieEvolution;
+            if (profile.dailyMessages         != null) _state.dailyMessages     = profile.dailyMessages;
+            if (profile.maxDailyMessages      != null) _state.maxDaily          = profile.maxDailyMessages;
+            if (profile.qualityScore          != null) _state.qualityScore      = profile.qualityScore;
+            if (profile.learnContributions    != null) _state.learnCount        = profile.learnContributions;
+            if (profile.dreamCycles           != null) _state.dreamCount        = profile.dreamCycles;
+        }
+        if (wallet) {
+            if (wallet.balance                != null) _state.walletBalance     = wallet.balance;
+            if (wallet.address) {
+                _state.walletAddress = wallet.address;
+                localStorage.setItem('sky_wallet', wallet.address);
+            }
+        }
+        // Persister pour le mode hors ligne
+        localStorage.setItem('skycloud_state', JSON.stringify({
+            walletBalance   : _state.walletBalance,
+            pendingRewards  : _state.pendingRewards,
+            totalSkyEarned  : _state.totalSkyEarned,
+            accountType     : _state.accountType,
+            reputation      : _state.reputation,
+            learnCount      : _state.learnCount,
+            dreamCount      : _state.dreamCount,
+            qualityScore    : _state.qualityScore,
+            thevieEvo       : _state.thevieEvo,
+            dailyMessages   : _state.dailyMessages,
+            maxDaily        : _state.maxDaily,
+            subscriptionBonus: _state.subscriptionBonus,
+            walletAddress   : _state.walletAddress,
+        }));
+        return;
+    }
+
+    // ── Fallback localStorage (hors ligne) ─────
+    try {
+        const sky = JSON.parse(localStorage.getItem('skycloud_state') ?? 'null');
+        if (!sky) return;
+        Object.entries(sky).forEach(([k, v]) => {
+            if (v != null && k in _state) _state[k] = v;
+        });
+        if (sky.walletAddress) localStorage.setItem('sky_wallet', sky.walletAddress);
+    } catch { /* ok */ }
+}
+
+// ─── Cassette ticker ───────────────────────────
+// Couleur par page — chaque message a sa propre teinte
+const TICKER_COLORS = {
+    'Thevie'     : '#4ade80',
+    'SkyChat'    : '#22d3ee',
+    'Skycloud'   : '#6366f1',
+    'Node'       : '#f59e0b',
+    'Marketplace': '#f97316',
+    'Governance' : '#a78bfa',
+    'Settings'   : '#94a3b8',
+};
+const TICKER_ITEMS = [
+    { page:'Thevie',      text:'Micro-updates fire on every injection' },
+    { page:'Thevie',      text:'LoRA adapts personality continuously' },
+    { page:'SkyChat',     text:'E2E encrypted · RomanT369 Hyper256' },
+    { page:'SkyChat',     text:'Messages feed the learning bus' },
+    { page:'Skycloud',    text:'Decentralized hosting · Dilithium5' },
+    { page:'Skycloud',    text:'Dream Cycle · 3 passes · never skips' },
+    { page:'Skycloud',    text:'Lessons propagate to all peers' },
+    { page:'Node',        text:'Learn +12 SKY · Dream +22 SKY' },
+    { page:'Node',        text:'Reputation: Newcomer → Legend' },
+    { page:'Marketplace', text:'Trade compute, models & datasets' },
+    { page:'Marketplace', text:'Contracts audited by LoraÉvo' },
+    { page:'Governance',  text:'Vote weight = stake × reputation' },
+    { page:'Governance',  text:'Treasury: 55% Users · 25% DAO · 15% Burn' },
+    { page:'Settings',    text:'AccountType · Wallet · Node tier' },
+    { page:'Settings',    text:'Free 80 · Pro 200 · NodeOwner 450 SKY/day' },
+];
+
+let _tickerIdx = 0;
+function advanceTicker() {
+    const el  = document.getElementById('ticker-text');
+    const dot = document.getElementById('ticker-dot');
+    if (!el) return;
+
+    // Fade out
+    el.style.opacity = '0';
+    setTimeout(() => {
+        _tickerIdx = (_tickerIdx + 1) % TICKER_ITEMS.length;
+        const item  = TICKER_ITEMS[_tickerIdx];
+        const color = TICKER_COLORS[item.page] ?? '#4ade80';
+        el.style.color = color;
+        dot.style.background = color;
+        el.textContent = `${item.page} — ${item.text}`;
+        // Pulse du point
+        dot.className = 'w-1.5 h-1.5 rounded-full shrink-0 bg-emerald-300';
+        setTimeout(() => { dot.className = 'w-1.5 h-1.5 rounded-full shrink-0 bg-emerald-400'; }, 300);
+        el.style.opacity = '1';
+    }, 400);
+}
+
+// Init ticker
+document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('ticker-text');
+    if (el) {
+        const first = TICKER_ITEMS[0];
+        const firstColor = TICKER_COLORS[first.page] ?? '#4ade80';
+        el.style.color = firstColor;
+        el.textContent = `${first.page} — ${first.text}`;
+    }
+    setInterval(advanceTicker, 4000);
+});
+
+// ─── Navigation avec dialog ──────────────────────
+const PAGE_NAMES = {
+    'thevie.html'     : 'Thevie',
+    'messaging.html'  : 'SkyChat',
+    'skycloud.html'   : 'Skycloud',
+    'node.html'       : 'Node',
+    'marketplace.html': 'Marketplace',
+    'governance.html' : 'Governance',
+    'settings.html'   : 'Settings',
+};
+
+function navigateTo(page) {
+    const name = PAGE_NAMES[page] ?? page;
+    // Fermer tous les popups ouverts
+    ['wallet','profile','rewards','settings'].forEach(p =>
+        document.getElementById(`popup-${p}`)?.classList.add('hidden')
+    );
+
+    const overlay = document.createElement('div');
+    overlay.id = 'nav-dialog';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:500;display:flex;align-items:center;justify-content:center;padding:1.5rem';
+    overlay.innerHTML = `
+        <div style="background:rgba(255,255,255,0.07);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.1);border-radius:1.5rem;padding:1.5rem;width:100%;max-width:280px;animation:popIn 0.18s ease-out forwards">
+            <div style="font-size:.75rem;font-weight:600;margin-bottom:.5rem;color:rgba(255,255,255,.5);text-transform:uppercase;letter-spacing:.08em">Open ${name}</div>
+            <div style="font-size:.875rem;color:rgba(255,255,255,.7);margin-bottom:1.25rem">${i18n.t('home.openPage')}</div>
+            <div style="display:flex;flex-direction:column;gap:.5rem">
+                <button onclick="_navGo('${page}', false)"
+                        style="width:100%;padding:.625rem 1rem;border-radius:.75rem;background:rgba(74,222,128,0.15);border:1px solid rgba(74,222,128,0.3);color:#4ade80;font-size:.8125rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.5rem;transition:background .15s">
+                    ${i18n.t('home.sameTab')}
+                </button>
+                <button onclick="_navGo('${page}', true)"
+                        style="width:100%;padding:.625rem 1rem;border-radius:.75rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,.65);font-size:.8125rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.5rem;transition:background .15s">
+                    ${i18n.t('home.newTab')}
+                </button>
+                <button onclick="document.getElementById('nav-dialog').remove()"
+                        style="width:100%;padding:.5rem;background:none;border:none;color:rgba(255,255,255,.3);font-size:.75rem;cursor:pointer;margin-top:.25rem">
+                    ${i18n.t('home.cancel')}
+                </button>
+            </div>
+        </div>`;
+
+    overlay.addEventListener('click', e => {
+        if (e.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
+}
+
+function _navGo(page, newTab) {
+    document.getElementById('nav-dialog')?.remove();
+    if (newTab) window.open(page, '_blank');
+    else window.location.href = page;
+}
+
+
+// ─── Service Worker PWA ────────────────────────────
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', async () => {
+        try {
+            const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+            console.info('[PWA] SW enregistré :', reg.scope);
+            reg.addEventListener('updatefound', () => {
+                const sw = reg.installing;
+                sw?.addEventListener('statechange', () => {
+                    if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+                        showToast('↻ New version available — refresh to update');
+                    }
+                });
+            });
+        } catch (e) {
+            console.warn('[PWA] SW non enregistré :', e.message);
+        }
+    });
+}
+
+// ─── Toast ─────────────────────────────────────
+function showToast(msg) {
+    const t = document.createElement('div');
+    t.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-2xl shadow-xl z-[300] text-xs font-medium text-white';
+    t.style.cssText = 'background:rgba(74,222,128,0.15);border:1px solid rgba(74,222,128,0.3);backdrop-filter:blur(12px)';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity='0'; t.style.transition='opacity 0.3s'; setTimeout(()=>t.remove(),300); }, 2400);
+}
+</script>
+</body>
+</html>
