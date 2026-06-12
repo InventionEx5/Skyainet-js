@@ -1,22 +1,25 @@
 {
   "name": "@skyainet/financial",
   "version": "1.0.0",
+  "description": "SkyAInet Financial Package — Treasury, Liquidity, Wallet SKY Token",
   "type": "module",
-  "description": "SkyAInet Financial — Treasury (15% Burn | 55% Users | 25% DAO | 5% Dev) + Liquidity Uniswap V4",
   "main": "src/financial.js",
   "exports": {
-    ".": "./src/financial.js"
+    ".": "./src/financial.js",
+    "./treasury": "./src/treasury.js",
+    "./liquidity": "./src/liquidity.js",
+    "./wallet": "./src/wallet.js"
   },
-  "files": [
-    "src/financial.js",
-    "src/treasury.js",
-    "src/liquidity.js"
-  ],
   "scripts": {
-    "check": "node --check src/financial.js"
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
   "dependencies": {
     "viem": "^2.0.0"
   },
-  "license": "MIT"
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
 }
