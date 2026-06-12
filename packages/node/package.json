@@ -1,6 +1,7 @@
 {
   "name": "@skyainet/node",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "SkyAInet Node Package — SkyCloud, Server, Gateway, Storage, Agentic",
   "type": "module",
   "main": "src/server.js",
