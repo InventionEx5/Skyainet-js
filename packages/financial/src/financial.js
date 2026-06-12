@@ -20,13 +20,19 @@ export { TreasuryManager, TreasuryError }             from './treasury.js';
 export { LiquidityManager, LiquidityPosition, LiquidityError } from './liquidity.js';
 
 // ─────────────────────────────────────────────────────────────────
+// WALLET — Wallet ERC-20 SKY Token utilisateur
+// ─────────────────────────────────────────────────────────────────
+
+export { SkyWallet, WalletTransaction, WalletError } from './wallet.js';
+
+// ─────────────────────────────────────────────────────────────────
 // VERSION
 // ─────────────────────────────────────────────────────────────────
 
 export const VERSION = '1.0.0';
 
 export const PACKAGE_INFO = Object.freeze({
-  name       : 'skyainet-financial',
+  name       : '@skyainet/financial',
   version    : VERSION,
   description: 'SkyAInet Financial — Treasury (15% Burn | 55% Users | 25% DAO | 5% Dev) + Liquidity Uniswap V4',
   modules    : ['TreasuryManager', 'LiquidityManager'],
