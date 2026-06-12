@@ -1,0 +1,89 @@
+# ══════════════════════════════════════════════════════════════
+# SkyAInet × Nikola T369 — .gitignore
+# ══════════════════════════════════════════════════════════════
+
+# ─── Node.js ──────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp
+.pnp.js
+
+# ─── Bun ──────────────────────────────────────────────────────
+bun.lockb
+.bun-cache/
+
+# ─── Build / Distribution ─────────────────────────────────────
+dist/
+dist-electron/
+build/
+*.exe
+*.AppImage
+*.deb
+*.dmg
+*.zip
+*.tar.gz
+
+# ─── PWA Icons générées par server.js via sharp ───────────────
+# Seul icon-source.svg est committé sur Github
+public-ui/icons/*.png
+public-ui/icons/*.ico
+!public-ui/icons/icon-source.svg
+
+# ─── Logs ─────────────────────────────────────────────────────
+logs/
+*.log
+*.log.*
+
+# ─── Données runtime générées au démarrage ────────────────────
+data/
+*.db
+*.sqlite
+vector_store/
+checkpoints/
+models/*.bin
+models/*.gguf
+models/*.safetensors
+
+# ─── Sécurité — ne jamais committer ───────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+private_key*
+secret*
+keystore*
+
+# ─── Cache ────────────────────────────────────────────────────
+.cache/
+.parcel-cache/
+.vite/
+*.tsbuildinfo
+
+# ─── Tests ────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ─── OS ───────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# ─── IDEs ─────────────────────────────────────────────────────
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# ─── Mises à jour en attente ──────────────────────────────────
+*-update-*
+skyainet-update-*
