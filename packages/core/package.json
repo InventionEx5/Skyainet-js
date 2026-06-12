@@ -1,6 +1,7 @@
 {
   "name": "@skyainet/core",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "SkyAInet Core Package — Rewards, Economics, Profile, i18n, Constitution",
   "type": "module",
   "main": "src/core.js",
