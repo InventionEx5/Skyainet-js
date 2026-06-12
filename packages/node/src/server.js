@@ -791,7 +791,6 @@ app.post('/api/evolution/train', async (req, res) => {
 // =====================================================
 // WEBSOCKET — TEMPS RÉEL
 // =====================================================
-
 function handleWs(ws) {
   state.metrics.websocketConnections++;
   console.info('🔌 WebSocket connecté');
@@ -1059,10 +1058,10 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     apiError(res, 500, 'RATE_ERROR', e.message);
   }
 });
+
 // =====================================================
 // DÉMARRAGE
 // =====================================================
-
 // ─── Route générique apiHandlers ──────────────────────────────
 // Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
 // Complète les routes spécifiques ci-dessus.
@@ -1306,5 +1305,58 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', ws => handleWs(ws));
+
+// ── Relay des events marketplace → tous les clients WebSocket ──
+// GpuCpuMarketplaceService est un EventEmitter —
+// on connecte ses events pour les broadcaster en temps réel.
+function broadcastWs(event, data) {
+  const msg = JSON.stringify({ event, ...data, ts: Date.now() });
+  wss.clients.forEach(ws => {
+    if (ws.readyState === 1) {
+      try { ws.send(msg); } catch { /* client déconnecté */ }
+    }
+  });
+}
+
+// Brancher les events du gpuMarket
+const _gpuMarket = state.node.gpuMarket;
+if (_gpuMarket) {
+  _gpuMarket.on('offer:published',   d => broadcastWs('gpu:offer_published',  d));
+  _gpuMarket.on('offer:withdrawn',   d => broadcastWs('gpu:offer_withdrawn',  d));
+  _gpuMarket.on('rental:created',    d => broadcastWs('gpu:rental_created',   d));
+  _gpuMarket.on('rental:completed',  d => broadcastWs('gpu:rental_completed', d));
+  _gpuMarket.on('rental:cancelled',  d => broadcastWs('gpu:rental_cancelled', d));
+  _gpuMarket.on('rentals:expired',   n => broadcastWs('gpu:rentals_expired',  { count: n }));
+  console.info('[Server] GPU Marketplace events → WebSocket connectés');
+}
+
+// Routes ticker temps réel
+app.get('/api/marketplace/ticker', async (req, res) => {
+  try {
+    const gpuTicker  = _gpuMarket?.getTickerData?.()     ?? {};
+    const nodeTicker = state.node.marketplace?.getNodeTickerData?.() ?? {};
+    res.json({ ok: true, result: { gpu: gpuTicker, nodes: nodeTicker } });
+  } catch (e) {
+    apiError(res, 500, 'TICKER_ERROR', e.message);
+  }
+});
+
+// Route catalogue GPU pour marketplace.html
+app.get('/api/gpu/catalog', (req, res) => {
+  const catalog = _gpuMarket?.getGpuCatalog?.() ?? [];
+  res.json({ ok: true, result: catalog });
+});
+
+// Route stats GPU avg price
+app.get('/api/gpu/avg-price', (req, res) => {
+  const data = _gpuMarket?.getAvgPriceByType?.() ?? [];
+  res.json({ ok: true, result: data });
+});
+
+// Route stats nœuds avg price
+app.get('/api/marketplace/avg-price', (req, res) => {
+  const data = state.node.marketplace?.getAvgPriceByNodeType?.() ?? [];
+  res.json({ ok: true, result: data });
+});
 
 export { app, server, wss, state };
