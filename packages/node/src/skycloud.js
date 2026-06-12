@@ -29,8 +29,8 @@ import { TreasuryManager }from '../../financial/src/treasury.js';
 import { UserProfile, VerificationLevel } from '../../core/src/profile.js';
 import { i18n as skyI18n, I18nManager }   from '../../core/src/i18n.js';
 import { NodeManager }                     from './node_manager.js';
-import { ComputeMarketplace }              from '../../node/src/marketplace.js';
-import { GpuCpuMarketplaceService }        from '../../node/src/gpu_cpu.js';
+import { ComputeMarketplace }              from './marketplace.js';
+import { GpuCpuMarketplaceService }        from './gpu_cpu.js';
 
 // =====================================================
 // CONSTANTES
@@ -799,7 +799,6 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
-
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
@@ -898,7 +897,8 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-get id()              { return this.#id; }
+
+  get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -1130,8 +1130,7 @@ get id()              { return this.#id; }
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-
-  sendMessage(from, to, content, apiKey = null) {
+sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1241,7 +1240,8 @@ get id()              { return this.#id; }
 
   // ─── Génération ───────────────────────────────────────────────
 
-/**
+
+  /**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -1649,7 +1649,8 @@ get id()              { return this.#id; }
   }
 
   // ─── Web Hosting ──────────────────────────────────────────────
-/**
+
+ /**
    * Crée un site hébergé vide.
    *
    * Avantages automatiques dès la création :
@@ -2012,8 +2013,7 @@ get id()              { return this.#id; }
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-
-  /**
+/**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2062,7 +2062,8 @@ get id()              { return this.#id; }
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-/**
+
+  /**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
@@ -2088,6 +2089,10 @@ get id()              { return this.#id; }
   }
 
   get currentLanguage() { return this.#i18n.lang; }
+
+  /** Accesseurs publics pour server.js (EventEmitter relay). */
+  get gpuMarket()   { return this.#gpuMarket; }
+  get marketplace() { return this.#marketplace; }
 
   /**
    * Crédite directement le wallet (airdrops, rewards manuels).
@@ -2339,7 +2344,8 @@ get id()              { return this.#id; }
   #recordDreamCycleParticipation() { this.#userRewards.recordMessage?.(); }
 
   // ─── Status ───────────────────────────────────────────────────
-getStatus() {
+
+  getStatus() {
     return {
       id               : this.#id,
       state            : this.#state,
@@ -2527,7 +2533,7 @@ getStatus() {
       // ── GPU/CPU Market ────────────────────────────────────────
       'gpu_publish_offer'       : (nodeId, owner, pricePerHour, hours, tflops, opts) =>
           n.#gpuMarket.publishOffer(nodeId, owner, pricePerHour, hours, tflops ?? 0, 0.65, opts ?? {}),
-      'gpu_list_offers'         : ()         => n.#gpuMarket.listOffers?.() ?? [],
+      'gpu_list_offers'         : ()         => n.#gpuMarket.getAvailableOffers(),
       'gpu_rent'                : (offerId, renter, reputation, hours) =>
           n.#gpuMarket.rentNode?.(offerId, renter, reputation, hours),
       'gpu_complete_rental'     : (rentalId, owner) =>
@@ -2535,8 +2541,13 @@ getStatus() {
       'gpu_cancel_rental'       : (rentalId, renter) =>
           n.#gpuMarket.cancelRental?.(rentalId, renter),
       'gpu_get_active_rentals'  : userId     => n.#gpuMarket.getActiveRentals?.(userId) ?? [],
-      'gpu_get_stats'           : ()         => n.#gpuMarket.getStats?.() ?? {},
-      'gpu_check_hardware'      : nodeId     => n.#gpuMarket.checkHardware?.(nodeId) ?? {},
+      'gpu_get_stats'           : ()         => n.#gpuMarket.getDashboardStats?.(),
+      'gpu_check_hardware'      : nodeId     => n.#gpuMarket.checkNodeHardware?.(nodeId),
+      'get_gpu_catalog'         : ()         => n.#gpuMarket.getGpuCatalog(),
+      'get_gpu_avg_price'       : ()         => n.#gpuMarket.getAvgPriceByType(),
+      'get_gpu_ticker'          : ()         => n.#gpuMarket.getTickerData(),
+      'get_node_avg_price'      : ()         => n.#marketplace.getAvgPriceByNodeType?.() ?? [],
+      'get_node_ticker_data'    : ()         => n.#marketplace.getNodeTickerData?.() ?? {},
       // Internals (debug)
       getLoraEvoStatus          : () => n.#loraEvo?.getStatus(),
       getDreamCycleStats        : () => n.#dreamCycle?.getStats(),
