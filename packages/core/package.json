@@ -1,21 +1,28 @@
 {
   "name": "@skyainet/core",
   "version": "1.0.0",
+  "description": "SkyAInet Core Package — Rewards, Economics, Profile, i18n, Constitution",
   "type": "module",
-  "description": "SkyAInet Core — Rewards, Economics, Constitution PAEVF, Alignment Kernel",
   "main": "src/core.js",
   "exports": {
-    ".": "./src/core.js"
+    ".": "./src/core.js",
+    "./rewards": "./src/rewards.js",
+    "./economics": "./src/economics.js",
+    "./profile": "./src/profile.js",
+    "./i18n": "./src/i18n.js",
+    "./posi": "./src/posi.js",
+    "./node-types": "./src/node_types.js",
+    "./constitution": "./src/constitution.js",
+    "./alignment": "./src/alignment_kernel.js"
   },
-  "files": [
-    "src/core.js",
-    "src/rewards.js",
-    "src/economics.js",
-    "src/constitution.js",
-    "src/alignment_kernel.js"
-  ],
   "scripts": {
-    "check": "node --check src/core.js"
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
-  "license": "MIT"
+  "dependencies": {},
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
 }
