@@ -1,33 +1,48 @@
 {
   "name": "@skyainet/node",
   "version": "1.0.0",
+  "description": "SkyAInet Node Package — SkyCloud, Server, Gateway, Storage, Agentic",
   "type": "module",
-  "description": "SkyAInet Node — Nœud Souverain, Chat IA, LoRA, PoUW, Marketplace",
-  "main": "src/node.js",
-  "exports": {
-    ".": "./src/node.js"
+  "main": "src/server.js",
+  "bin": {
+    "skyainet": "src/start.js"
   },
-  "files": [
-    "src/skycloud.js",
-    "src/node.js",
-    "src/server.js",
-    "src/evolution_manager.js",
-    "src/lora_trainer.js",
-    "src/chat.js",
-    "src/node_types.js",
-    "src/node_communication.js",
-    "src/validator.js",
-    "src/marketplace.js",
-    "src/gpu_cpu.js",
-    "src/pouw.js"
-  ],
+  "exports": {
+    ".": "./src/server.js",
+    "./skycloud": "./src/skycloud.js",
+    "./start": "./src/start.js",
+    "./agentic": "./src/agentic.js",
+    "./storage": "./src/storage.js"
+  },
   "scripts": {
-    "check": "node --check src/node.js"
+    "start": "node src/start.js",
+    "dev": "node --watch src/start.js",
+    "daemon": "node src/start.js --daemon",
+    "build": "bun ../../build.js",
+    "build:linux": "bun ../../build.js --platform linux",
+    "build:macos": "bun ../../build.js --platform macos",
+    "build:windows": "bun ../../build.js --platform windows"
   },
   "dependencies": {
     "express": "^4.18.0",
+    "cors": "^2.8.5",
+    "compression": "^1.7.4",
+    "morgan": "^1.10.0",
     "jsonwebtoken": "^9.0.0",
-    "ws": "^8.0.0"
+    "ws": "^8.16.0",
+    "sharp": "^0.33.0",
+    "node-systray": "^2.0.0",
+    "@skyainet/core": "workspace:*",
+    "@skyainet/financial": "workspace:*",
+    "@skyainet/secure": "workspace:*",
+    "@skyainet/memory": "workspace:*",
+    "@skyainet/model": "workspace:*"
   },
-  "license": "MIT"
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "bun": ">=1.0.0"
+  }
 }
