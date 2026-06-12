@@ -56,10 +56,26 @@ export {
 // VERSION
 // ─────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────
+// PROFIL UTILISATEUR — Agrégateur AccountType + Réputation + PoSI
+// ─────────────────────────────────────────────────────────────────
+
+export { UserProfile, VerificationLevel }              from './profile.js';
+
+// ─────────────────────────────────────────────────────────────────
+// I18N — Traductions EN / FR / ES (125 clés)
+// ─────────────────────────────────────────────────────────────────
+
+export { i18n, I18nManager }                           from './i18n.js';
+
+// ─────────────────────────────────────────────────────────────────
+// VERSION
+// ─────────────────────────────────────────────────────────────────
+
 export const VERSION = '1.0.0';
 
 export const PACKAGE_INFO = Object.freeze({
-  name       : 'skyainet-core',
+  name       : '@skyainet/core',
   version    : VERSION,
   description: 'SkyAInet Core — Rewards, Economics, Constitution PAEVF, Alignment Kernel',
   modules    : [
