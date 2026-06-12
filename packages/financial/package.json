@@ -1,6 +1,7 @@
 {
   "name": "@skyainet/financial",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "SkyAInet Financial Package — Treasury, Liquidity, Wallet SKY Token",
   "type": "module",
   "main": "src/financial.js",
