@@ -28,6 +28,9 @@ import { SkyWallet }      from '../../financial/src/wallet.js';
 import { TreasuryManager }from '../../financial/src/treasury.js';
 import { UserProfile, VerificationLevel } from '../../core/src/profile.js';
 import { i18n as skyI18n, I18nManager }   from '../../core/src/i18n.js';
+import { NodeManager }                     from './node_manager.js';
+import { ComputeMarketplace }              from '../../node/src/marketplace.js';
+import { GpuCpuMarketplaceService }        from '../../node/src/gpu_cpu.js';
 
 // =====================================================
 // CONSTANTES
@@ -836,6 +839,9 @@ export class SkyCloud {
   #treasury;         // TreasuryManager — distribution globale (optionnel)
   #userProfile;      // UserProfile — profil agrégé de l'utilisateur
   #i18n;             // I18nManager — traductions partagées
+  #nodeManager;      // NodeManager — flotte multi-nœuds
+  #marketplace;      // ComputeMarketplace — location nœuds
+  #gpuMarket;        // GpuCpuMarketplaceService — GPU/CPU market
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -880,7 +886,10 @@ export class SkyCloud {
     this.#nodeEcon       = new NodeEconomics(AccountType.Free);
     this.#treasury       = null;
     this.#userProfile    = new UserProfile({ nodeEcon: this.#nodeEcon });
-    this.#i18n           = skyI18n;   // singleton partagé avec toutes les pages
+    this.#i18n           = skyI18n;
+    this.#nodeManager    = new NodeManager();
+    this.#marketplace    = new ComputeMarketplace();
+    this.#gpuMarket      = new GpuCpuMarketplaceService();
     this.#evolutionManager = null;
 
     this.peers = [];
@@ -889,8 +898,7 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-
-  get id()              { return this.#id; }
+get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -918,7 +926,8 @@ export class SkyCloud {
   }
 
   // ─── Initialisation ──────────────────────────────────────────
-async initEngine(weightsPath = null) {
+
+  async initEngine(weightsPath = null) {
     await this.#engine.load(weightsPath);
 
     // Connecter LoraEvo au moteur dès qu'il est prêt
@@ -1232,8 +1241,7 @@ async initEngine(weightsPath = null) {
 
   // ─── Génération ───────────────────────────────────────────────
 
-
-  /**
+/**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -1641,8 +1649,7 @@ async initEngine(weightsPath = null) {
   }
 
   // ─── Web Hosting ──────────────────────────────────────────────
-
-  /**
+/**
    * Crée un site hébergé vide.
    *
    * Avantages automatiques dès la création :
@@ -1842,7 +1849,8 @@ async initEngine(weightsPath = null) {
   }
 
   // ─── Stockage ─────────────────────────────────────────────────
-async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
+
+  async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
   async listFiles()             { return this.#storage.listFiles(); }
   async downloadFile(id)        { return this.#storage.retrieveFile(id); }
   async deleteFile(id)          { return this.#storage.deleteFile(id); }
@@ -2054,8 +2062,7 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-
-  /**
+/**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
@@ -2332,8 +2339,7 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
   #recordDreamCycleParticipation() { this.#userRewards.recordMessage?.(); }
 
   // ─── Status ───────────────────────────────────────────────────
-
-  getStatus() {
+getStatus() {
     return {
       id               : this.#id,
       state            : this.#state,
@@ -2497,6 +2503,40 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
       credit_wallet             : amount    => n.creditWallet(amount),
       // Treasury — distribution globale
       distribute_rewards        : (total, recipients) => n.#treasury?.distributeRewards(total, null, recipients ?? []),
+
+      // ── NodeManager — flotte multi-nœuds ─────────────────────
+      ...n.#nodeManager.apiHandlers(),
+
+      // ── Marketplace nœuds ─────────────────────────────────────
+      'mp_publish_offer'        : (nodeId, owner, pricePerHour, hours, opts) =>
+          n.#marketplace.publishOffer(nodeId, owner, pricePerHour, hours, 0, 0.50, opts ?? {}),
+      'mp_withdraw_offer'       : (offerId, owner) =>
+          n.#marketplace.withdrawOffer(offerId, owner),
+      'mp_list_offers'          : (filters)  => n.#marketplace.listOffers(filters ?? {}),
+      'mp_rent_node'            : (offerId, renter, reputation, hours) =>
+          n.#marketplace.rentNode(offerId, renter, reputation, hours),
+      'mp_complete_rental'      : (rentalId, owner) =>
+          n.#marketplace.completeRental(rentalId, owner),
+      'mp_cancel_rental'        : (rentalId, renter) =>
+          n.#marketplace.cancelRental(rentalId, renter),
+      'mp_get_active_rentals'   : userId     => n.#marketplace.getActiveRentalsForUser(userId),
+      'mp_get_owner_rentals'    : ownerId    => n.#marketplace.getActiveRentalsForOwner(ownerId),
+      'mp_get_stats'            : ()         => n.#marketplace.getMarketplaceStats?.() ?? {},
+      'mp_get_history'          : ()         => n.#marketplace.getRentalHistory?.() ?? [],
+
+      // ── GPU/CPU Market ────────────────────────────────────────
+      'gpu_publish_offer'       : (nodeId, owner, pricePerHour, hours, tflops, opts) =>
+          n.#gpuMarket.publishOffer(nodeId, owner, pricePerHour, hours, tflops ?? 0, 0.65, opts ?? {}),
+      'gpu_list_offers'         : ()         => n.#gpuMarket.listOffers?.() ?? [],
+      'gpu_rent'                : (offerId, renter, reputation, hours) =>
+          n.#gpuMarket.rentNode?.(offerId, renter, reputation, hours),
+      'gpu_complete_rental'     : (rentalId, owner) =>
+          n.#gpuMarket.completeRental?.(rentalId, owner),
+      'gpu_cancel_rental'       : (rentalId, renter) =>
+          n.#gpuMarket.cancelRental?.(rentalId, renter),
+      'gpu_get_active_rentals'  : userId     => n.#gpuMarket.getActiveRentals?.(userId) ?? [],
+      'gpu_get_stats'           : ()         => n.#gpuMarket.getStats?.() ?? {},
+      'gpu_check_hardware'      : nodeId     => n.#gpuMarket.checkHardware?.(nodeId) ?? {},
       // Internals (debug)
       getLoraEvoStatus          : () => n.#loraEvo?.getStatus(),
       getDreamCycleStats        : () => n.#dreamCycle?.getStats(),
@@ -2504,4 +2544,3 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
     };
   }
 }
-   
