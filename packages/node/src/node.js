@@ -119,10 +119,28 @@ export {
 // VERSION
 // ─────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────
+// TRAY — Icône système (Windows / macOS / Linux)
+// ─────────────────────────────────────────────────────────────────
+
+export { SkyTray }                                     from '../tray.js';
+
+// ─────────────────────────────────────────────────────────────────
+// AUTOSTART — Démarrage automatique au boot
+// ─────────────────────────────────────────────────────────────────
+
+export { Autostart }                                   from '../autostart.js';
+
+// ─────────────────────────────────────────────────────────────────
+// UPDATER — Auto-update silencieux du binaire
+// ─────────────────────────────────────────────────────────────────
+
+export { SkyUpdater }                                  from '../updater.js';
+
 export const VERSION = '1.0.0';
 
 export const PACKAGE_INFO = Object.freeze({
-  name       : 'skyainet-node',
+  name       : '@skyainet/node',
   version    : VERSION,
   description: 'SkyAInet Node Package — Nœud Souverain, Chat IA, PoUW, Marketplace, Évolution',
   modules    : [
