@@ -32,6 +32,94 @@ const PERSIST_INTERVAL_MS  = 60_000;
 const EXPIRE_CHECK_INTERVAL= 60_000;
 
 // ─────────────────────────────────────────────────────────────────
+// CATALOGUE GPU STANDARDISÉ
+// Référence pour l'UI marketplace.html — formulaire "Offer GPU"
+// Compatible avec HardwareAvailabilityChecker (NVIDIA/AMD/CPU)
+// ─────────────────────────────────────────────────────────────────
+export const GPU_CATALOG = Object.freeze([
+    {
+        id         : 'h100-sxm',
+        label      : 'GPU High-End — H100 SXM (80 GB)',
+        type       : 'NVIDIA',
+        model      : 'H100 SXM',
+        vramGB     : 80,
+        tflopsRef  : 756,
+        refPriceSky: 0.12,   // SKY / TFLOPS / heure — référence marché
+        tier       : 'enterprise',
+    },
+    {
+        id         : 'a100-80gb',
+        label      : 'GPU High-End — A100 (80 GB)',
+        type       : 'NVIDIA',
+        model      : 'A100 80GB',
+        vramGB     : 80,
+        tflopsRef  : 312,
+        refPriceSky: 0.09,
+        tier       : 'enterprise',
+    },
+    {
+        id         : 'a100-40gb',
+        label      : 'GPU High-End — A100 (40 GB)',
+        type       : 'NVIDIA',
+        model      : 'A100 40GB',
+        vramGB     : 40,
+        tflopsRef  : 312,
+        refPriceSky: 0.085,
+        tier       : 'enterprise',
+    },
+    {
+        id         : 'rtx4090',
+        label      : 'GPU Mid-Range — RTX 4090 (24 GB)',
+        type       : 'NVIDIA',
+        model      : 'RTX 4090',
+        vramGB     : 24,
+        tflopsRef  : 82,
+        refPriceSky: 0.06,
+        tier       : 'prosumer',
+    },
+    {
+        id         : 'rtx3090',
+        label      : 'GPU Mid-Range — RTX 3090 (24 GB)',
+        type       : 'NVIDIA',
+        model      : 'RTX 3090',
+        vramGB     : 24,
+        tflopsRef  : 35,
+        refPriceSky: 0.04,
+        tier       : 'prosumer',
+    },
+    {
+        id         : 'rtx3080',
+        label      : 'GPU Entry — RTX 3080 (10 GB)',
+        type       : 'NVIDIA',
+        model      : 'RTX 3080',
+        vramGB     : 10,
+        tflopsRef  : 30,
+        refPriceSky: 0.03,
+        tier       : 'entry',
+    },
+    {
+        id         : 'amd-mi300',
+        label      : 'GPU AMD — MI300X (192 GB)',
+        type       : 'AMD',
+        model      : 'MI300X',
+        vramGB     : 192,
+        tflopsRef  : 1307,
+        refPriceSky: 0.15,
+        tier       : 'enterprise',
+    },
+    {
+        id         : 'cpu-cluster',
+        label      : 'CPU Cluster — 128 cores',
+        type       : 'CPU',
+        model      : 'CPU Cluster',
+        vramGB     : 0,
+        tflopsRef  : 4,
+        refPriceSky: 0.015,
+        tier       : 'entry',
+    },
+]);
+
+// ─────────────────────────────────────────────────────────────────
 // HARDWARE AVAILABILITY CHECKER
 //
 // Hiérarchie de détection : NVIDIA → AMD ROCm → CPU
@@ -329,6 +417,80 @@ export class GpuCpuMarketplaceService extends EventEmitter {
   getActiveRentalsForUser(userId) { return this.#market.getActiveRentalsForUser(userId); }
   getActiveRentalsForOwner(id)    { return this.#market.getActiveRentalsForOwner(id); }
   getRentalHistory(limit)         { return this.#market.getRentalHistory(limit); }
+
+  /** Retourne le catalogue standardisé des types GPU pour l'UI. */
+  getGpuCatalog() {
+    return GPU_CATALOG;
+  }
+
+  /**
+   * Calcule le prix moyen par TFLOPS/heure groupé par type GPU.
+   * Utilisé par le Price Chart et le ticker navbar de marketplace.html.
+   */
+  getAvgPriceByType() {
+    const offers  = this.#market.getAvailableOffers();
+    const catalog = GPU_CATALOG;
+
+    return catalog.map(gpu => {
+        // Chercher les offres correspondant à ce modèle GPU dans les tags/description
+        const matching = offers.filter(o =>
+            o.tags?.includes(gpu.id) ||
+            o.description?.toLowerCase().includes(gpu.model.toLowerCase())
+        );
+
+        const avgPrice = matching.length > 0
+            ? matching.reduce((s, o) => s + (o.pricePerHour / Math.max(1, o.tflops)), 0) / matching.length
+            : gpu.refPriceSky; // fallback sur prix de référence
+
+        const totalTflops = matching.reduce((s, o) => s + (o.tflops ?? 0), 0);
+
+        return {
+            gpuId        : gpu.id,
+            label        : gpu.label,
+            model        : gpu.model,
+            tier         : gpu.tier,
+            avgPriceSky  : +avgPrice.toFixed(4),
+            refPriceSky  : gpu.refPriceSky,
+            totalTflops,
+            offersCount  : matching.length,
+            // Variation vs prix de référence (+ haut = plus cher que réf)
+            variation    : matching.length > 0
+                ? +((avgPrice - gpu.refPriceSky) / gpu.refPriceSky * 100).toFixed(1)
+                : 0,
+        };
+    });
+  }
+
+  /**
+   * Données formatées pour le ticker navbar de marketplace.html.
+   * Retourne prix moyen, variation, TFLOPS disponibles.
+   */
+  getTickerData() {
+    const byType      = this.getAvgPriceByType();
+    const stats       = this.#market.getMarketStats();
+    const totalTflops = byType.reduce((s, t) => s + t.totalTflops, 0);
+
+    // Top 3 items pour le ticker
+    const tickerItems = byType
+        .filter(t => t.offersCount > 0 || true) // afficher même sans offres (prix réf)
+        .slice(0, 5)
+        .map(t => ({
+            label      : t.model,
+            price      : t.avgPriceSky,
+            variation  : t.variation,
+            isUp       : t.variation >= 0,
+        }));
+
+    return {
+        tickerItems,
+        totalTflops  : +totalTflops.toFixed(0),
+        avgGlobalPrice: byType.length
+            ? +(byType.reduce((s,t) => s + t.avgPriceSky, 0) / byType.length).toFixed(4)
+            : 0,
+        activeOffers : stats.activeOffers,
+        activeRentals: stats.activeRentals,
+    };
+  }
 
   /**
    * Tableau de bord enrichi incluant les métriques du marché
