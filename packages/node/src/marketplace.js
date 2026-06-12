@@ -365,6 +365,58 @@ export class ComputeMarketplace {
   getActiveRentalsForOwner(ownerId) { return [...this.#rentals.values()].filter(r => r.owner === ownerId); }
   getRentalHistory(limit = 100)     { return this.#history.slice(-limit); }
 
+  /**
+   * Prix moyen par type de nœud (Mini/Light/Full…).
+   * Utilisé par le Price Chart de marketplace.html.
+   */
+  getAvgPriceByNodeType() {
+    const NODE_TYPES  = ['Mini','Light','Full','Storage','Compute','Mixed','Sentinel','DreamWeaver','Validator'];
+    const offers      = [...this.#offers.values()].filter(o => o.isActive);
+    // Référence marché si pas d'offres
+    const REF_PRICE   = { Mini:0, Light:0.8, Full:2.5, Storage:1.2,
+                          Compute:3.5, Mixed:2.0, Sentinel:1.8,
+                          DreamWeaver:4.5, Validator:6.0 };
+
+    return NODE_TYPES.map(type => {
+        const matching = offers.filter(o =>
+            o.tags?.includes(type) ||
+            o.description?.toLowerCase().includes(type.toLowerCase())
+        );
+        const avg = matching.length > 0
+            ? matching.reduce((s, o) => s + o.pricePerHour, 0) / matching.length
+            : REF_PRICE[type] ?? 0;
+
+        return {
+            type,
+            avgPriceSky  : +avg.toFixed(2),
+            refPriceSky  : REF_PRICE[type] ?? 0,
+            offersCount  : matching.length,
+            totalTflops  : matching.reduce((s, o) => s + (o.tflops ?? 0), 0),
+            variation    : matching.length > 0
+                ? +((avg - (REF_PRICE[type] ?? avg)) / Math.max(REF_PRICE[type] ?? avg, 0.01) * 100).toFixed(1)
+                : 0,
+        };
+    });
+  }
+
+  /**
+   * Données ticker navbar pour les nœuds.
+   */
+  getNodeTickerData() {
+    const byType      = this.getAvgPriceByNodeType();
+    const stats       = this.getMarketStats();
+    return {
+        tickerItems  : byType.slice(0,5).map(t => ({
+            label    : t.type,
+            price    : t.avgPriceSky,
+            variation: t.variation,
+            isUp     : t.variation >= 0,
+        })),
+        activeOffers : stats.activeOffers,
+        totalVolume  : stats.totalVolumeSky,
+    };
+  }
+
   getOfferStats(offerId) {
     const offer = this.#getOffer(offerId);
     return {
