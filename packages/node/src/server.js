@@ -1062,6 +1062,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 // =====================================================
 // DÉMARRAGE
 // =====================================================
+
 // ─── Route générique apiHandlers ──────────────────────────────
 // Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
 // Complète les routes spécifiques ci-dessus.
@@ -1189,7 +1190,6 @@ app.use(express.static(_root, {
 // Génère tous les PNG depuis icon-source.svg au premier démarrage.
 // Aucun PNG à committer sur Github — juste le SVG source.
 // Si le design change → supprimer les PNG → ils se régénèrent.
-
 const _ICON_SIZES = [
     { size: 72,  name: 'icon-72.png'   },
     { size: 96,  name: 'icon-96.png'   },
@@ -1340,6 +1340,68 @@ app.get('/api/marketplace/ticker', async (req, res) => {
     apiError(res, 500, 'TICKER_ERROR', e.message);
   }
 });
+
+// ── Thevie — déploiement orchestré via Server-Sent Events ──────
+// Le client (node.html) se connecte à cette route et reçoit
+// les étapes de déploiement en temps réel.
+app.get('/api/node/deploy-thevie', async (req, res) => {
+  const { type, alias, port, role } = req.query;
+
+  res.setHeader('Content-Type',                'text/event-stream');
+  res.setHeader('Cache-Control',               'no-cache');
+  res.setHeader('Connection',                  'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+
+  const send = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const result = await state.node.nodeManager.deployWithThevie({
+      type,
+      alias : alias || undefined,
+      port  : port  ? parseInt(port) : undefined,
+      role  : role  || undefined,
+      onStep: (step) => send({ event: 'step', ...step }),
+    });
+    send({ event: 'done', report: result.report, node: result.node.toJSON() });
+  } catch (err) {
+    send({ event: 'error', message: err.message, code: err.code ?? 'DEPLOY_ERROR' });
+  } finally {
+    res.end();
+  }
+});
+
+// ── Thevie — surveillance périodique (Gateway + Keys) ──────────
+if (state.node) {
+  // Monitoring Gateway toutes les 30 secondes
+  setInterval(() => {
+    try {
+      const result = state.node.thevieMonitorGateway?.();
+      if (result?.actions?.length > 0) {
+        broadcastWs('thevie:gateway_action', { actions: result.actions, anomalies: result.anomalies });
+        console.info('[Thevie] Gateway:', result.actions.join(' | '));
+      }
+    } catch { /* silencieux */ }
+  }, 30_000).unref();
+
+  // Monitoring Keys toutes les 5 minutes
+  setInterval(() => {
+    try {
+      const result = state.node.thevieMonitorKeys?.();
+      if (result?.renewed?.length > 0 || result?.revoked?.length > 0) {
+        broadcastWs('thevie:keys_action', result);
+        console.info(`[Thevie] Keys — renewed: ${result.renewed.length} · revoked: ${result.revoked.length}`);
+      }
+    } catch { /* silencieux */ }
+  }, 300_000).unref();
+
+  // Thevie Genesis au démarrage
+  try {
+    state.node.thevieValidatorGenesis?.();
+  } catch { /* silencieux si pas encore disponible */ }
+}
 
 // Route catalogue GPU pour marketplace.html
 app.get('/api/gpu/catalog', (req, res) => {
