@@ -747,7 +747,6 @@ function _inferContentType(path) {
 //   ✦ Support statique + backend léger (assets, SPA, API simple)
 //   ✦ Pas de censure — décentralisé sur le réseau SkyAInet
 // =====================================================
-
 class HostedSite {
   constructor({ id, name, domain, owner, createdAt = Date.now() }) {
     this.id            = id;
@@ -799,6 +798,7 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
+
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
@@ -1027,8 +1027,7 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-
-  enableGateway(port = 8080) {
+enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1130,7 +1129,8 @@ export class SkyCloud {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-sendMessage(from, to, content, apiKey = null) {
+
+  sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1455,8 +1455,7 @@ sendMessage(from, to, content, apiKey = null) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-
-  /**
+/**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -1650,7 +1649,7 @@ sendMessage(from, to, content, apiKey = null) {
 
   // ─── Web Hosting ──────────────────────────────────────────────
 
- /**
+  /**
    * Crée un site hébergé vide.
    *
    * Avantages automatiques dès la création :
@@ -1849,9 +1848,8 @@ sendMessage(from, to, content, apiKey = null) {
     site.lastHit      = Date.now();
   }
 
-  // ─── Stockage ─────────────────────────────────────────────────
-
-  async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
+  // ─── Stockage ────────────────────────────────────────────────
+async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
   async listFiles()             { return this.#storage.listFiles(); }
   async downloadFile(id)        { return this.#storage.retrieveFile(id); }
   async deleteFile(id)          { return this.#storage.deleteFile(id); }
@@ -2013,7 +2011,8 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-/**
+
+  /**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2091,8 +2090,112 @@ sendMessage(from, to, content, apiKey = null) {
   get currentLanguage() { return this.#i18n.lang; }
 
   /** Accesseurs publics pour server.js (EventEmitter relay). */
-  get gpuMarket()   { return this.#gpuMarket; }
-  get marketplace() { return this.#marketplace; }
+  get gpuMarket()    { return this.#gpuMarket; }
+  get marketplace()  { return this.#marketplace; }
+  get nodeManager()  { return this.#nodeManager; }
+
+  /**
+   * Thevie Validator Genesis — appelé au démarrage de server.js.
+   * Crée le nœud fondateur si inexistant, le recharge sinon.
+   * Persisté dans data/thevie_genesis.json.
+   */
+  thevieValidatorGenesis() {
+    const genesis = this.#nodeManager.getGenesisNode();
+    console.info(`[Thevie] Genesis Validator ready — stake: ${genesis.stakeAmount} SKY · tier: ${genesis.reputationTier}`);
+    return genesis;
+  }
+
+  // ── Thevie — surveillance Gateway (arrière-plan) ─────────────
+
+  /**
+   * Analyse les logs de trafic Gateway et détecte les anomalies.
+   * Appelé automatiquement toutes les 30s par server.js.
+   * @returns {{ anomalies: object[], actions: string[] }}
+   */
+  thevieMonitorGateway() {
+    const logs    = this.#gatewayTrafficLogs.slice(-100);
+    const now     = Date.now();
+    const window  = 60_000; // 1 minute glissante
+    const recent  = logs.filter(l => now - l.ts < window);
+    const anomalies = [];
+    const actions   = [];
+
+    // Détection pic de trafic (> 50 req/min)
+    if (recent.length > 50) {
+      anomalies.push({ type: 'traffic_spike', count: recent.length, window: '1min' });
+      actions.push(`Traffic spike detected (${recent.length} req/min) — monitoring`);
+    }
+
+    // Détection tentatives d'injection (paths suspects)
+    const injectionPatterns = [/\.\.\//,/exec\(/,/<script/i,/union.*select/i];
+    const suspicious = recent.filter(l => injectionPatterns.some(p => p.test(l.path ?? '')));
+    if (suspicious.length > 0) {
+      anomalies.push({ type: 'injection_attempt', count: suspicious.length, paths: suspicious.map(l => l.path) });
+      // Auto-désactiver l'endpoint suspect si > 3 tentatives
+      if (suspicious.length > 3) {
+        const ep = suspicious[0]?.path?.split('/')[1];
+        if (ep && this.#exposedEndpoints.has(ep)) {
+          this.#exposedEndpoints.delete(ep);
+          actions.push(`Thevie auto-disabled endpoint "/${ep}" — injection attempts detected`);
+        }
+      }
+    }
+
+    // Taux d'erreur > 30%
+    const errors   = recent.filter(l => l.statusCode >= 500).length;
+    const errorPct = recent.length > 0 ? (errors / recent.length) * 100 : 0;
+    if (errorPct > 30) {
+      anomalies.push({ type: 'high_error_rate', rate: `${errorPct.toFixed(1)}%`, errors });
+      actions.push(`High error rate ${errorPct.toFixed(1)}% — Thevie alerted`);
+    }
+
+    // Logger l'intervention de Thevie si actions
+    if (actions.length > 0) {
+      this.logTraffic({ method: 'THEVIE', path: '/monitor', statusCode: 200, latencyMs: 0, keyName: 'thevie-genesis', thevieAction: actions });
+    }
+
+    return { anomalies, actions, timestamp: now };
+  }
+
+  // ── Thevie — surveillance Keys (arrière-plan) ────────────────
+
+  /**
+   * Surveille les clés API et régénère/révoque selon les règles Thevie.
+   * @returns {{ renewed: string[], revoked: string[], monitored: number }}
+   */
+  thevieMonitorKeys() {
+    const keys    = this.listApiKeys();
+    const now     = Date.now();
+    const renewed = [];
+    const revoked = [];
+
+    for (const k of keys) {
+      // Révocation si expirée
+      if (k.expiresAt && now > k.expiresAt) {
+        this.revokeApiKey(k.key);
+        revoked.push(k.name);
+        continue;
+      }
+
+      // Renouvellement auto si expire dans < 7 jours
+      const sevenDays = 7 * 24 * 3600_000;
+      if (k.expiresAt && k.expiresAt - now < sevenDays) {
+        try {
+          this.rotateApiKey(k.key);
+          renewed.push(k.name);
+        } catch { /* clé déjà révoquée */ }
+        continue;
+      }
+
+      // Détection utilisation anormale (> 1000 appels sans lastUsed récent)
+      if (k.requestCount > 1000 && k.lastUsed && (now - k.lastUsed) < 60_000) {
+        this.revokeApiKey(k.key);
+        revoked.push(k.name);
+      }
+    }
+
+    return { renewed, revoked, monitored: keys.length, timestamp: now };
+  }
 
   /**
    * Crédite directement le wallet (airdrops, rewards manuels).
@@ -2264,8 +2367,7 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── Prélèvement automatique (privé) ──────────────────────────
-
-  /**
+/**
    * Planifie le prélèvement mensuel automatique pour un abonnement.
    * Utilise setInterval avec 30 jours (en production : persister la date
    * dans ZipMemory pour survivre aux redémarrages).
@@ -2512,6 +2614,16 @@ sendMessage(from, to, content, apiKey = null) {
 
       // ── NodeManager — flotte multi-nœuds ─────────────────────
       ...n.#nodeManager.apiHandlers(),
+
+      // ── Thevie — déploiement orchestré ───────────────────────
+      'thevie_deploy'           : (type, alias, port, role) =>
+          n.#nodeManager.deployWithThevie({ type, alias, port, role }),
+      'thevie_genesis'          : ()         => n.thevieValidatorGenesis(),
+      'thevie_monitor_gateway'  : ()         => n.thevieMonitorGateway(),
+      'thevie_monitor_keys'     : ()         => n.thevieMonitorKeys(),
+      'thevie_staking_stats'    : ()         => n.#nodeManager.getStakingPool().getStats(),
+      'thevie_distribute'       : totalSky   => n.#nodeManager.distributeStakingRewards(totalSky),
+      'thevie_staking_history'  : ()         => n.#nodeManager.getStakingPool().getDistributionHistory(),
 
       // ── Marketplace nœuds ─────────────────────────────────────
       'mp_publish_offer'        : (nodeId, owner, pricePerHour, hours, opts) =>
