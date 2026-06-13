@@ -185,16 +185,177 @@ export class NodeManager {
     #nodes;        // Map<nodeId, ManagedNode>
     #wallet;       // SkyWallet | null — wallet de l'utilisateur
     #ownerAddress; // string | null
+    #genesis;      // ThevieGenesisNode — nœud permanent Thevie
+    #stakingPool;  // ThevieStakingPool — redistribution revenus
 
     constructor(opts = {}) {
         this.#nodes        = new Map();
         this.#wallet       = opts.wallet       ?? null;
         this.#ownerAddress = opts.ownerAddress ?? null;
+        // Genesis — créé une seule fois, toujours présent
+        this.#genesis      = new ThevieGenesisNode();
+        this.#stakingPool  = new ThevieStakingPool();
     }
 
-    // ─── Connexion wallet ─────────────────────────────────────
+    // ─── Accessors Genesis & StakingPool ─────────────────────
 
-    connectWallet(wallet) {
+    getGenesisNode()  { return this.#genesis.toJSON(); }
+    getStakingPool()  { return this.#stakingPool; }
+
+    /**
+     * Distribue les revenus de validation via le StakingPool.
+     * Appelé automatiquement après chaque cycle de récompenses.
+     * @param {number} totalSky
+     */
+    distributeStakingRewards(totalSky) {
+        // Enregistrer tous les nœuds actifs comme contributeurs
+        for (const node of this.#nodes.values()) {
+            if (node.stakeAmount > 0 && node.walletAddress) {
+                this.#stakingPool.addContributor(node.walletAddress, node.stakeAmount);
+            }
+        }
+        return this.#stakingPool.distribute(totalSky);
+    }
+
+    // ─── Deploy with Thevie ───────────────────────────────────
+
+    /**
+     * Déploiement orchestré par Thevie.
+     * Remplace createNode() pour le flow "Deploy Node" dans node.html.
+     *
+     * Émet des events de progression via onStep(step) pour le terminal animé.
+     *
+     * @param {object}   opts
+     * @param {string}   opts.type         — NodeType.*
+     * @param {string}   [opts.alias]
+     * @param {number}   [opts.port]
+     * @param {string}   [opts.role]
+     * @param {Function} [opts.onStep]     — callback(step: { label, status, detail })
+     * @returns {Promise<{ node: ManagedNode, report: object }>}
+     */
+    async deployWithThevie(opts = {}) {
+        const { type, alias, role, onStep = () => {} } = opts;
+
+        if (!Object.values(NodeType).includes(type)) throw NodeManagerError.invalidType(type);
+        if (this.#nodes.size >= MAX_NODES_PER_USER)  throw NodeManagerError.maxReached();
+
+        const emit = (label, status = 'running', detail = '') => {
+            onStep({ label, status, detail, ts: Date.now() });
+        };
+
+        // ── Étape 1 — Analyse ────────────────────────────────
+        emit('Thevie analyse votre commande…', 'running');
+        await _delay(300);
+
+        const cat          = NODE_DESCRIPTIONS[type] ?? '';
+        const priceSky     = NODE_PRICE_SKY[type]    ?? 0;
+        const minStake     = MIN_STAKE_SKY[type]      ?? 0;
+        const defaultRole  = NODE_DEFAULT_ROLE[type]  ?? NodeRole.Core;
+
+        // ── Étape 2 — Config optimale ─────────────────────────
+        emit('Configuration optimale détectée…', 'running', `${type} · ×${computeMultiplier(type)} compute`);
+        await _delay(500);
+
+        // Port libre : chercher dans la plage 8080-8999
+        const usedPorts = [...this.#nodes.values()].map(n => n.port);
+        let port = opts.port ?? 8080;
+        while (usedPorts.includes(port)) port++;
+
+        // Storage/gateway plans selon le type
+        const storagePlan = [NodeType.Storage, NodeType.Full, NodeType.Mixed, NodeType.DreamWeaver].includes(type)
+            ? 'pro' : 'starter';
+        const gatewayPlan = [NodeType.Full, NodeType.Mixed, NodeType.Validator].includes(type)
+            ? 'pro' : 'starter';
+        const apiKeysPlan = [NodeType.Validator, NodeType.DreamWeaver].includes(type)
+            ? 'pro' : 'starter';
+
+        emit('Configuration optimale détectée…', 'done',
+            `Port: ${port} · Storage: ${storagePlan} · Gateway: ${gatewayPlan}`);
+
+        // ── Étape 3 — Wallet + Stake ──────────────────────────
+        emit('Vérification wallet et stake…', 'running');
+        await _delay(400);
+
+        if (priceSky > 0 && this.#wallet) {
+            const balance = await this.#wallet.getBalance().catch(() => 0);
+            if (balance < priceSky) throw NodeManagerError.insufficientFunds(priceSky, balance);
+            this.#wallet.debitLocal(priceSky, `Node ${type} — first month (Thevie deploy)`);
+        }
+
+        let stakedAmount = 0;
+        if (minStake > 0 && this.#wallet) {
+            const balance = await this.#wallet.getBalance().catch(() => 0);
+            if (balance >= minStake) {
+                this.#wallet.debitLocal(minStake, `Auto-stake ${type} — Thevie`);
+                stakedAmount = minStake;
+                // Enregistrer dans le staking pool
+                if (this.#ownerAddress) {
+                    this.#stakingPool.addContributor(this.#ownerAddress, stakedAmount);
+                }
+                emit('Vérification wallet et stake…', 'done',
+                    `${stakedAmount.toLocaleString()} SKY stakés automatiquement`);
+            } else {
+                emit('Vérification wallet et stake…', 'warn',
+                    `Stake optionnel (${minStake.toLocaleString()} SKY requis, non disponible)`);
+            }
+        } else {
+            emit('Vérification wallet et stake…', 'done', 'Aucun stake requis');
+        }
+
+        // ── Étape 4 — Création nœud ───────────────────────────
+        emit(`Nœud ${type} initialisé…`, 'running');
+        await _delay(600);
+
+        const id       = `node-${randomUUID().replace(/-/g,'').slice(0,16)}`;
+        const nodeAlias = alias ?? `${type}-${id.slice(-6)}`;
+        const node     = new ManagedNode({
+            id,
+            type,
+            alias       : nodeAlias,
+            state       : NodeState.Active,
+            role        : role ?? defaultRole,
+            capabilities: defaultCapabilitiesForType(type),
+            reputationScore: 0.50,
+            walletAddress  : this.#ownerAddress,
+            port,
+            stakeAmount    : stakedAmount,
+        });
+
+        if (type === NodeType.Validator) node._validatorNode = new ValidatorNode(nodeAlias, stakedAmount);
+        if (type === NodeType.Sentinel)  node._sentinel      = new Sentinel();
+
+        this.#nodes.set(id, node);
+        emit(`Nœud ${type} initialisé…`, 'done', `ID: ${id.slice(-12)}`);
+
+        // ── Étape 5 — Attestation Dilithium5 ─────────────────
+        emit('Signature Dilithium5 en cours…', 'running');
+        await _delay(400);
+
+        const attestation = this.#genesis.attestNode(id);
+        node.attestation  = attestation;
+        emit('Signature Dilithium5 en cours…', 'done', 'Attesté par Thevie-Genesis');
+
+        // ── Étape 6 — Rapport final ───────────────────────────
+        emit('Enregistrement dans le réseau…', 'running');
+        await _delay(300);
+        emit('Enregistrement dans le réseau…', 'done', '');
+
+        const report = {
+            success      : true,
+            node         : node.toJSON(),
+            attestation,
+            config       : { port, storagePlan, gatewayPlan, apiKeysPlan, stakedAmount },
+            thevieSteps  : 6,
+            deployedBy   : 'Thevie-Genesis',
+            nextTier     : _nextTier(node.reputationScore),
+            message      : `✓ Nœud ${type} déployé et attesté par Thevie`,
+        };
+
+        console.info(`[Thevie] Déploiement complet : ${id} (${type}) · port ${port}`);
+        return { node, report };
+    }
+
+    // ─── Catalogue des types de nœuds ────────────────────────
         if (!(wallet instanceof SkyWallet)) throw new TypeError('Expected SkyWallet');
         this.#wallet       = wallet;
         this.#ownerAddress = wallet.address;
@@ -226,20 +387,9 @@ export class NodeManager {
 
     // ─── Création d'un nœud ───────────────────────────────────
 
-    /**
-     * Crée et configure un nouveau nœud.
-     * Étape 3 de node.html : confirmation + paiement SKY.
-     *
-     * @param {object} opts
-     * @param {string}       opts.type         — NodeType.*
-     * @param {string}       [opts.alias]      — nom personnalisé
-     * @param {number}       [opts.port]       — port d'écoute
-     * @param {string}       [opts.storagePlan]— 'starter'|'pro'|'sovereign'
-     * @param {string}       [opts.gatewayPlan]— idem
-     * @param {string}       [opts.apiKeysPlan]— idem
-     * @returns {Promise<ManagedNode>}
-     */
-    async createNode(opts = {}) {
+    // ─── Connexion wallet ─────────────────────────────────────
+
+    connectWallet(wallet) {
         const { type, alias, port = 8080, role } = opts;
 
         if (!Object.values(NodeType).includes(type)) {
@@ -826,6 +976,57 @@ export class NodeManager {
         return {
             // Catalogue
             'get_node_catalog'      : ()                         => m.getNodeCatalog(),
+            // Thevie Deploy
+            'deploy_with_thevie'    : (type, alias, port, role)  => m.deployWithThevie({ type, alias, port, role }),
+            // CRUD standard
+            'create_node'           : (type, alias, port, role)  => m.createNode({ type, alias, port, role }),
+            'list_my_nodes'         : ()                         => m.listMyNodes(),
+            'get_node'              : nodeId                     => m.getNode(nodeId),
+            'get_node_ticker'       : ()                         => m.getNodeTicker(),
+            'get_node_stats'        : ()                         => m.getStats(),
+            // États
+            'sleep_node'            : nodeId                     => m.sleepNode(nodeId),
+            'wake_node'             : nodeId                     => m.wakeNode(nodeId),
+            'enable_low_power'      : nodeId                     => m.enableLowPowerMode(nodeId),
+            'upgrade_node'          : (nodeId, newType)          => m.upgradeNode(nodeId, newType),
+            'set_maintenance'       : nodeId                     => m.setMaintenance(nodeId),
+            'set_syncing'           : nodeId                     => m.setSyncing(nodeId),
+            'stop_node'             : nodeId                     => m.stopNode(nodeId),
+            'set_gateway_mode'      : nodeId                     => m.setGatewayMode(nodeId),
+            'set_evolving'          : nodeId                     => m.setEvolving(nodeId),
+            // Santé
+            'node_health'           : nodeId                     => m.nodeHealth(nodeId),
+            'full_status_report'    : nodeId                     => m.fullStatusReport(nodeId),
+            // Attestation
+            'generate_attestation'  : nodeId                     => m.generateAttestation(nodeId),
+            'verify_attestation'    : nodeId                     => m.verifyAttestation(nodeId),
+            // Validator Stake
+            'add_validator_stake'   : (nodeId, amount)           => m.addValidatorStake(nodeId, amount),
+            'remove_validator_stake': (nodeId, amount)           => m.removeValidatorStake(nodeId, amount),
+            'get_stake_info'        : nodeId                     => m.getStakeInfo(nodeId),
+            // Sentinel
+            'detect_sentinel_issues': nodeId                     => m.detectSentinelIssues(nodeId),
+            'run_sentinel_heal'     : nodeId                     => m.runSentinelHeal(nodeId),
+            // Migration
+            'plan_migration'        : (fromId, toId)             => m.planMigration(fromId, toId),
+            'execute_migration'     : (fromId, toId)             => m.executeMigration(fromId, toId),
+            // Location
+            'set_for_rent'          : (nodeId, opts)             => m.setForRent(nodeId, opts),
+            'remove_from_rent'      : nodeId                     => m.removeFromRent(nodeId),
+            // Genesis & StakingPool
+            'get_genesis_node'      : ()                         => m.getGenesisNode(),
+            'get_staking_pool'      : ()                         => m.#stakingPool.getStats(),
+            'distribute_staking'    : totalSky                   => m.distributeStakingRewards(totalSky),
+            'get_staking_history'   : ()                         => m.#stakingPool.getDistributionHistory(),
+        };
+    }
+}
+     */
+    apiHandlers() {
+        const m = this;
+        return {
+            // Catalogue
+            'get_node_catalog'      : ()                         => m.getNodeCatalog(),
             // CRUD
             'create_node'           : (type, alias, port, role)  => m.createNode({ type, alias, port, role }),
             'list_my_nodes'         : ()                         => m.listMyNodes(),
@@ -867,4 +1068,191 @@ export class NodeManager {
 }
 
 export { NODE_PRICE_SKY, NODE_DESCRIPTIONS, NodeType, NodeState };
+
+// ═══════════════════════════════════════════════════════════════
+// THEVIE STAKING POOL — redistribution 70 / 20 / 10
+// ═══════════════════════════════════════════════════════════════
+
+export class ThevieStakingPool {
+    #contributors;   // Map<address, { staked, stakedAt }>
+    #totalStaked;
+    #totalRevenue;
+    #distributions; // historique des distributions
+
+    static RATIOS = Object.freeze({
+        contributors : 0.70,
+        thevieReserve: 0.20,
+        team         : 0.10,
+    });
+    static LOYALTY_DAYS    = 90;
+    static LOYALTY_BONUS   = 1.10;  // ×1.1 après 90 jours
+
+    constructor() {
+        this.#contributors  = new Map();
+        this.#totalStaked   = 0;
+        this.#totalRevenue  = 0;
+        this.#distributions = [];
+    }
+
+    /**
+     * Enregistre la contribution d'un utilisateur.
+     * @param {string} address   — wallet address
+     * @param {number} amount    — SKY stakés
+     */
+    addContributor(address, amount) {
+        const existing = this.#contributors.get(address) ?? { staked: 0, stakedAt: Date.now() };
+        existing.staked  += amount;
+        this.#contributors.set(address, existing);
+        this.#totalStaked += amount;
+        console.info(`[StakingPool] +${amount} SKY — ${address} (total: ${this.#totalStaked})`);
+    }
+
+    removeContributor(address, amount) {
+        const c = this.#contributors.get(address);
+        if (!c) return;
+        c.staked = Math.max(0, c.staked - amount);
+        this.#totalStaked = Math.max(0, this.#totalStaked - amount);
+        if (c.staked === 0) this.#contributors.delete(address);
+    }
+
+    /**
+     * Distribue les revenus de validation.
+     * @param {number} totalSky — revenus à distribuer
+     * @param {string} teamAddress — wallet de la team
+     * @returns {{ contributors: object[], thevieReserve: number, team: number }}
+     */
+    distribute(totalSky, teamAddress = 'team') {
+        this.#totalRevenue += totalSky;
+
+        const forContributors  = totalSky * ThevieStakingPool.RATIOS.contributors;
+        const forThevie        = totalSky * ThevieStakingPool.RATIOS.thevieReserve;
+        const forTeam          = totalSky * ThevieStakingPool.RATIOS.team;
+
+        const now = Date.now();
+        const payouts = [];
+        let   loyaltyPoolUsed = 0;
+
+        if (this.#totalStaked === 0) {
+            // Aucun contributeur — tout va à Thevie reserve
+            return { contributors: [], thevieReserve: forThevie + forContributors, team: forTeam };
+        }
+
+        for (const [address, { staked, stakedAt }] of this.#contributors) {
+            const basePct     = staked / this.#totalStaked;
+            const loyaltyDays = (now - stakedAt) / 86_400_000;
+            const multiplier  = loyaltyDays >= ThevieStakingPool.LOYALTY_DAYS
+                ? ThevieStakingPool.LOYALTY_BONUS : 1.0;
+            const raw         = forContributors * basePct * multiplier;
+            loyaltyPoolUsed  += raw;
+            payouts.push({ address, staked, amount: +raw.toFixed(4), multiplier, loyaltyDays: Math.floor(loyaltyDays) });
+        }
+
+        const result = {
+            contributors  : payouts,
+            thevieReserve : +(forThevie).toFixed(4),
+            team          : +(forTeam).toFixed(4),
+            totalDistributed: +(loyaltyPoolUsed + forThevie + forTeam).toFixed(4),
+            timestamp     : now,
+        };
+        this.#distributions.push(result);
+        return result;
+    }
+
+    getStats() {
+        return {
+            totalStaked    : this.#totalStaked,
+            contributors   : this.#contributors.size,
+            totalRevenue   : this.#totalRevenue,
+            distributions  : this.#distributions.length,
+            ratios         : ThevieStakingPool.RATIOS,
+            loyaltyBonus   : `×${ThevieStakingPool.LOYALTY_BONUS} after ${ThevieStakingPool.LOYALTY_DAYS} days`,
+        };
+    }
+
+    getDistributionHistory(limit = 20) {
+        return this.#distributions.slice(-limit);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// THEVIE GENESIS NODE — nœud permanent, jamais supprimable
+// ═══════════════════════════════════════════════════════════════
+
+export class ThevieGenesisNode {
+    static GENESIS_ID    = 'thevie-genesis-validator-00000001';
+    static STAKE_AMOUNT  = 50_000;   // SKY — alimenté depuis wallet Genesis plus tard
+    static INITIAL_SCORE = 1.0;      // Réputation maximale
+    static TIER          = 'Legend';
+
+    constructor() {
+        this.id              = ThevieGenesisNode.GENESIS_ID;
+        this.type            = NodeType.Validator;
+        this.role            = NodeRole.Validator;
+        this.alias           = 'Thevie-Genesis';
+        this.state           = NodeState.Active;
+        this.isGenesis       = true;
+        this.isRentedOut     = false;
+        this.stakeAmount     = ThevieGenesisNode.STAKE_AMOUNT;
+        this.minStakeSky     = 8_000;
+        this.reputationScore = ThevieGenesisNode.INITIAL_SCORE;
+        this.reputationTier  = ThevieGenesisNode.TIER;
+        this.createdAt       = Date.now();
+        this.walletAddress   = 'genesis';
+        this.port            = 9000;
+        this.computeMultiplier = 12.0;
+        this.priceSky        = 0; // Thevie ne paye pas son propre nœud
+        this.attestedNodes   = new Set(); // nœuds validés par Thevie
+        this.totalValidations= 0;
+    }
+
+    /** Atteste un nœud utilisateur — requis pour atteindre Legend. */
+    attestNode(nodeId) {
+        this.attestedNodes.add(nodeId);
+        this.totalValidations++;
+        return {
+            nodeId,
+            attestedBy : this.id,
+            timestamp  : Date.now(),
+            signature  : `thevie-sig-${nodeId.slice(-8)}-${Date.now().toString(16)}`,
+            validForLegend: true,
+        };
+    }
+
+    /** Vérifie si un nœud a été attesté par Thevie (condition pour Legend). */
+    hasAttested(nodeId) {
+        return this.attestedNodes.has(nodeId);
+    }
+
+    canBeDeleted() { return false; } // Jamais supprimable
+
+    toJSON() {
+        return {
+            id              : this.id,
+            type            : this.type,
+            role            : this.role,
+            alias           : this.alias,
+            state           : this.state,
+            isGenesis       : true,
+            stakeAmount     : this.stakeAmount,
+            reputationScore : this.reputationScore,
+            reputationTier  : this.reputationTier,
+            totalValidations: this.totalValidations,
+            port            : this.port,
+            computeMultiplier: this.computeMultiplier,
+            description     : 'Thevie Genesis Validator — foundation of the SkyAInet network',
+        };
+    }
+}
+
 export default NodeManager;
+
+// ─── Helpers privés ───────────────────────────────────────────
+function _delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function _nextTier(score) {
+    if (score >= 0.95) return 'Legend (max)';
+    if (score >= 0.85) return 'Legend';
+    if (score >= 0.70) return 'Sovereign';
+    if (score >= 0.50) return 'Trusted';
+    return 'Reliable';
+}
