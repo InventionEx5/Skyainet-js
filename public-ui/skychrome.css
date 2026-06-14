@@ -1,0 +1,105 @@
+/* =====================================================
+   skychrome.css — Chrome visuel partagé SkyAInet
+   Style des popups = référence SKYAINET. Light/Dark
+   mode global, fenêtre Navigation, dialogue de redirection.
+   Inclus par les 7 pages (hors SKYAINET qui a son propre
+   système inline mais des clés localStorage identiques).
+   SkyAInet × Nikola T369
+   ===================================================== */
+
+:root {
+  --sky-bg     : #0a0a0f;
+  --sky-surface: rgba(255,255,255,0.06);
+  --sky-border : rgba(255,255,255,0.08);
+  --sky-text   : #ffffff;
+  --sky-muted  : rgba(255,255,255,0.55);   /* relevé de .45 → .55 pour lisibilité */
+  --sky-accent : #4ade80;                  /* surchargé par page */
+}
+
+/* ── LIGHT MODE — appliqué globalement via [data-theme="light"] ── */
+[data-theme="light"] {
+  --sky-bg     : #f6f8f7;
+  --sky-surface: rgba(0,0,0,0.045);
+  --sky-border : rgba(0,0,0,0.10);
+  --sky-text   : #0a1410;
+  --sky-muted  : rgba(10,20,16,0.62);
+}
+[data-theme="light"] body { background: var(--sky-bg); color: var(--sky-text); }
+
+/* Conversion des classes Tailwind blanches fixes (couverture complète) */
+[data-theme="light"] .text-white            { color:#0a1410 !important; }
+[data-theme="light"] .text-white\/90        { color:rgba(10,20,16,.90) !important; }
+[data-theme="light"] .text-white\/80        { color:rgba(10,20,16,.80) !important; }
+[data-theme="light"] .text-white\/70        { color:rgba(10,20,16,.72) !important; }
+[data-theme="light"] .text-white\/60        { color:rgba(10,20,16,.65) !important; }
+[data-theme="light"] .text-white\/55        { color:rgba(10,20,16,.60) !important; }
+[data-theme="light"] .text-white\/50        { color:rgba(10,20,16,.55) !important; }
+[data-theme="light"] .text-white\/45        { color:rgba(10,20,16,.52) !important; }
+[data-theme="light"] .text-white\/40        { color:rgba(10,20,16,.48) !important; }
+[data-theme="light"] .text-white\/35        { color:rgba(10,20,16,.44) !important; }
+[data-theme="light"] .text-white\/30        { color:rgba(10,20,16,.40) !important; }
+[data-theme="light"] .text-white\/25        { color:rgba(10,20,16,.34) !important; }
+[data-theme="light"] .text-white\/20        { color:rgba(10,20,16,.28) !important; }
+[data-theme="light"] .bg-white\/5           { background:rgba(0,0,0,.04) !important; }
+[data-theme="light"] .bg-white\/10          { background:rgba(0,0,0,.07) !important; }
+[data-theme="light"] .bg-white\/15          { background:rgba(0,0,0,.09) !important; }
+[data-theme="light"] .hover\:bg-white\/10:hover { background:rgba(0,0,0,.07) !important; }
+[data-theme="light"] .hover\:bg-white\/15:hover { background:rgba(0,0,0,.10) !important; }
+[data-theme="light"] .hover\:bg-white\/20:hover { background:rgba(0,0,0,.12) !important; }
+[data-theme="light"] .border-white\/10      { border-color:rgba(0,0,0,.10) !important; }
+[data-theme="light"] .border-white\/8       { border-color:rgba(0,0,0,.08) !important; }
+[data-theme="light"] .border-white\/5       { border-color:rgba(0,0,0,.06) !important; }
+[data-theme="light"] .bg-\[\#0a0a0f\]       { background:#f6f8f7 !important; }
+[data-theme="light"] .bg-\[\#0a0a0f\]\/95   { background:rgba(246,248,247,.95) !important; }
+[data-theme="light"] .bg-\[\#0d0d14\]       { background:#eef1ef !important; }
+[data-theme="light"] .bg-\[\#111827\]       { background:#e9ece9 !important; }
+[data-theme="light"] .glass                 { box-shadow:0 4px 24px rgba(0,0,0,.08); }
+
+/* ── Surfaces & animations partagées (style SKYAINET) ── */
+.sky-glass {
+  background: var(--sky-surface);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--sky-border);
+}
+@keyframes skyPopIn {
+  from { opacity:0; transform:scale(.94) translateY(10px); }
+  to   { opacity:1; transform:scale(1)    translateY(0);    }
+}
+.sky-popup { animation: skyPopIn .2s ease-out forwards; }
+
+/* ── Fenêtre Navigation (liste 8 pages) ── */
+.sky-nav-overlay {
+  position:fixed; inset:0; z-index:600; display:flex;
+  align-items:center; justify-content:center; padding:1.5rem;
+  background:rgba(0,0,0,.75);
+}
+[data-theme="light"] .sky-nav-overlay { background:rgba(20,30,25,.45); }
+/* Variante menu : slide-in haut-gauche (style Thevie/Node) */
+.sky-menu-overlay {
+  position:fixed; inset:0; z-index:600; display:flex;
+  align-items:flex-start; justify-content:flex-start;
+  padding:3.5rem 0 0 1.5rem; background:rgba(0,0,0,.6);
+}
+[data-theme="light"] .sky-menu-overlay { background:rgba(20,30,25,.35); }
+.sky-nav-card {
+  background: var(--sky-surface);
+  backdrop-filter: blur(24px);
+  border:1px solid var(--sky-border);
+  border-radius:1.5rem; padding:1rem; width:100%; max-width:300px;
+  animation: skyPopIn .18s ease-out forwards;
+}
+[data-theme="light"] .sky-nav-card { background:#ffffff; box-shadow:0 12px 40px rgba(0,0,0,.12); }
+.sky-nav-row {
+  width:100%; display:flex; align-items:center; gap:.75rem;
+  padding:.7rem .9rem; border-radius:1rem; cursor:pointer;
+  font-size:.875rem; color:var(--sky-text); text-align:left;
+  background:transparent; border:none; transition:background .15s;
+}
+.sky-nav-row:hover { background:rgba(255,255,255,.08); }
+[data-theme="light"] .sky-nav-row:hover { background:rgba(0,0,0,.05); }
+.sky-nav-row.current { opacity:.5; pointer-events:none; }
+.sky-nav-ico { width:1.1rem; height:1.1rem; flex-shrink:0; }
+
+/* Scrollbar fine cohérente */
+.sky-nav-card::-webkit-scrollbar { width:4px; }
+.sky-nav-card::-webkit-scrollbar-thumb { background:rgba(125,125,125,.4); border-radius:2px; }
