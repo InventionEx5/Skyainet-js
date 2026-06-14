@@ -1,8 +1,11 @@
-// start.js — Point d'entrée SkyAInet PWA
+// start.js — Point d'entrée SkyAInet (binaire standalone)
 // =====================================================
 // Lance le serveur Node.js, ouvre le browser,
 // démarre le tray icon, active l'autostart et
 // vérifie les mises à jour silencieusement.
+//
+// Aucune PWA : installation = binaire double-clic,
+// hors-ligne = offline.html servie par le serveur.
 //
 // Usage :
 //   bun start.js              ← mode normal (browser auto)
@@ -43,7 +46,7 @@ console.info(`
 ╠══════════════════════════════════════╣
 ║   Version : ${(process.env.SKYAINET_VERSION ?? '0.1.0').padEnd(24)}║
 ║   Port    : ${String(port).padEnd(24)}║
-║   Mode    : ${(isDaemon ? 'Daemon' : 'PWA').padEnd(24)}║
+║   Mode    : ${(isDaemon ? 'Daemon' : 'Standalone').padEnd(24)}║
 ╚══════════════════════════════════════╝
 `);
 
