@@ -17,6 +17,7 @@ import { existsSync }        from 'fs';
 
 import { SkyCloud as SkyCloud }    from './skycloud.js';
 import { ALL_SCOPES, SCOPE_LABELS } from './skycloud.js';
+import { SecureMessagingService }   from './secure_messaging.js';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -136,6 +137,7 @@ function apiError(res, status, error, message) {
 
 const state = {
   node       : new SkyCloud(),
+  secure     : new SecureMessagingService(),   // SkyChat — messagerie sécurisée
   rateLimiter: new RateLimiter(60, 60),
   metrics    : new ServerMetrics(),
   apiKeys    : [process.env.SKYNODE_API_KEY    ?? 'dev-key-unsafe'],
@@ -942,6 +944,17 @@ function handleWs(ws) {
         }
         break;
 
+      // ── SkyChat — relais temps réel des messages ──────────────
+      // Diffuse un message (DM ou groupe) à tous les clients connectés
+      // pour une livraison instantanée multi-onglets / multi-appareils.
+case 'sc_relay': {
+        if (cmd.payload) {
+          broadcastWs('sc_message', cmd.payload);
+        }
+        response = { type: 'sc_relay_ack', ts: Date.now() };
+        break;
+      }
+
       default:
         response = { type: 'error', message: `Commande inconnue: ${cmd.type}` };
     }
@@ -960,6 +973,7 @@ function handleWs(ws) {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
+
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
@@ -1068,7 +1082,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 // Complète les routes spécifiques ci-dessus.
 // Les routes spécifiques ont la priorité (Express les matche en premier).
 {
-  const handlers = state.node.apiHandlers();
+  const handlers = { ...state.node.apiHandlers(), ...state.secure.apiHandlers() };
 
   // Mapping commandes → méthode HTTP pour GET sémantique
   const GET_CMDS = new Set([
@@ -1082,6 +1096,10 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     'get_comm_stats', 'get_agentic_stats', 'list_agentic_sessions',
     'is_auto_training_enabled', 'is_auto_dream_enabled',
     'get_wisdom',
+    // SkyChat — lectures
+    'sc_get_identity', 'sc_did_history', 'sc_list_contacts', 'sc_contact_stats',
+    'sc_get_conversation', 'sc_conversations', 'sc_list_groups', 'sc_get_group_messages',
+    'sc_security_status', 'sc_storage_stats', 'sc_list_devices', 'sc_red_team_report',
   ]);
 
   // Commandes publiques du frontend Thevie (thevie.html) — lecture/chat
@@ -1091,9 +1109,11 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     'generate_with_ai', 'get_wisdom', 'inject_lesson', 'web_search',
   ]);
 
-  // Middleware : laisse passer les commandes publiques, exige l'auth sinon.
+  // Middleware : laisse passer les commandes publiques + toutes les commandes
+  // SkyChat (préfixe sc_), exige l'auth sinon.
   const cmdAuth = (req, res, next) =>
-    PUBLIC_CMDS.has(req.params.name) ? next() : auth(req, res, next);
+    (PUBLIC_CMDS.has(req.params.name) || req.params.name.startsWith('sc_'))
+      ? next() : auth(req, res, next);
 
   app.all('/api/cmd/:name', cmdAuth, async (req, res) => {
     const name = req.params.name;
@@ -1305,7 +1325,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   generateIcons().catch(e => console.warn('[Icons]', e.message));
 
   // Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
-  if (process.env.SKYAINET_NO_BROWSER !== '1') {
+if (process.env.SKYAINET_NO_BROWSER !== '1') {
     const { exec: _exec } = await import('child_process');
     const cmd = process.platform === 'win32'  ? `start "" "${url}"`
               : process.platform === 'darwin' ? `open "${url}"`
@@ -1360,7 +1380,7 @@ app.get('/api/marketplace/ticker', async (req, res) => {
 app.get('/api/node/deploy-thevie', async (req, res) => {
   const { type, alias, port, role } = req.query;
 
-res.setHeader('Content-Type',                'text/event-stream');
+  res.setHeader('Content-Type',                'text/event-stream');
   res.setHeader('Cache-Control',               'no-cache');
   res.setHeader('Connection',                  'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
