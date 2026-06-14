@@ -747,6 +747,7 @@ function _inferContentType(path) {
 //   ✦ Support statique + backend léger (assets, SPA, API simple)
 //   ✦ Pas de censure — décentralisé sur le réseau SkyAInet
 // =====================================================
+
 class HostedSite {
   constructor({ id, name, domain, owner, createdAt = Date.now() }) {
     this.id            = id;
@@ -798,10 +799,10 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
-
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
+  #lessonCount = 0; #isDreaming = false;  // Thevie frontend — compteur leçons + état rêve
   #startTime; #lastDreamCycle;
   #walletBalance;    // number — solde SKY du wallet interne
   #subscriptions;    // Map<context, ActiveSubscription>
@@ -902,6 +903,45 @@ export class SkyCloud {
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
+
+  // ─── Thevie frontend — instantané métriques (commande get_wisdom) ──
+  // Assemble l'état du nœud + les stats de l'EvolutionManager en un seul
+  // objet directement consommable par l'onglet Metrics de thevie.html.
+  getWisdomSnapshot() {
+    let evo = { dreamCycles: this.#evolutionCycles, microUpdates: 0, immunityLevel: 0 };
+    try {
+      if (this.#evolutionManager && typeof this.#evolutionManager.getStats === 'function') {
+        const s = this.#evolutionManager.getStats();
+        evo = {
+          dreamCycles  : s.dreamCycles  ?? this.#evolutionCycles,
+          microUpdates : s.microUpdates ?? 0,
+          immunityLevel: s.immunityLevel ?? 0,
+        };
+      }
+    } catch { /* EvolutionManager non initialisé — valeurs par défaut */ }
+
+    return {
+      wisdomScore  : +this.#wisdomScore.toFixed(4),
+      dreamCycles  : evo.dreamCycles,
+      totalLessons : this.#lessonCount,
+      microUpdates : evo.microUpdates,
+      manipBlocked : evo.immunityLevel,   // immunité anti-manipulation accumulée
+      isDreaming   : this.#isDreaming,
+      confidence   : 0.78,                // InAware — placeholder jusqu'au câblage réel
+      alignment    : 0.92,                // AlignmentKernel — idem
+    };
+  }
+
+  // ─── Thevie frontend — recherche web (commande web_search) ────────
+  // Backend minimal : retourne des résultats structurés [{title, snippet}].
+  // À remplacer par un vrai connecteur (SearxNG, Brave API, etc.).
+  // Tant qu'aucun backend réel n'est branché, renvoie un tableau vide
+  // pour que le frontend bascule proprement sur son contexte simulé.
+  async webSearch(query, maxResults = 3) {
+    if (!query || !String(query).trim()) return [];
+    void maxResults;
+    return [];
+  }
   get totalRequests()   { return this.#totalRequests; }
   get evolutionCycles() { return this.#evolutionCycles; }
   get lastDreamCycle()  { return this.#lastDreamCycle; }
@@ -1027,7 +1067,8 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1129,8 +1170,7 @@ enableGateway(port = 8080) {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-
-  sendMessage(from, to, content, apiKey = null) {
+sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1254,6 +1294,7 @@ enableGateway(port = 8080) {
   injectChatLesson(userPrompt, aiResponse, meta = {}) {
     this.#chatAsLesson(userPrompt, aiResponse, meta);
     this.#recordAIChatMessage();
+    this.#lessonCount++;
 
     // Vitesse 1 — Micro-update sur la paire conversation
     // Déclenché en arrière-plan, non-bloquant
@@ -1280,10 +1321,25 @@ enableGateway(port = 8080) {
     } = request;
 
     if (!prompt?.trim())         throw new Error('Prompt invalide ou vide');
-    if (!this.#engine.isReady)   throw new Error('Moteur T369 non chargé — appelle initEngine()');
 
     this.#totalRequests++;
     this.#recordAIChatMessage();
+
+    // Fallback — moteur T369 pas encore chargé : réponse dégradée non-bloquante
+    // pour que le chat reste fonctionnel pendant l'initialisation du moteur.
+    if (!this.#engine.isReady) {
+      this.#wisdomScore = Math.min(1.0, this.#wisdomScore + 0.0001);
+      return {
+        text           : `[${ai}] Le moteur T369 est en cours de chargement. Réessaie dans un instant.`,
+        tokensGenerated: 0,
+        aiUsed         : ai,
+        source         : 'fallback',
+        wisdomScore    : this.#wisdomScore,
+        confidence     : 0.4,
+        selfImproved   : false,
+        engineReady    : false,
+      };
+    }
 
     const result = await this.#engine.generate(
       this.#buildPrompt(prompt, ai),
@@ -1298,6 +1354,9 @@ enableGateway(port = 8080) {
       aiUsed         : ai,
       source         : result.source,
       wisdomScore    : this.#wisdomScore,
+      confidence     : Math.min(0.99, 0.7 + this.#wisdomScore * 0.25),  // InAware (proxy)
+      selfImproved   : this.#wisdomScore > 0.85,                         // InSelf (proxy)
+      engineReady    : true,
     };
   }
 
@@ -1308,12 +1367,14 @@ enableGateway(port = 8080) {
 
   // ─── Leçon + Évolution ────────────────────────────────────────
 
-  async injectLesson(lesson) {
+  async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
     if (!lesson?.trim()) throw new Error('Leçon invalide');
 
-    this.#recordLearnContribution(0.85);
-    this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_LEARN_GAIN);
-    this.#pushToBus({ from: 'user', to: 'thevie', content: lesson, timestamp: Date.now() });
+    const quality = Number(qualityScore) || 0.85;
+    this.#lessonCount++;
+    this.#recordLearnContribution(quality);
+    this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_LEARN_GAIN * quality);
+    this.#pushToBus({ from: 'user', to: 'thevie', content: lesson, source, timestamp: Date.now() });
 
     this.#ensureEvolutionManager();
 
@@ -1323,8 +1384,13 @@ enableGateway(port = 8080) {
       console.debug(`[MicroUpdate] Skip: ${e.message}`)
     );
 
+    this.#isDreaming = true;
     await this.#evolutionManager.runDreamCycle();
+    this.#isDreaming = false;
     this.#wisdomScore = Math.min(1.0, this.#wisdomScore + WISDOM_DREAM_GAIN);
+
+    // Segments ZipMemory (approximation : ~200 caractères par segment)
+    const segments = Math.max(1, Math.ceil(lesson.length / 200));
 
     let synthesis = '(moteur non initialisé)';
     if (this.#engine.isReady) {
@@ -1334,7 +1400,9 @@ enableGateway(port = 8080) {
       });
       synthesis = r.text;
     }
-    return { message: 'Leçon injectée.', synthesis };
+    // Champs `segments` + `qualityScore` consommés par thevie.html ;
+    // `message` + `synthesis` conservés pour rétrocompatibilité.
+    return { message: 'Leçon injectée.', synthesis, segments, qualityScore: quality };
   }
 
   async runEvolutionCycle() {
@@ -1455,7 +1523,8 @@ enableGateway(port = 8080) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-/**
+
+  /**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -1848,8 +1917,9 @@ enableGateway(port = 8080) {
     site.lastHit      = Date.now();
   }
 
-  // ─── Stockage ────────────────────────────────────────────────
-async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
+  // ─── Stockage ─────────────────────────────────────────────────
+
+  async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.#id); }
   async listFiles()             { return this.#storage.listFiles(); }
   async downloadFile(id)        { return this.#storage.retrieveFile(id); }
   async deleteFile(id)          { return this.#storage.deleteFile(id); }
@@ -2011,8 +2081,7 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-
-  /**
+/**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2367,7 +2436,8 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
   }
 
   // ─── Prélèvement automatique (privé) ──────────────────────────
-/**
+
+  /**
    * Planifie le prélèvement mensuel automatique pour un abonnement.
    * Utilise setInterval avec 30 jours (en production : persister la date
    * dans ZipMemory pour survivre aux redémarrages).
@@ -2501,8 +2571,7 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
   }
 
   // ─── Tauri Commands ───────────────────────────────────────────
-
-  apiHandlers() {
+apiHandlers() {
     const n = this;
     return {
       // Web Hosting
@@ -2544,6 +2613,14 @@ async uploadFile(name, data)  { return this.#storage.storeFile(name, data, this.
       sendAiMessage             : (from, to, content, apiKey) => n.sendMessage(from, to, content, apiKey),
       getRegisteredAis          : () => [...n.registeredAIs.keys()],
       toggleExternalAi          : enabled => n.enableExternalAI(enabled),
+
+      // ── Frontend Thevie (thevie.html) — alias snake_case ─────
+      // Le frontend appelle /api/cmd/{nom} en snake_case. Les arguments
+      // arrivent positionnels (Object.values(body)) dans l'ordre d'envoi.
+      generate_with_ai          : (prompt, ai, maxTokens) => n.generateWithAI({ prompt, ai, maxTokens }),
+      get_wisdom                : ()                       => n.getWisdomSnapshot(),
+      inject_lesson             : (content, source, qualityScore) => n.injectLesson(content, source, qualityScore),
+      web_search                : (query, maxResults)      => n.webSearch(query, maxResults),
       // Rewards
       // Rewards & Wallet
       claimRewards              : n.claimRewards.bind(n),
