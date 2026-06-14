@@ -1,21 +1,27 @@
 // build.js — Compilation des binaires SkyAInet
 // =====================================================
-// Produit 3 binaires standalone via Bun :
+// Produit des binaires standalone via Bun :
 //   dist/skyainet-windows.exe  (~25 Mo)
 //   dist/skyainet-macos        (~25 Mo)
+//   dist/skyainet-macos-arm64  (~25 Mo)
 //   dist/skyainet-linux        (~25 Mo)
 //
 // Chaque binaire embarque :
 //   • Bun runtime
 //   • server.js + toutes les dépendances
-//   • Tous les assets (HTML, CSS, JS, icônes)
-//   • Service Worker + manifest PWA
+//   • Tous les assets (HTML, CSS, JS, icônes système)
 //   • Tray, autostart, updater
 //
+// PAS DE PWA : pas de Service Worker, pas de manifest.
+// Installation = un binaire, double-clic. Hors-ligne = offline.html
+// servie par le serveur. Icônes système générées ici depuis
+// icon-source.svg (source unique = logo étoile filante du dashboard).
+//
 // Usage :
-//   bun build.js
-//   bun build.js --platform linux
-//   bun build.js --version 0.2.0
+//   bun build.js                      ← tous les targets + icônes
+//   bun build.js --platform linux     ← un seul target
+//   bun build.js --version 0.2.0      ← version explicite
+//   bun build.js --icons-only         ← régénère seulement les icônes
 //
 // SkyAInet × Nikola T369
 // =====================================================
@@ -33,106 +39,202 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const args        = process.argv.slice(2);
 const platArg     = args[args.indexOf('--platform') + 1];
 const versionArg  = args[args.indexOf('--version')  + 1];
-const VERSION     = versionArg ?? JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')).version ?? '0.1.0';
+const iconsOnly   = args.includes('--icons-only');
+const VERSION     = versionArg
+  ?? (existsSync(join(__dirname, 'package.json'))
+        ? JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')).version
+        : null)
+  ?? '0.1.0';
 const DIST        = join(__dirname, 'dist');
+const ICON_SRC    = join(__dirname, 'icon-source.svg');
+const ICON_DIR    = join(__dirname, 'public-ui', 'icons');
 
 // ── Targets Bun ───────────────────────────────────────────────
 const TARGETS = {
-    linux  : { target: 'bun-linux-x64',   outfile: 'skyainet-linux'       },
-    macos  : { target: 'bun-darwin-x64',  outfile: 'skyainet-macos'       },
+    linux   : { target: 'bun-linux-x64',    outfile: 'skyainet-linux'       },
+    macos   : { target: 'bun-darwin-x64',   outfile: 'skyainet-macos'       },
     macosArm: { target: 'bun-darwin-arm64', outfile: 'skyainet-macos-arm64' },
-    windows: { target: 'bun-windows-x64', outfile: 'skyainet-windows.exe' },
+    windows : { target: 'bun-windows-x64',  outfile: 'skyainet-windows.exe' },
 };
 
-// ── Sélection des targets ─────────────────────────────────────
-const toBuild = platArg
-    ? [TARGETS[platArg]].filter(Boolean)
-    : Object.values(TARGETS);
+// =====================================================================
+// GÉNÉRATION DES ICÔNES SYSTÈME — depuis icon-source.svg
+// =====================================================================
+// Innovation : une seule source SVG (le logo étoile filante du dashboard)
+// génère toutes les tailles d'icônes système. Cohérence visuelle totale,
+// zéro duplication manuelle. Raster via `sharp` + `to-ico` si installés ;
+// sinon on écrit le SVG à chaque taille (le SVG est vectoriel donc net)
+// et on indique la commande pour activer le raster.
 
-if (!toBuild.length) {
-    console.error(`Platform inconnue : ${platArg}. Valides : linux, macos, macosArm, windows`);
-    process.exit(1);
-}
+const PNG_SIZES = [16, 24, 32, 48, 64, 72, 96, 128, 192, 256, 512];
+const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];   // multi-résolution Windows
 
-// ── Préparation ───────────────────────────────────────────────
-mkdirSync(DIST, { recursive: true });
+async function generateIcons() {
+    console.info(`\n★ Génération des icônes système`);
 
-// Injecter la version dans l'env du build
-process.env.SKYAINET_VERSION = VERSION;
+    if (!existsSync(ICON_SRC)) {
+        console.error(`  ✗ Source introuvable : ${ICON_SRC}`);
+        return false;
+    }
+    mkdirSync(ICON_DIR, { recursive: true });
+    const svg = readFileSync(ICON_SRC);
 
-console.info(`\n★ SkyAInet Build v${VERSION}`);
-console.info(`  Targets : ${toBuild.map(t => t.outfile).join(', ')}`);
-console.info(`  Output  : ${DIST}\n`);
+    // Tenter le rendu raster via sharp (optionnel)
+    let sharp = null, toIco = null;
+    try { sharp = (await import('sharp')).default; } catch { /* absent */ }
+    try { toIco = (await import('to-ico')).default; } catch { /* absent */ }
 
-// ── Vérifier que Bun est installé ────────────────────────────
-try {
-    const bunVersion = execSync('bun --version', { encoding: 'utf8' }).trim();
-    console.info(`  Bun     : v${bunVersion}`);
-} catch {
-    console.error('  ✗ Bun non trouvé — installer via https://bun.sh');
-    process.exit(1);
-}
+    if (sharp) {
+        // PNG à toutes les tailles
+        const pngBuffers = {};
+        for (const size of PNG_SIZES) {
+            const buf = await sharp(svg, { density: 384 })
+                .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+                .png()
+                .toBuffer();
+            writeFileSync(join(ICON_DIR, `icon-${size}.png`), buf);
+            pngBuffers[size] = buf;
+        }
+        // Icône principale + tray + favicon
+        writeFileSync(join(ICON_DIR, 'icon.png'),       pngBuffers[512]);
+        writeFileSync(join(ICON_DIR, 'icon-tray.png'),  pngBuffers[32]);
+        writeFileSync(join(ICON_DIR, 'favicon.png'),    pngBuffers[48]);
+        console.info(`  ✓ ${PNG_SIZES.length} PNG générés (16→512) + icon-tray.png`);
 
-// ── Build ─────────────────────────────────────────────────────
-const entrypoint = join(__dirname, 'packages', 'node', 'src', 'start.js');
-let   allOk      = true;
-
-for (const { target, outfile } of toBuild) {
-    const outPath = join(DIST, outfile);
-    console.info(`  Building ${outfile}…`);
-
-    try {
-        execSync(
-            [
-                'bun build',
-                `"${entrypoint}"`,
-                '--compile',
-                `--target ${target}`,
-                `--outfile "${outPath}"`,
-                `--define SKYAINET_VERSION='"${VERSION}"'`,
-                '--minify',
-            ].join(' '),
-            {
-                stdio: 'inherit',
-                env  : { ...process.env, SKYAINET_VERSION: VERSION },
+        // .ico multi-résolution (Windows : barre des tâches, exe, tray)
+        if (toIco) {
+            try {
+                const ico = await toIco(ICO_SIZES.map(s => pngBuffers[s]).filter(Boolean));
+                writeFileSync(join(ICON_DIR, 'icon.ico'), ico);
+                console.info(`  ✓ icon.ico multi-résolution (${ICO_SIZES.join(', ')})`);
+            } catch (e) {
+                console.warn(`  ⚠ icon.ico échoué : ${e.message}`);
             }
-        );
-
-        // Vérifier que le binaire a été créé
-        if (existsSync(outPath)) {
-            const size = Math.round(readFileSync(outPath).length / 1_048_576);
-            console.info(`  ✓ ${outfile} — ${size} Mo\n`);
         } else {
-            throw new Error('Fichier de sortie non trouvé');
+            console.warn(`  ⚠ icon.ico non généré — installer : npm i -D to-ico`);
         }
 
-    } catch (e) {
-        console.error(`  ✗ ${outfile} — ${e.message}\n`);
-        allOk = false;
+        // .icns (macOS) via iconutil si dispo (macOS uniquement)
+        try {
+            if (process.platform === 'darwin') {
+                const iconset = join(ICON_DIR, 'icon.iconset');
+                mkdirSync(iconset, { recursive: true });
+                const map = { 16:'16x16', 32:'32x32', 128:'128x128', 256:'256x256', 512:'512x512' };
+                for (const [sz, name] of Object.entries(map)) {
+                    if (pngBuffers[sz]) writeFileSync(join(iconset, `icon_${name}.png`), pngBuffers[sz]);
+                    const dbl = +sz * 2;
+                    if (pngBuffers[dbl]) writeFileSync(join(iconset, `icon_${name}@2x.png`), pngBuffers[dbl]);
+                }
+                execSync(`iconutil -c icns "${iconset}" -o "${join(ICON_DIR, 'icon.icns')}"`);
+                console.info(`  ✓ icon.icns (macOS)`);
+            }
+        } catch (e) {
+            console.warn(`  ⚠ icon.icns non généré : ${e.message}`);
+        }
+        return true;
+    }
+
+    // ── Fallback sans sharp : écrire le SVG (vectoriel, net à toute taille)
+    writeFileSync(join(ICON_DIR, 'icon.svg'),      svg);
+    writeFileSync(join(ICON_DIR, 'icon-tray.svg'), svg);
+    writeFileSync(join(ICON_DIR, 'favicon.svg'),   svg);
+    console.warn(`  ⚠ sharp absent — icônes écrites en SVG vectoriel.`);
+    console.warn(`    Pour le raster PNG/ICO système : npm i -D sharp to-ico`);
+    console.warn(`    puis : bun build.js --icons-only`);
+    return true;
+}
+
+// =====================================================================
+// COMPILATION DES BINAIRES
+// =====================================================================
+
+async function buildBinaries() {
+    const toBuild = platArg ? [TARGETS[platArg]].filter(Boolean) : Object.values(TARGETS);
+    if (!toBuild.length) {
+        console.error(`Platform inconnue : ${platArg}. Valides : ${Object.keys(TARGETS).join(', ')}`);
+        process.exit(1);
+    }
+
+    mkdirSync(DIST, { recursive: true });
+    process.env.SKYAINET_VERSION = VERSION;
+
+    console.info(`\n★ SkyAInet Build v${VERSION}`);
+    console.info(`  Targets : ${toBuild.map(t => t.outfile).join(', ')}`);
+    console.info(`  Output  : ${DIST}\n`);
+
+    try {
+        const bunVersion = execSync('bun --version', { encoding: 'utf8' }).trim();
+        console.info(`  Bun     : v${bunVersion}`);
+    } catch {
+        console.error('  ✗ Bun non trouvé — installer via https://bun.sh');
+        process.exit(1);
+    }
+
+    const entrypoint = join(__dirname, 'packages', 'node', 'src', 'start.js');
+    let   allOk      = true;
+
+    for (const { target, outfile } of toBuild) {
+        const outPath = join(DIST, outfile);
+        console.info(`  Building ${outfile}…`);
+        try {
+            execSync(
+                [
+                    'bun build',
+                    `"${entrypoint}"`,
+                    '--compile',
+                    `--target ${target}`,
+                    `--outfile "${outPath}"`,
+                    `--define SKYAINET_VERSION='"${VERSION}"'`,
+                    '--minify',
+                ].join(' '),
+                { stdio: 'inherit', env: { ...process.env, SKYAINET_VERSION: VERSION } }
+            );
+            if (existsSync(outPath)) {
+                const size = Math.round(readFileSync(outPath).length / 1_048_576);
+                console.info(`  ✓ ${outfile} — ${size} Mo\n`);
+            } else {
+                throw new Error('Fichier de sortie non trouvé');
+            }
+        } catch (e) {
+            console.error(`  ✗ ${outfile} — ${e.message}\n`);
+            allOk = false;
+        }
+    }
+
+    // version.json pour l'auto-updater
+    const baseUrl     = `https://skyainet.net/releases/${VERSION}`;
+    const versionInfo = {
+        version: VERSION,
+        date   : new Date().toISOString(),
+        url    : {
+            linux  : `${baseUrl}/skyainet-linux`,
+            darwin : `${baseUrl}/skyainet-macos`,
+            win32  : `${baseUrl}/skyainet-windows.exe`,
+        },
+        sha256 : {},   // rempli par le CI avec les checksums réels
+    };
+    writeFileSync(join(DIST, 'version.json'), JSON.stringify(versionInfo, null, 2));
+    console.info(`  ✓ version.json généré`);
+
+    if (allOk) {
+        console.info(`\n✅ Build terminé — ${DIST}`);
+        console.info(`   Distribuer les binaires depuis dist/`);
+        console.info(`   Uploader version.json sur https://skyainet.net/version.json\n`);
+    } else {
+        console.error(`\n⚠ Certains builds ont échoué — vérifier les erreurs ci-dessus\n`);
+        process.exit(1);
     }
 }
 
-// ── Générer version.json pour l'auto-updater ─────────────────
-const baseUrl    = `https://skyainet.net/releases/${VERSION}`;
-const versionInfo = {
-    version: VERSION,
-    date   : new Date().toISOString(),
-    url    : {
-        linux  : `${baseUrl}/skyainet-linux`,
-        darwin : `${baseUrl}/skyainet-macos`,
-        win32  : `${baseUrl}/skyainet-windows.exe`,
-    },
-    sha256 : {},   // à remplir par le CI avec les checksums réels
-};
-writeFileSync(join(DIST, 'version.json'), JSON.stringify(versionInfo, null, 2));
-console.info(`  ✓ version.json généré`);
+// =====================================================================
+// MAIN
+// =====================================================================
 
-// ── Résultat ──────────────────────────────────────────────────
-if (allOk) {
-    console.info(`\n✅ Build terminé — ${DIST}`);
-    console.info(`   Distribuer les binaires depuis dist/`);
-    console.info(`   Uploader version.json sur https://skyainet.net/version.json\n`);
-} else {
-    console.error(`\n⚠ Certains builds ont échoué — vérifier les erreurs ci-dessus\n`);
-    process.exit(1);
-}
+(async () => {
+    await generateIcons();
+    if (iconsOnly) {
+        console.info(`\n✅ Icônes régénérées — ${ICON_DIR}\n`);
+        return;
+    }
+    await buildBinaries();
+})();
