@@ -29,6 +29,7 @@ import { AntiFork }                  from '../../../sentinel/src/anti_fork.js';
 const WISDOM_FLOOR         = 0.60;
 const WISDOM_FLASH_THRESH  = 0.78;  // seuil déclenchant le flash gematria
 const REBALANCE_INTERVAL   = 3_600_000;   // 1 h
+const VALIDATOR_MIN_STAKE  = 8000;        // SKY minimum pour un nœud Validator
 const MAINTENANCE_EVERY    = 100;         // requêtes
 const SENTINEL_EVERY       = 30;
 const COMPRESS_EVERY       = 50;
@@ -205,6 +206,7 @@ export class Thevie {
   #governanceScore;
   #isRunning;
   #lastRebalance;
+  #nodeType = 'Mini';   // type du nœud courant (Mini|Light|Full|Validator)
 
   // Connexions optionnelles
   #treasuryConnection;
@@ -588,6 +590,65 @@ export class Thevie {
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // MÉTRIQUES UNIFIÉES — pour la commande get_wisdom du frontend
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Regroupe en un seul objet les scores clés de l'onglet Metrics :
+   * sagesse, confiance (InAware), alignement (gouvernance), auto-amélioration
+   * (InSelf) et statistiques d'évolution (Dream Cycles, micro-updates,
+   * immunité anti-manipulation). Source idéale pour get_wisdom.
+   */
+  getMetrics() {
+    const inSelf  = this.#inSelf.getStats();   // [cycles, cumulativeWisdom, evolutionRate, reflectionDepth]
+    const inAware = this.#inAware.getStats();  // [totalGenerations, averageConfidence]
+    const evo     = this.#evolutionManager.getStats();
+
+    return {
+      wisdom           : +this.#collective.globalWisdom.toFixed(4),
+      confidence       : +(inAware[1] || 0.78).toFixed(4),     // InAware — confiance moyenne
+      alignment        : +this.#governanceScore.toFixed(4),    // proxy d'alignement éthique
+      selfImproved     : (inSelf[1] || 0) > 0.70,              // InSelf — auto-amélioration active
+      cumulativeWisdom : +(inSelf[1] || 0).toFixed(4),
+      evolutionRate    : +(inSelf[2] || 0).toFixed(4),
+      reflectionDepth  : inSelf[3] || 0,
+      metaConsciousness: +this.#metaConsciousness.toFixed(4),
+      dreamCycles      : evo.dreamCycles,
+      microUpdates     : evo.microUpdates,
+      manipBlocked     : evo.immunityLevel,
+      totalGenerations : inAware[0] || 0,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // RÔLE VALIDATEUR
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Statut du nœud courant vis-à-vis de son rôle de validateur :
+   * type, éligibilité, stake minimum requis, scores éthiques enregistrés
+   * on-chain et rééquilibrages réseau déclenchés.
+   */
+  getValidatorStatus() {
+    const status      = this.#node.getStatus();
+    const isValidator = this.#nodeType === 'Validator';
+    const pending     = this.#pendingEthicalScores?.length ?? 0;
+
+    return {
+      nodeType          : this.#nodeType,
+      isValidator,
+      minStakeSky       : VALIDATOR_MIN_STAKE,
+      engineReady       : status.engineReady,
+      isRunning         : status.isRunning,
+      governanceScore   : +this.#governanceScore.toFixed(4),
+      treasuryConnected : !!this.#treasuryConnection,
+      ethicalScoresPending: pending,
+      // Un validateur supervise l'alignement et peut déclencher un rebalance
+      canRebalance      : isValidator && status.isRunning,
+    };
+  }
+
   healthReport() {
     const s = this.getSystemStats();
     const ok = s.globalWisdom > WISDOM_FLOOR && s.nodeStatus.engineReady;
@@ -760,6 +821,7 @@ export class Thevie {
     }
 
     this.#node = newNode;
+    this.#nodeType = level;
 
     // Reconnecter les subsystèmes
     const engine = this.#node._engine;
@@ -870,6 +932,7 @@ export class Thevie {
     const prices = { Mini: 0, Light: 6, Full: 18, Validator: 55 };
     const storage = { Mini: 5, Light: 50, Full: 200, Validator: 512 };
 
+    this.#nodeType = desiredType;
     console.info(`[Thevie] Nœud ${desiredType} créé — id: ${node.id}`);
 
     return {
@@ -922,8 +985,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // GOUVERNANCE & RÉCOMPENSES
   // ═══════════════════════════════════════════════════════════════
-
-  /**
+/**
    * Envoie le score éthique d'un nœud vers le treasury on-chain.
    * Prépare le terrain pour l'intégration blockchain.
    *
