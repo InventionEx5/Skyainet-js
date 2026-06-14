@@ -791,6 +791,7 @@ app.post('/api/evolution/train', async (req, res) => {
 // =====================================================
 // WEBSOCKET — TEMPS RÉEL
 // =====================================================
+
 function handleWs(ws) {
   state.metrics.websocketConnections++;
   console.info('🔌 WebSocket connecté');
@@ -959,7 +960,6 @@ function handleWs(ws) {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
-
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
@@ -1081,9 +1081,21 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     'list_smart_contracts', 'get_smart_contract_stats',
     'get_comm_stats', 'get_agentic_stats', 'list_agentic_sessions',
     'is_auto_training_enabled', 'is_auto_dream_enabled',
+    'get_wisdom',
   ]);
 
-  app.all('/api/cmd/:name', auth, async (req, res) => {
+  // Commandes publiques du frontend Thevie (thevie.html) — lecture/chat
+  // accessibles sans clé API pour que l'interface fonctionne en local.
+  // Toutes les autres commandes /api/cmd/* restent protégées par `auth`.
+  const PUBLIC_CMDS = new Set([
+    'generate_with_ai', 'get_wisdom', 'inject_lesson', 'web_search',
+  ]);
+
+  // Middleware : laisse passer les commandes publiques, exige l'auth sinon.
+  const cmdAuth = (req, res, next) =>
+    PUBLIC_CMDS.has(req.params.name) ? next() : auth(req, res, next);
+
+  app.all('/api/cmd/:name', cmdAuth, async (req, res) => {
     const name = req.params.name;
     const fn   = handlers[name];
 
@@ -1190,6 +1202,7 @@ app.use(express.static(_root, {
 // Génère tous les PNG depuis icon-source.svg au premier démarrage.
 // Aucun PNG à committer sur Github — juste le SVG source.
 // Si le design change → supprimer les PNG → ils se régénèrent.
+
 const _ICON_SIZES = [
     { size: 72,  name: 'icon-72.png'   },
     { size: 96,  name: 'icon-96.png'   },
@@ -1347,7 +1360,7 @@ app.get('/api/marketplace/ticker', async (req, res) => {
 app.get('/api/node/deploy-thevie', async (req, res) => {
   const { type, alias, port, role } = req.query;
 
-  res.setHeader('Content-Type',                'text/event-stream');
+res.setHeader('Content-Type',                'text/event-stream');
   res.setHeader('Cache-Control',               'no-cache');
   res.setHeader('Connection',                  'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
