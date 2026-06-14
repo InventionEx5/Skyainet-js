@@ -17,6 +17,9 @@ import { StorageNode }                            from '../../memory/src/storage
 import { T369Model, ModelConfig }                 from '../../t369-inference/src/t369.js';
 import { BpeTokenizer }                           from '../../t369-inference/src/tokenizer.js';
 import { SpeculativeDecoder, SpeculativeConfig }  from '../../t369-inference/src/speculative.js';
+import { InSelf }                                 from '../../t369-inference/src/inself.js';
+import { InAware }                                from '../../t369-inference/src/inaware.js';
+import { WebSearch }                              from './web_search.js';
 
 import { DreamCycle }  from '../../../model/src/thevie/dream_cycle.js';
 import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
@@ -747,7 +750,6 @@ function _inferContentType(path) {
 //   ✦ Support statique + backend léger (assets, SPA, API simple)
 //   ✦ Pas de censure — décentralisé sur le réseau SkyAInet
 // =====================================================
-
 class HostedSite {
   constructor({ id, name, domain, owner, createdAt = Date.now() }) {
     this.id            = id;
@@ -799,10 +801,12 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
+
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
   #lessonCount = 0; #isDreaming = false;  // Thevie frontend — compteur leçons + état rêve
+  #inSelf = null; #inAware = null; #webSearch = null;  // Câblage InSelf/InAware/WebSearch (lazy)
   #startTime; #lastDreamCycle;
   #walletBalance;    // number — solde SKY du wallet interne
   #subscriptions;    // Map<context, ActiveSubscription>
@@ -920,6 +924,13 @@ export class SkyCloud {
       }
     } catch { /* EvolutionManager non initialisé — valeurs par défaut */ }
 
+    // Confiance réelle issue d'InAware (moyenne glissante des générations)
+    let confidence = 0.78;
+    try {
+      const [, avgConf] = this.#getInAware().getStats();
+      if (avgConf > 0) confidence = +avgConf.toFixed(4);
+    } catch { /* InAware non sollicité — valeur par défaut */ }
+
     return {
       wisdomScore  : +this.#wisdomScore.toFixed(4),
       dreamCycles  : evo.dreamCycles,
@@ -927,21 +938,36 @@ export class SkyCloud {
       microUpdates : evo.microUpdates,
       manipBlocked : evo.immunityLevel,   // immunité anti-manipulation accumulée
       isDreaming   : this.#isDreaming,
-      confidence   : 0.78,                // InAware — placeholder jusqu'au câblage réel
-      alignment    : 0.92,                // AlignmentKernel — idem
+      confidence   : confidence,          // InAware — moyenne de confiance réelle
+      alignment    : 0.92,                // AlignmentKernel — placeholder
     };
   }
 
   // ─── Thevie frontend — recherche web (commande web_search) ────────
-  // Backend minimal : retourne des résultats structurés [{title, snippet}].
-  // À remplacer par un vrai connecteur (SearxNG, Brave API, etc.).
-  // Tant qu'aucun backend réel n'est branché, renvoie un tableau vide
-  // pour que le frontend bascule proprement sur son contexte simulé.
+  // Délègue au module WebSearch : provider HTTP réel si configuré, sinon
+  // base de connaissances locale SkyAInet, sinon tableau vide (le frontend
+  // bascule alors sur son contexte simulé).
   async webSearch(query, maxResults = 3) {
     if (!query || !String(query).trim()) return [];
-    void maxResults;
-    return [];
+    if (!this.#webSearch) {
+      // Provider configurable via variables d'environnement (optionnel).
+      this.#webSearch = new WebSearch({
+        provider: process.env.WEB_SEARCH_PROVIDER ?? null,
+        endpoint: process.env.WEB_SEARCH_ENDPOINT ?? null,
+        apiKey  : process.env.WEB_SEARCH_API_KEY  ?? null,
+      });
+    }
+    try {
+      return await this.#webSearch.search(query, maxResults);
+    } catch (e) {
+      console.debug(`[WebSearch] ${e.message}`);
+      return [];
+    }
   }
+
+  // ─── Accès lazy InSelf / InAware (métacognition génération) ────────
+  #getInSelf()  { return this.#inSelf  ??= new InSelf();  }
+  #getInAware() { return this.#inAware ??= new InAware(); }
   get totalRequests()   { return this.#totalRequests; }
   get evolutionCycles() { return this.#evolutionCycles; }
   get lastDreamCycle()  { return this.#lastDreamCycle; }
@@ -1067,8 +1093,7 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-
-  enableGateway(port = 8080) {
+enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1170,7 +1195,8 @@ export class SkyCloud {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-sendMessage(from, to, content, apiKey = null) {
+
+  sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1348,14 +1374,33 @@ sendMessage(from, to, content, apiKey = null) {
 
     this.#wisdomScore = Math.min(1.0, this.#wisdomScore + 0.0001);
 
+    // ── Métacognition réelle : InSelf (auto-amélioration) + InAware (confiance)
+    // InSelf.selfImprove travaille sur le TEXTE généré et renvoie un score de
+    // qualité + un delta d'amélioration. InAware analyse une distribution de
+    // logits représentant cette qualité et en déduit une confiance calibrée.
+    // On n'altère PAS le texte de sortie (les tags de réflexion d'InSelf
+    // pollueraient le chat) — seules les métriques sont exposées.
+    let confidence = Math.min(0.99, 0.7 + this.#wisdomScore * 0.25);
+    let selfImproved = this.#wisdomScore > 0.85;
+    try {
+      const imp = this.#getInSelf().selfImprove(prompt, result.text);
+      selfImproved = imp.improvementDelta > 0.02;
+      const q = Math.max(0.1, Math.min(imp.qualityScore || 0.5, 0.98));
+      const logits = new Float32Array([q * 8, (1 - q) * 2]);
+      const aware = this.#getInAware().analyze(logits);
+      confidence = +aware.confidence.toFixed(4);
+    } catch (e) {
+      console.debug(`[Metacognition] ${e.message}`);
+    }
+
     return {
       text           : result.text,
       tokensGenerated: result.tokensGenerated,
       aiUsed         : ai,
       source         : result.source,
       wisdomScore    : this.#wisdomScore,
-      confidence     : Math.min(0.99, 0.7 + this.#wisdomScore * 0.25),  // InAware (proxy)
-      selfImproved   : this.#wisdomScore > 0.85,                         // InSelf (proxy)
+      confidence     : confidence,    // InAware — confiance calibrée
+      selfImproved   : selfImproved,  // InSelf — amélioration détectée
       engineReady    : true,
     };
   }
@@ -1366,8 +1411,7 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── Leçon + Évolution ────────────────────────────────────────
-
-  async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
+async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
     if (!lesson?.trim()) throw new Error('Leçon invalide');
 
     const quality = Number(qualityScore) || 0.85;
@@ -2081,7 +2125,8 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-/**
+
+  /**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2130,8 +2175,7 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-
-  /**
+/**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
