@@ -76,57 +76,61 @@ function skyApplyI18n(dict){
 function skySetLang(l){ localStorage.setItem('sky_lang', l); if (window._skyI18nDict) skyApplyI18n(window._skyI18nDict); }
 
 // ─────────── FENÊTRE NAVIGATION (logo → 8 pages) ───────────
+// Styles INLINE : fonctionne même si skychrome.css n'est pas chargé.
 function openNavMenu(accent){
   var cur = skyCurrentFile();
   var ac  = accent || (skyPage(cur) ? skyPage(cur).color : '#4ade80');
+  var prev = document.getElementById('sky-nav-overlay'); if (prev) prev.remove();
   var ov  = document.createElement('div');
-  ov.className = 'sky-nav-overlay';
   ov.id = 'sky-nav-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;align-items:flex-start;justify-content:flex-start;padding:3.5rem 0 0 1.5rem;background:rgba(0,0,0,.6)';
 
   var rows = '';
   for (var i=0;i<SKY_PAGES.length;i++){
     var pg = SKY_PAGES[i];
     var isCur = pg.file === cur;
-    rows += '<button class="sky-nav-row' + (isCur?' current':'') + '"'
-      + (isCur ? '' : ' onclick="navigateTo(\'' + pg.file + '\',\'' + ac + '\')"') + '>'
-      + skyIconSvg(pg, 18, 'sky-nav-ico')
+    rows += '<button '
+      + (isCur ? '' : 'onclick="navigateTo(\'' + pg.file + '\',\'' + ac + '\')" onmouseover="this.style.background=\'rgba(255,255,255,.08)\'" onmouseout="this.style.background=\'transparent\'" ')
+      + 'style="width:100%;display:flex;align-items:center;gap:.7rem;padding:.6rem .85rem;border-radius:.85rem;font-size:.85rem;color:#fff;text-align:left;border:none;cursor:' + (isCur?'default':'pointer') + ';background:' + (isCur?'rgba(255,255,255,.06)':'transparent') + ';opacity:' + (isCur?'.55':'1') + '">'
+      + skyIconSvg(pg, 18, '')
       + '<span style="font-weight:600">' + pg.name + '</span>'
-      + (isCur ? '<span style="margin-left:auto;font-size:.65rem;color:' + ac + '">current</span>' : '')
+      + (isCur ? '<span style="margin-left:auto;font-size:.6rem;color:' + ac + '">current</span>' : '')
       + '</button>';
   }
 
-  ov.innerHTML = '<div class="sky-nav-card" style="max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">'
-    + '<div style="font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--sky-muted);padding:.25rem .9rem .6rem">Navigation</div>'
+  ov.innerHTML = '<div onclick="event.stopPropagation()" style="background:rgba(16,18,26,.98);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.1);border-radius:1.4rem;padding:1rem;width:15rem;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
+    + '<div style="font-size:.6rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.4);padding:.2rem .85rem .55rem">Navigation</div>'
     + rows
-    + '<button onclick="document.getElementById(\'sky-nav-overlay\').remove()" style="width:100%;padding:.5rem;background:none;border:none;color:var(--sky-muted);font-size:.72rem;cursor:pointer;margin-top:.4rem">Close</button>'
+    + '<button onclick="document.getElementById(\'sky-nav-overlay\').remove()" style="width:100%;padding:.5rem;background:none;border:none;color:rgba(255,255,255,.4);font-size:.72rem;cursor:pointer;margin-top:.3rem">Close</button>'
     + '</div>';
   ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
   document.body.appendChild(ov);
 }
 
-// ─────────── DIALOGUE DE REDIRECTION ───────────
+// ─────────── DIALOGUE DE REDIRECTION (styles inline) ───────────
 function navigateTo(page, accent){
-  var navOv = document.getElementById('sky-nav-overlay');
-  if (navOv) navOv.remove();
+  var navOv = document.getElementById('sky-nav-overlay'); if (navOv) navOv.remove();
+  var rprev = document.getElementById('sky-redirect-overlay'); if (rprev) rprev.remove();
   var pg = skyPage(page);
   var name = pg ? pg.name : page;
-  var ac = accent || (pg ? pg.color : '#4ade80');
+  var curPg = skyPage(skyCurrentFile());
+  var ac = accent || (curPg ? curPg.color : '#4ade80');   // couleur dominante de la page courante
   var ov = document.createElement('div');
-  ov.className = 'sky-nav-overlay';
   ov.id = 'sky-redirect-overlay';
-  ov.innerHTML = '<div class="sky-nav-card" style="max-width:280px" onclick="event.stopPropagation()">'
-    + '<div style="font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--sky-muted);margin-bottom:.4rem;padding:0 .3rem">Open <span style="color:' + ac + '">' + name + '</span></div>'
-    + '<div style="font-size:.82rem;color:var(--sky-muted);margin:0 .3rem 1rem">How would you like to open this page?</div>'
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9100;display:flex;align-items:center;justify-content:center;padding:1.5rem;background:rgba(0,0,0,.75)';
+  ov.innerHTML = '<div onclick="event.stopPropagation()" style="background:rgba(16,18,26,.98);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.1);border-radius:1.4rem;padding:1.4rem;width:100%;max-width:280px;box-shadow:0 20px 60px rgba(0,0,0,.5)">'
+    + '<div style="font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,.45);margin-bottom:.4rem;padding:0 .3rem">Open <span style="color:' + ac + '">' + name + '</span></div>'
+    + '<div style="font-size:.82rem;color:rgba(255,255,255,.6);margin:0 .3rem 1rem">How would you like to open this page?</div>'
     + '<div style="display:flex;flex-direction:column;gap:.5rem">'
     + '<button onclick="_skyGo(\'' + page + '\',false,this)" style="width:100%;padding:.65rem 1rem;border-radius:.9rem;font-size:.8rem;font-weight:600;cursor:pointer;border:1px solid ' + ac + '55;background:' + ac + '22;color:' + ac + '">&#8629;&nbsp; Same tab</button>'
-    + '<button onclick="_skyGo(\'' + page + '\',true,this)" style="width:100%;padding:.65rem 1rem;border-radius:.9rem;font-size:.8rem;font-weight:600;cursor:pointer;border:1px solid var(--sky-border);background:var(--sky-surface);color:var(--sky-muted)">&#8607;&nbsp; New tab</button>'
-    + '<button onclick="this.closest(\'.sky-nav-overlay\').remove()" style="width:100%;padding:.45rem;background:none;border:none;color:var(--sky-muted);font-size:.72rem;cursor:pointer;margin-top:.1rem">Cancel</button>'
+    + '<button onclick="_skyGo(\'' + page + '\',true,this)" style="width:100%;padding:.65rem 1rem;border-radius:.9rem;font-size:.8rem;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:rgba(255,255,255,.6)">&#8607;&nbsp; New tab</button>'
+    + '<button onclick="document.getElementById(\'sky-redirect-overlay\').remove()" style="width:100%;padding:.45rem;background:none;border:none;color:rgba(255,255,255,.4);font-size:.72rem;cursor:pointer;margin-top:.1rem">Cancel</button>'
     + '</div></div>';
   ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
   document.body.appendChild(ov);
 }
 function _skyGo(page, newTab, btn){
-  var ov = btn.closest('.sky-nav-overlay'); if (ov) ov.remove();
+  var ov = document.getElementById('sky-redirect-overlay'); if (ov) ov.remove();
   if (newTab) window.open(page, '_blank'); else window.location.href = page;
 }
 
