@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { bufferPool } from './quant.js';
+import { bufferPool } from '#quant';
 
 export class RomanAttentionConfig {
   constructor() {
@@ -169,5 +169,34 @@ export class RomanAttention {
 
   _act(x) {
     return Math.tanh(x) * 0.88 + Math.sin(x * 0.6) * this.config.diffusionStrength * 0.12;
+  }
+
+  // ─── Réglages runtime — long-contexte / diffusion (Fusion L0) ──
+
+  /** Étend le contexte en recalculant les tables RoPE (style YaRN). */
+  setRopeScaling(scale) {
+    this.config.ropeScaling = scale;
+    const { headDim, maxSeqLen, ropeBase } = this.config;
+    const half = headDim >> 1;
+    for (let pos = 0; pos < maxSeqLen; pos++) {
+      const base = pos * headDim;
+      for (let i = 0; i < half; i++) {
+        const freq = pos / (Math.pow(ropeBase, (2 * i) / headDim) * scale);
+        const c = Math.cos(freq), s = Math.sin(freq);
+        this._cos[base + 2*i] = c; this._cos[base + 2*i+1] = c;
+        this._sin[base + 2*i] = s; this._sin[base + 2*i+1] = s;
+      }
+    }
+    return this;
+  }
+
+  setDiffusionStrength(s) { this.config.diffusionStrength = Math.max(0, Math.min(1, s)); return this; }
+
+  capabilities() {
+    return {
+      mhla: this.config.useMhla, flash: this.config.useFlash,
+      headDim: this.config.headDim, maxSeqLen: this.config.maxSeqLen,
+      ropeScaling: this.config.ropeScaling,
+    };
   }
 }
