@@ -731,6 +731,7 @@ app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (r
 //   GET /sites/:domain/*     → fichier demandé (fallback SPA → index.html)
 //   GET /:domain/*           → (optionnel) domaine custom à la racine
 // =====================================================
+
 // Middleware de serving — commun aux deux routes /sites/*
 async function serveSiteMiddleware(req, res) {
   const { domain } = req.params;
@@ -792,7 +793,6 @@ app.post('/api/evolution/train', async (req, res) => {
 // =====================================================
 // WEBSOCKET — TEMPS RÉEL
 // =====================================================
-
 function handleWs(ws) {
   state.metrics.websocketConnections++;
   console.info('🔌 WebSocket connecté');
@@ -972,6 +972,7 @@ function handleWs(ws) {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
+
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
@@ -1074,7 +1075,6 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 // =====================================================
 // DÉMARRAGE
 // =====================================================
-
 // ─── Route générique apiHandlers ──────────────────────────────
 // Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
 // Complète les routes spécifiques ci-dessus.
@@ -1220,6 +1220,7 @@ app.use(express.static(_root, {
 // Génère tous les PNG depuis icon-source.svg au premier démarrage.
 // Aucun PNG à committer sur Github — juste le SVG source.
 // Si le design change → supprimer les PNG → ils se régénèrent.
+
 const _ICON_SIZES = [
     { size: 72,  name: 'icon-72.png'   },
     { size: 96,  name: 'icon-96.png'   },
