@@ -1,4 +1,4 @@
-// packages/node/tray.js
+// tray.js — Icône système tray SkyAInet
 // =====================================================
 // Tray icon JS pur via node-systray (~500 Ko).
 // Zéro Electron, zéro Rust, zéro Tauri.
@@ -6,7 +6,7 @@
 //
 // npm install node-systray
 //
-// Icône système tray SkyAInet + SkyAInet × Nikola T369
+// SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
@@ -111,7 +111,7 @@ export class SkyTray {
         }
     }
 
-    #openBrowser(url) {
+    async #openBrowser(url) {
         const { exec } = await import('child_process').catch(() => ({ exec: null }));
         if (!exec) return;
         const cmd = process.platform === 'win32'  ? `start "" "${url}"`
