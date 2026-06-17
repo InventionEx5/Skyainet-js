@@ -13,6 +13,7 @@ import { KVCache }                                         from '#kv_cache';
 import { SpeculativeDecoder, SpeculativeConfig }            from '#speculative';
 import { ParallelExecutor, ParallelConfig, ParallelStrategy } from '#parallel';
 import { BpeTokenizer }                                    from '#tokenizer';
+import { GpuKernels, CpuKernels }                          from '#gpu_kernels';
 
 export const ParallelMode = Object.freeze({
   None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Speculative: 'Speculative',
@@ -193,21 +194,31 @@ export class RemoteHTTPBackend extends InferenceBackend {
 // Inférence pilotée 100% depuis JS via WebGPU (kernels WGSL) — sans binaire,
 // tourne aussi dans le navigateur. Kernels portés en L1.
 export class WebGPUBackend extends InferenceBackend {
-  constructor() { super(BackendKind.WebGPU); this.device = null; }
-  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true, browser: true }; }
-  static available() { return typeof navigator !== 'undefined' && !!navigator.gpu; }
+  constructor() { super(BackendKind.WebGPU); this.kernels = null; }
+  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true, browser: true, kernels: ['matmul', 'dequant4'] }; }
+  static available() { return GpuKernels.available(); }
   async init() {
     if (!WebGPUBackend.available()) throw new Error('[WebGPUBackend] WebGPU indisponible sur cet hôte');
-    this.ready = true; return this; // adapter/device + shaders WGSL câblés en L1
+    this.kernels = new GpuKernels();
+    await this.kernels.init();   // acquiert le device + compile les shaders WGSL au runtime
+    this.ready = true; return this;
   }
-  async generate() { throw new Error('[WebGPUBackend] kernels WGSL à venir (L1)'); }
+  // Primitive exposée au moteur (matmul GPU). Le graphe forward complet se
+  // compose au-dessus de ces kernels (étape suivante).
+  async matmul(A, B, M, K, N) { if (!this.ready) await this.init(); return this.kernels.matmul(A, B, M, K, N); }
+  async generate() { throw new Error('[WebGPUBackend] graphe forward WGSL en composition — kernels matmul/dequant prêts'); }
+  async dispose() { this.kernels?.dispose(); this.ready = false; }
 }
 
 // Fallback CPU portable, sans binaire : kernels AssemblyScript -> WASM SIMD (L1).
 export class WasmBackend extends InferenceBackend {
-  constructor() { super(BackendKind.Wasm); }
-  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, portable: true }; }
-  async generate() { throw new Error('[WasmBackend] kernels AssemblyScript/WASM à venir (L1)'); }
+  constructor() { super(BackendKind.Wasm); this.kernels = new CpuKernels(); }
+  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, portable: true, kernels: ['matmul', 'dequant4', 'silu'] }; }
+  async init() { await this.kernels.init(); this.ready = true; return this; }
+  // En attendant l'AssemblyScript->WASM compilé, ces primitives tournent sur le
+  // kernel CPU de référence (résultats identiques, plus lent).
+  matmul(A, B, M, K, N) { return this.kernels.matmul(A, B, M, K, N); }
+  async generate() { throw new Error('[WasmBackend] graphe forward en composition — kernels CPU de référence prêts (WASM à compiler)'); }
 }
 
 export class InferenceCore {
