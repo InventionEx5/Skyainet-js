@@ -8,7 +8,7 @@
 
 "use strict";
 
-import { ZipMemory } from '../../../memory/src/zip_memory.js';
+import { ZipMemory } from '#zip_memory';
 
 // ─────────────────────────────────────────────────────────────────
 // TYPES
@@ -208,6 +208,53 @@ export class DistillationManager {
   // ─── Accesseurs ───────────────────────────────────────────────
 
   getConfig() { return { ...this.#config }; }
+
+  // ─── Distillation depuis teachers externes (Fusion L4) ───────
+
+  /**
+   * Génère un dataset depuis un teacher EXTERNE (Grok, Claude, Deepseek,
+   * Mistral) via une fonction generate injectée — distillation des IA cloud
+   * vers le student local.
+   * @param {string[]} topics
+   * @param {Function} teacherGenerate — async (prompt, {maxTokens}) => text|{text}
+   * @returns {Promise<TrainingExample[]>}
+   */
+  async generateFromTeacher(topics, teacherGenerate) {
+    if (typeof teacherGenerate !== 'function') {
+      throw new Error('teacherGenerate (async fn) requis');
+    }
+    const dataset = [];
+    for (const topic of topics) {
+      const prompt = `Génère une réponse détaillée, précise et pédagogique sur : ${topic}.\nSois clair, structuré et bienveillant.`;
+      let text;
+      try {
+        const r = await teacherGenerate(prompt, { maxTokens: 1024 });
+        text = (r?.text ?? r ?? '').toString();
+      } catch (e) {
+        console.warn(`[Distillation] Teacher externe échec "${topic}": ${e.message}`);
+        continue;
+      }
+      if (!text.trim()) continue;
+      const quality = this.#scoreText(text);
+      if (quality < this.#config.minQualityThreshold) continue;
+      dataset.push(new TrainingExample({
+        instruction : `Explique en détail le sujet : ${topic}`,
+        input       : 'teacher externe',
+        output      : text,
+        qualityScore: quality,
+      }));
+      this.totalExamplesGenerated++;
+    }
+    console.info(`[Distillation] ${dataset.length} exemples depuis teacher externe`);
+    return dataset;
+  }
+
+  /** Convertit un dataset en leçons d'entraînement (bridge volant d'évolution). */
+  datasetToLessons(dataset) {
+    return dataset
+      .filter(e => e.output?.trim())
+      .map(e => `${e.instruction}\n${e.output}`);
+  }
 
   stats() {
     return {
