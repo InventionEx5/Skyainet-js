@@ -1,6 +1,7 @@
 {
   "name": "skyainet",
   "version": "1.0.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "SkyAInet x Nikola T369 - sovereign decentralized AI runtime (pure JS)",
