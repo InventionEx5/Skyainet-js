@@ -244,6 +244,34 @@ export class ReplayBuffer {
   get totalSamples() { return this.#totalSamples; }
   get isEmpty()      { return this.#size === 0; }
 
+  // ─── Bridge replay → entraînement (Fusion L2) ────────────────
+
+  /**
+   * Met à jour la priorité (importance) d'une expérience après apprentissage
+   * (mise à jour de priorité façon TD-error de PER).
+   */
+  updatePriority(exp, importance) {
+    if (exp) exp.importance = Math.max(IMPORTANCE_FLOOR, importance);
+    return this;
+  }
+
+  /**
+   * Extrait un lot d'expériences en leçons textuelles pour le Test-Time Training
+   * du LoRA. Par défaut priorise les expériences importantes (= erreurs) →
+   * apprentissage ciblé sur les points faibles.
+   * @param {number} k
+   * @param {{prioritized?: boolean}} [opts]
+   * @returns {string[]}
+   */
+  toLessons(k = 16, { prioritized = true } = {}) {
+    const batch = prioritized
+      ? this.prioritizedSample(k).map(x => x.exp)
+      : this.sample(k);
+    return batch
+      .filter(e => e && e.query && e.response)
+      .map(e => `Q: ${e.query}\nR: ${e.response}`);
+  }
+
   // ─── Privé ───────────────────────────────────────────────────
 
   /** Retourne un tableau de toutes les expériences non-null. */
