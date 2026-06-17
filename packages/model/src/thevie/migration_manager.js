@@ -9,8 +9,8 @@
 "use strict";
 
 import { randomBytes }                from 'crypto';
-import { RomanT369, GematriaMode }    from '../../../secure/src/crypto/roman_t369.js';
-import { Personality }                from './personality.js';
+import { RomanT369, GematriaMode }    from '#roman_t369';
+import { Personality }                from '#personality';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -33,6 +33,8 @@ export class TravelPackage {
     totalEvolutions   = 0,
     totalExperiences  = 0,
     memorySnapshot    = null,
+    adapter           = null,
+    adapterParams     = 0,
     checksum          = '',
     timestamp         = Date.now(),
   } = {}) {
@@ -41,6 +43,8 @@ export class TravelPackage {
     this.totalEvolutions  = totalEvolutions;
     this.totalExperiences = totalExperiences;
     this.memorySnapshot   = memorySnapshot; // string | null — leçons importantes
+    this.adapter          = adapter;        // hex | null — poids LoRA (poids vivants)
+    this.adapterParams    = adapterParams;  // nombre de paramètres de l'adapter
     this.checksum         = checksum;
     this.timestamp        = timestamp;
   }
@@ -100,7 +104,7 @@ export class MigrationManager {
    * @param {object}        [memory]        — { size, getBestLessons() }
    * @returns {string|null} — "ROMAN|<hex>" si chiffré, JSON sinon
    */
-  prepareTravel(personality, evolutionStats = {}, memory = null) {
+  prepareTravel(personality, evolutionStats = {}, memory = null, opts = {}) {
     if (!this.#enabled) return null;
     if (!(personality instanceof Personality)) {
       throw new TypeError('Expected Personality instance');
@@ -122,12 +126,26 @@ export class MigrationManager {
       }
     }
 
+    // Poids vivants : l'adapter LoRA voyage avec le neurone (Fusion L2)
+    let adapterHex = null, adapterParams = 0;
+    const ad = opts.adapter;
+    if (ad) {
+      const bytes = (ad instanceof Uint8Array) ? ad
+                  : (typeof ad.serialize === 'function' ? ad.serialize() : null);
+      if (bytes) {
+        adapterHex    = _toHex(bytes);
+        adapterParams = typeof ad.numParams === 'function' ? ad.numParams() : bytes.length;
+      }
+    }
+
     const pkg = new TravelPackage({
       version         : PACKAGE_VERSION,
       personality     : personalityJson,
       totalEvolutions : evolutionStats.totalEvolutions ?? 0,
       totalExperiences: memory?.size ?? 0,
       memorySnapshot,
+      adapter         : adapterHex,
+      adapterParams,
       checksum,
       timestamp       : Date.now(),
     });
@@ -219,6 +237,7 @@ export class MigrationManager {
     return {
       personality,
       package: new TravelPackage(pkg),
+      adapterBytes: pkg.adapter ? _fromHex(pkg.adapter) : null,
     };
   }
 
@@ -236,6 +255,11 @@ export class MigrationManager {
    */
   static generateKey() {
     return randomBytes(32);
+  }
+
+  /** Décode les octets de l'adapter LoRA d'un package reçu (ou null). */
+  static decodeAdapter(pkg) {
+    return pkg && pkg.adapter ? _fromHex(pkg.adapter) : null;
   }
 
   // ─── Privés ───────────────────────────────────────────────────
