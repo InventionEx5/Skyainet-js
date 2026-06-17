@@ -7,8 +7,8 @@
 
 "use strict";
 
-import { RomanDiffusion }          from './roman_diffusion.js';
-import { Personality }             from '../../model/src/thevie/personality.js';
+import { RomanDiffusion }          from '#roman_diffusion';
+import { Personality }             from '#personality';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -274,6 +274,55 @@ export class CollectivIn {
 
   /** Sagesse collective — proxy pour Neurone.fromCollective() */
   getAvgWisdom() { return this.globalWisdom; }
+
+  // ─── Population croissante + apprentissage (Fusion L4) ───────
+
+  /**
+   * Ajoute une personnalité au collectif (population croissante).
+   * Réalloue le buffer plat ; traits par défaut = personnalité moyenne actuelle.
+   * @param {object|number[]} [traits]
+   * @returns {number} nouvelle taille de population
+   */
+  addPersonality(traits = null) {
+    const def  = this.massiveFuse();              // moyenne actuelle comme base
+    const next = new Float32Array((this._n + 1) * DIMS);
+    next.set(this.#data, 0);
+    const order = ['benevolence', 'truthfulness', 'creativity', 'wisdom', 'cooperation', 'curiosity', 'ethics', 'resilience'];
+    const arr = Array.isArray(traits) ? traits : null;
+    const obj = (traits && !arr) ? traits : null;
+    const b   = this._n * DIMS;
+    for (let d = 0; d < DIMS; d++) {
+      let v = def[d];
+      if (arr && d < arr.length)                   v = arr[d];
+      else if (obj && obj[order[d]] !== undefined) v = obj[order[d]];
+      next[b + d] = Math.max(0.10, Math.min(0.99, v));
+    }
+    this.#data = next;
+    this._n++;
+    console.info(`[CollectivIn] Personnalité ajoutée — population: ${this._n}`);
+    return this._n;
+  }
+
+  /**
+   * Absorbe une leçon dans le collectif : mémorise + ajuste légèrement les
+   * traits selon la qualité (bonnes leçons → sagesse/cohérence ; erreurs →
+   * émergence : le collectif apprend aussi de ses erreurs).
+   * @param {{quality?: number, content?: string, query?: string}|string} lesson
+   * @returns {number} sagesse globale mise à jour
+   */
+  learnFromLesson(lesson) {
+    const isObj   = lesson && typeof lesson === 'object';
+    const q       = isObj ? (lesson.quality ?? 0.6) : 0.6;
+    const content = isObj ? (lesson.content ?? lesson.query ?? '') : String(lesson);
+    if (content) this.addCollectiveMemory(content);
+    if (q >= 0.6) {
+      this.globalWisdom   = Math.min(this.globalWisdom + q * 0.01, 0.99);
+      this.coherenceLevel = Math.min(this.coherenceLevel + 0.004, 0.98);
+    } else {
+      this.emergentIntelligence = Math.min(this.emergentIntelligence + 0.006, 0.99);
+    }
+    return this.globalWisdom;
+  }
 
   // ─── Stats & Compat ──────────────────────────────────────────
 
