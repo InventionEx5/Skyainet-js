@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { T369Model } from './t369.js';
+import { T369Model } from '#t369';
 
 export const ParallelStrategy = Object.freeze({
   None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Hybrid: 'Hybrid',
@@ -85,6 +85,19 @@ export class ParallelExecutor {
       case ParallelStrategy.Hybrid:   return this.hybridParallelForward(tokens);
       default:                        return this.model.forward(tokens);
     }
+  }
+
+  // ── Configuration runtime (Fusion L1) ──
+  setStrategy(strategy) { this.config.strategy = strategy; return this; }
+  setWorkers(n)         { this.config.numWorkers = Math.max(1, n | 0); return this; }
+  capabilities() {
+    return {
+      strategy      : this.config.strategy,
+      workers       : this.config.numWorkers,
+      pipelineStages: this.config.pipelineStages,
+      tensorDegree  : this.config.tensorParallelDegree,
+      cpus          : detectCpus(),
+    };
   }
 
   _embed(tokens) {
