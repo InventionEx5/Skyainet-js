@@ -8,19 +8,19 @@
 
 "use strict";
 
-import { DreamCycle }       from './dream_cycle.js';
-import { LoraEvo }          from './lora_evolution.js';
-import { EvolutionManager } from '../../node/src/evolution_manager.js';
-import { SkyCloud as SkyNode }          from '../../node/src/skycloud.js';
-import { MeshIn }           from '../../t369-inference/src/meshin.js';
-import { CollectivIn }      from '../../t369-inference/src/collectivin.js';
-import { InDream }          from '../../t369-inference/src/indream.js';
-import { InSelf }           from '../../t369-inference/src/inself.js';
-import { InAware }          from '../../t369-inference/src/inaware.js';
+import { DreamCycle }       from '#dream_cycle';
+import { LoraEvo }          from '#lora_evolution';
+import { EvolutionManager } from '#evolution_manager';
+import { SkyCloud as SkyNode }          from '#skycloud';
+import { MeshIn }           from '#meshin';
+import { CollectivIn }      from '#collectivin';
+import { InDream }          from '#indream';
+import { InSelf }           from '#inself';
+import { InAware }          from '#inaware';
 
 // Sentinel package — classes autonomes (sentinel/)
-import { Sentinel as SentinelCore }  from '../../../sentinel/src/sentinel.js';
-import { AntiFork }                  from '../../../sentinel/src/anti_fork.js';
+import { Sentinel as SentinelCore }  from '#sentinel';
+import { AntiFork }                  from '#anti_fork';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -361,6 +361,44 @@ export class Thevie {
     return response;
   }
 
+  // ── Raisonnement frontière — inference-time compute scaling (L3) ──
+  // Best-of-N : génère plusieurs candidats à températures variées et retient
+  // le meilleur selon le scoreur de l'expert. Plus de calcul = meilleur
+  // raisonnement (style R1/o1), sans démultiplier les effets de bord de
+  // processQuery (un seul comptage, un seul stockage mémoire).
+  async deepReason(query, { samples = 3 } = {}) {
+    const q          = typeof query === 'string' ? { content: query } : query;
+    const expertName = this.#router.select(q.content);
+    const expert     = this.#experts.get(expertName);
+    const prompt     = EXPERT_PROMPTS[expertName](this.#buildContextualPrompt(q.content));
+
+    const temps = [0.3, 0.7, 1.0];
+    const candidates = [];
+    for (let i = 0; i < Math.max(1, samples); i++) {
+      try {
+        const result = await this.#node.generateWithAI({
+          prompt, ai: 'thevie', maxTokens: 512,
+          temperature: temps[i % temps.length], useSpeculative: false,
+        });
+        const text = result.text ?? result;
+        candidates.push({ text, score: expert.score(text) });
+      } catch (e) {
+        console.warn('[Thevie] deepReason échantillon:', e.message);
+      }
+    }
+    if (candidates.length === 0) return this.processQuery(query); // repli
+
+    candidates.sort((a, b) => b.score - a.score);          // best-of-N
+    const best     = candidates[0];
+    const response = expert.process(q, best.text);
+    this.#memory.store(q, response);
+    response.reasoning = {
+      mode: 'deep', samples: candidates.length,
+      bestScore: +best.score.toFixed(3), expert: expertName,
+    };
+    return response;
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Tâches périodiques regroupées
   // ─────────────────────────────────────────────────────────────
@@ -688,8 +726,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // GESTION D'ÉNERGIE DU NŒUD
   // ═══════════════════════════════════════════════════════════════
-
-  /** Met le nœud en veille intelligente — réduit les cycles périodiques. */
+/** Met le nœud en veille intelligente — réduit les cycles périodiques. */
   async sleepNode() {
     this.#node.setState('Sleeping');
     // Suspendre le moteur LoraEvo pour libérer la mémoire
@@ -953,8 +990,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // RÉSEAU & CONNEXION
   // ═══════════════════════════════════════════════════════════════
-
-  /**
+/**
    * Génère les données QR de connexion du nœud courant.
    * Format : JSON encodé avec id, wisdomScore et adresses pairs.
    */
@@ -985,7 +1021,8 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // GOUVERNANCE & RÉCOMPENSES
   // ═══════════════════════════════════════════════════════════════
-/**
+
+  /**
    * Envoie le score éthique d'un nœud vers le treasury on-chain.
    * Prépare le terrain pour l'intégration blockchain.
    *
