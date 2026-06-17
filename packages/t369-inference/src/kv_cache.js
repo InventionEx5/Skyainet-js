@@ -1,8 +1,8 @@
 // packages/t369-inference/src/kv_cache.js
 // =====================================================
-// KVCache — Flat TypedArray, O(1) append, sliding window
-// Allocation unique, prefill batch, compat API d'origine
-// SkyAInet × Nikola T369
+// KVCache — Flat TypedArray, O(1) append, sliding window — Fusion L1
+// Allocation unique, prefill batch + PREFIX CACHE (réutilisation du KV d'un
+// préfixe de prompt commun entre requêtes). SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
@@ -75,4 +75,81 @@ export class KVCache {
     }
     this._K = nK; this._V = nV; this._layerSize = newLS; this.maxSeqLen = newMax;
   }
+
+  // ── Snapshot / restore pour PREFIX CACHE (Fusion L1) ──────────
+  // Copie compacte du KV des `len` premières positions (toutes couches).
+  snapshot(len = this.currentSeqLen) {
+    const slot = this._slot, L = this.numLayers;
+    len = Math.min(len, this.currentSeqLen, this.maxSeqLen);
+    const K = new Float32Array(L * len * slot);
+    const V = new Float32Array(L * len * slot);
+    for (let l = 0; l < L; l++) {
+      const src = l * this._layerSize;
+      K.set(this._K.subarray(src, src + len * slot), l * len * slot);
+      V.set(this._V.subarray(src, src + len * slot), l * len * slot);
+    }
+    return { len, slot, numLayers: L, K, V };
+  }
+
+  // Recharge un snapshot (positionne currentSeqLen sur sa longueur). O(copie).
+  restoreSnapshot(snap) {
+    if (!snap || snap.slot !== this._slot || snap.numLayers !== this.numLayers) return false;
+    const { len, slot, K, V } = snap;
+    if (len > this.maxSeqLen) return false;
+    for (let l = 0; l < this.numLayers; l++) {
+      const dst = l * this._layerSize;
+      this._K.set(K.subarray(l * len * slot, (l + 1) * len * slot), dst);
+      this._V.set(V.subarray(l * len * slot, (l + 1) * len * slot), dst);
+    }
+    this.currentSeqLen = len;
+    return true;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// PREFIX CACHE STORE (Fusion L1)
+//
+// Mémorise le KV de préfixes de prompts déjà calculés. À la requête suivante,
+// le plus long préfixe commun est restauré → on ne recalcule que le suffixe.
+// Gain majeur sur prompts système / few-shot répétés.
+// ─────────────────────────────────────────────────────────────────
+
+export class PrefixCacheStore {
+  constructor(maxEntries = 16) {
+    this.maxEntries = maxEntries;
+    this._map = new Map();   // key -> { tokens, snapshot }
+    this.hits = 0; this.misses = 0;
+  }
+
+  static hashTokens(tokens, len = tokens.length) {
+    let h = 2166136261;
+    for (let i = 0; i < len; i++) { h ^= tokens[i] | 0; h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(36) + ':' + len;
+  }
+
+  store(tokens, snapshot) {
+    const key = PrefixCacheStore.hashTokens(tokens, snapshot.len);
+    if (this._map.size >= this.maxEntries && !this._map.has(key)) {
+      this._map.delete(this._map.keys().next().value); // FIFO
+    }
+    this._map.set(key, { tokens: Array.prototype.slice.call(tokens, 0, snapshot.len), snapshot });
+    return this;
+  }
+
+  // Plus long préfixe stocké qui préfixe `tokens`. Renvoie {snapshot, prefixLen} ou null.
+  match(tokens) {
+    let best = null, bestLen = 0;
+    for (const entry of this._map.values()) {
+      const t = entry.tokens;
+      if (t.length > tokens.length || t.length <= bestLen) continue;
+      let ok = true;
+      for (let i = 0; i < t.length; i++) { if (t[i] !== tokens[i]) { ok = false; break; } }
+      if (ok) { best = entry.snapshot; bestLen = t.length; }
+    }
+    if (best) { this.hits++; return { snapshot: best, prefixLen: bestLen }; }
+    this.misses++; return null;
+  }
+
+  clear() { this._map.clear(); return this; }
+  stats() { return { entries: this._map.size, hits: this.hits, misses: this.misses }; }
 }
