@@ -46,6 +46,7 @@
     "#gematria_aead": "./gematria_aead.js",
     "#governance": "./governance.js",
     "#gpu_cpu": "./gpu_cpu.js",
+    "#gpu_kernels": "./gpu_kernels.js",
     "#graphql": "./graphql.js",
     "#handshake": "./handshake.js",
     "#hybrid": "./hybrid.js",
