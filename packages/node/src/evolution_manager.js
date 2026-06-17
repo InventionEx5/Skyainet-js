@@ -17,9 +17,9 @@
 "use strict";
 
 import { writeFile, mkdir }              from 'fs/promises';
-import { ZipMemory }                     from '../../memory/src/zip_memory.js';
-import { Dilithium5Signer }              from '../../secure/src/crypto/dilithium.js';
-import { LoraAdapter, crossEntropyGrad } from './lora_trainer.js';
+import { ZipMemory }                     from '#zip_memory';
+import { Dilithium5Signer }              from '#dilithium';
+import { LoraAdapter, crossEntropyGrad } from '#lora_trainer';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -578,6 +578,34 @@ export class EvolutionManager {
   }
 
   async runEvolutionCycle() { return this.runDreamCycle(); }
+
+  // ─── Bridge poids vivants → swarm + migration (Fusion L2) ────
+
+  /** Expose l'adapter LoRA partagé (micro-update + batch) ou null. */
+  getAdapter() { return this.#loraAdapter; }
+
+  /** Octets sérialisés de l'adapter pour migration inter-nœuds (ou null). */
+  exportAdapterForTravel() {
+    return this.#loraAdapter ? this.#loraAdapter.serialize() : null;
+  }
+
+  /**
+   * Enregistre l'adapter entraîné dans le Dynamic Adapter Swarm (model_registry)
+   * → hot-swappable + découvrable (boucle des poids vivants).
+   * @param {object} registry — ModelRegistry
+   * @param {string} [name]
+   */
+  registerInSwarm(registry, name = `evolution-v${this.#trainingCount}`) {
+    if (!registry || typeof registry.registerAdapter !== 'function')
+      throw new Error('registry.registerAdapter requis');
+    registry.registerAdapter({
+      name, task: 'general', runner: 'thevie', source: 'lesson',
+      baseModel: 'thevie-distilled-3b',
+      rank: this.#loraAdapter?.rank ?? 8, version: this.#trainingCount,
+      specialties: ['general', 'continual-learning', 'evolution'],
+    });
+    return name;
+  }
 }
 
 export default EvolutionManager;
