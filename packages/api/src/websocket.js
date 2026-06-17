@@ -28,6 +28,8 @@ const MessageType = Object.freeze({
   NODE          : 'node',
   DREAM         : 'dream',
   LEARN         : 'learn',
+  THEVIE_RUN    : 'thevie_run',
+  MESH_STATS    : 'mesh_stats',
   PING          : 'ping',
 });
 
@@ -44,6 +46,8 @@ const MessageType = Object.freeze({
 //   node          — informations du nœud
 //   dream         — déclenche un Dream Cycle
 //   learn         — injecte une leçon dans SkyCloud
+//   thevie_run    — orchestration Thevie (étapes diffusées en temps réel)
+//   mesh_stats    — stats du mesh souverain
 //   ping          — keepalive
 // ─────────────────────────────────────────────────────────────────
 
@@ -198,6 +202,32 @@ class WsHandler {
         } catch (e) {
           this.#send({ type: 'error', message: e.message });
         }
+        break;
+      }
+
+      // ── Orchestration Thevie (Runner Swarm, L6) ──────────────────
+      case MessageType.THEVIE_RUN: {
+        if (!msg.goal?.trim()) {
+          return this.#send({ type: 'error', message: 'Champ "goal" requis' });
+        }
+        try {
+          const onStep  = step => this.#send({ type: 'thevie_step', step });
+          const session = await this.#skycloud.runThevieTask?.(msg.goal, onStep, msg.opts ?? {});
+          this.#send({ type: 'thevie_result', session, timestamp: Date.now() });
+        } catch (e) {
+          this.#send({ type: 'error', message: e.message });
+        }
+        break;
+      }
+
+      // ── Stats du mesh souverain (L6) ─────────────────────────────
+      case MessageType.MESH_STATS: {
+        this.#send({
+          type     : 'mesh_stats',
+          mesh     : this.#skycloud.getCommStats?.() ?? {},
+          peers    : this.#skycloud.getPeers?.()?.length ?? 0,
+          timestamp: Date.now(),
+        });
         break;
       }
 
