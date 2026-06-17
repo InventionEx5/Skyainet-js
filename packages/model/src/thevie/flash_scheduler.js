@@ -45,6 +45,8 @@ export class FlashScheduler {
   #intervalS;       // intervalle en secondes
   #isRunning;
   #stats;
+  #wisdomCritical;  // seuil sagesse critique (réglable runtime)
+  #wisdomLow;       // seuil sagesse basse (réglable runtime)
 
   /**
    * @param {object} thevie       — instance Thevie
@@ -64,6 +66,8 @@ export class FlashScheduler {
       skippedCooldown: 0,
       lastFlashAt    : null,
     };
+    this.#wisdomCritical = WISDOM_CRITICAL;
+    this.#wisdomLow      = WISDOM_LOW;
   }
 
   // ─── Cycle de vie ─────────────────────────────────────────────
@@ -110,6 +114,17 @@ export class FlashScheduler {
     return this.#tick();
   }
 
+  /**
+   * Règle la sensibilité du scheduler à chaud (Fusion L1).
+   * @param {{wisdomLow?:number, wisdomCritical?:number, intervalS?:number}} opts
+   */
+  tune({ wisdomLow, wisdomCritical, intervalS } = {}) {
+    if (typeof wisdomLow === 'number')      this.#wisdomLow = wisdomLow;
+    if (typeof wisdomCritical === 'number') this.#wisdomCritical = wisdomCritical;
+    if (typeof intervalS === 'number')      this.setInterval(intervalS);
+    return this;
+  }
+
   // ─── Accesseurs ───────────────────────────────────────────────
 
   get isRunning()  { return this.#isRunning; }
@@ -137,8 +152,8 @@ export class FlashScheduler {
     const cooldownOk = (this.#tickCount - this.#lastFlashTick) >= POST_FLASH_COOLDOWN;
 
     // — Décision de déclenchement (port de la logique Rust)
-    const critical = wisdom < WISDOM_CRITICAL;
-    const normal   = wisdom < WISDOM_LOW
+    const critical = wisdom < this.#wisdomCritical;
+    const normal   = wisdom < this.#wisdomLow
                   || this.#tickCount % NATURAL_RHYTHM  === 0
                   || queries         % ACTIVITY_RHYTHM === 0;
 
