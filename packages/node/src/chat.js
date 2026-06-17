@@ -193,7 +193,7 @@ export class AIChatManager {
    * @param {number}       [opts.temperature]
    * @returns {Promise<{ userMessage: Message, aiMessage: Message }>}
    */
-  async handleUserChat({ prompt, attachments = [], ai = null, maxTokens = 512, temperature = 0.8 }) {
+  async handleUserChat({ prompt, attachments = [], ai = null, maxTokens = 512, temperature = 0.8, reasoning = 'balanced', samples = 3 }) {
     if (!prompt?.trim() && attachments.length === 0) {
       throw new Error('Message vide — texte ou pièce jointe requis');
     }
@@ -228,13 +228,11 @@ export class AIChatManager {
     // 3. Construire le prompt enrichi
     const enrichedPrompt = this.#buildEnrichedPrompt(prompt, validAttachments);
 
-    // 4. Générer la réponse IA via SkyCloud
-    const result = await this.#skycloud.generateWithAI({
-      prompt     : enrichedPrompt,
-      ai         : targetAI,
-      maxTokens,
-      temperature,
-    });
+    // 4. Générer la réponse IA via SkyCloud.
+    //    reasoning 'deep' → inference-time compute scaling (self-consistency).
+    const result = reasoning === 'deep'
+      ? await this.#deepReason({ prompt: enrichedPrompt, ai: targetAI, maxTokens, samples })
+      : await this.#skycloud.generateWithAI({ prompt: enrichedPrompt, ai: targetAI, maxTokens, temperature });
 
     // 5. Stocker les messages dans la conversation
     const userMessage = new Message({
@@ -262,7 +260,39 @@ export class AIChatManager {
 
     console.debug(`[Chat] ${targetAI} → ${result.tokensGenerated ?? '?'} tokens | conv: ${conv.id}`);
 
-    return { userMessage, aiMessage };
+    return { userMessage, aiMessage, reasoning: result.reasoning ?? null };
+  }
+
+  // ─── Raisonnement frontière — inference-time compute scaling (L3) ──
+
+  /**
+   * Self-consistency / best-of-N : génère plusieurs candidats à températures
+   * variées puis sélectionne le plus consensuel. Plus de calcul = meilleur
+   * raisonnement (style R1/o1), sans changer le modèle sous-jacent.
+   * @returns {Promise<object>} résultat compatible generateWithAI + { reasoning }
+   */
+  async #deepReason({ prompt, ai, maxTokens, samples = 3 }) {
+    const temps = [0.3, 0.7, 1.0];
+    const candidates = [];
+    for (let i = 0; i < Math.max(1, samples); i++) {
+      try {
+        const r = await this.#skycloud.generateWithAI({
+          prompt, ai, maxTokens, temperature: temps[i % temps.length],
+        });
+        if (r?.text) candidates.push(r);
+      } catch (e) {
+        console.warn(`[Chat] Échantillon ${i} échoué : ${e.message}`);
+      }
+    }
+    if (candidates.length === 0) throw new Error('[Chat] Deep reasoning : aucune réponse générée');
+    if (candidates.length === 1) {
+      return { ...candidates[0], reasoning: { mode: 'deep', samples: 1, selected: 0, agreement: 1 } };
+    }
+    const { index, agreement } = _selectConsensus(candidates.map(c => c.text));
+    return {
+      ...candidates[index],
+      reasoning: { mode: 'deep', samples: candidates.length, selected: index, agreement: +agreement.toFixed(3) },
+    };
   }
 
   // ─── Conversations ────────────────────────────────────────────
@@ -406,4 +436,36 @@ export class AIChatManager {
 
     return `${prompt}\n\n${descriptions.join('\n')}`;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// HELPERS — self-consistency (sélection du consensus)
+// ─────────────────────────────────────────────────────────────────
+
+function _tokenSet(text) {
+  return new Set(String(text).toLowerCase().match(/\b\w+\b/g) ?? []);
+}
+
+function _jaccard(a, b) {
+  let inter = 0;
+  for (const w of a) if (b.has(w)) inter++;
+  const union = a.size + b.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/**
+ * Choisit la réponse la plus "centrale" parmi N candidats : celle dont la
+ * similarité moyenne aux autres est la plus élevée (consensus self-consistency).
+ * @returns {{ index: number, agreement: number }}
+ */
+function _selectConsensus(texts) {
+  const sets = texts.map(_tokenSet);
+  let bestIdx = 0, bestAvg = -1;
+  for (let i = 0; i < sets.length; i++) {
+    let sum = 0;
+    for (let j = 0; j < sets.length; j++) if (i !== j) sum += _jaccard(sets[i], sets[j]);
+    const avg = sets.length > 1 ? sum / (sets.length - 1) : 1;
+    if (avg > bestAvg) { bestAvg = avg; bestIdx = i; }
+  }
+  return { index: bestIdx, agreement: bestAvg };
 }
