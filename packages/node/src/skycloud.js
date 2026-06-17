@@ -4,36 +4,36 @@
 
 "use strict";
 
-import { Dilithium5Signer }                       from '../../secure/src/crypto/dilithium.js';
-import { HybridTransport }                        from '../../secure/src/crypto/hybrid.js';
-import { GematriaAead }                           from '../../secure/src/crypto/gematria_aead.js';
-import { RomanT369, GematriaMode }                from '../../secure/src/crypto/roman_t369.js';
-import { UserRewards, RewardReason, AccountType } from '../../core/src/rewards.js';
-import { NodeState }                              from './node_types.js';
-import { ZipMemory }                              from '../../memory/src/zip_memory.js';
-import { EvolutionManager }                       from './evolution_manager.js';
-import { StorageNode }                            from '../../memory/src/storage.js';
+import { Dilithium5Signer }                       from '#dilithium';
+import { HybridTransport }                        from '#hybrid';
+import { GematriaAead }                           from '#gematria_aead';
+import { RomanT369, GematriaMode }                from '#roman_t369';
+import { UserRewards, RewardReason, AccountType } from '#rewards';
+import { NodeState }                              from '#node_types';
+import { ZipMemory }                              from '#zip_memory';
+import { EvolutionManager }                       from '#evolution_manager';
+import { StorageNode }                            from '#storage';
 
-import { T369Model, ModelConfig }                 from '../../t369-inference/src/t369.js';
-import { BpeTokenizer }                           from '../../t369-inference/src/tokenizer.js';
-import { SpeculativeDecoder, SpeculativeConfig }  from '../../t369-inference/src/speculative.js';
-import { InSelf }                                 from '../../t369-inference/src/inself.js';
-import { InAware }                                from '../../t369-inference/src/inaware.js';
-import { WebSearch }                              from './web_search.js';
+import { T369Model, ModelConfig }                 from '#t369';
+import { BpeTokenizer }                           from '#tokenizer';
+import { SpeculativeDecoder, SpeculativeConfig }  from '#speculative';
+import { InSelf }                                 from '#inself';
+import { InAware }                                from '#inaware';
+import { WebSearch }                              from '#web_search';
 
-import { DreamCycle }  from '../../../model/src/thevie/dream_cycle.js';
-import { LoraEvo }     from '../../../model/src/thevie/lora_evolution.js';
-import { NodeCommunication, Topic } from './node_communication.js';
-import { AgenticRunner } from './agentic.js';
-import { ModelRegistry } from '../../../model/src/thevie/model_registry.js';
-import { NodeEconomics }  from '../../core/src/economics.js';
-import { SkyWallet }      from '../../financial/src/wallet.js';
-import { TreasuryManager }from '../../financial/src/treasury.js';
-import { UserProfile, VerificationLevel } from '../../core/src/profile.js';
-import { i18n as skyI18n, I18nManager }   from '../../core/src/i18n.js';
-import { NodeManager }                     from './node_manager.js';
-import { ComputeMarketplace }              from './marketplace.js';
-import { GpuCpuMarketplaceService }        from './gpu_cpu.js';
+import { DreamCycle }  from '#dream_cycle';
+import { LoraEvo }     from '#lora_evolution';
+import { NodeCommunication, Topic } from '#node_communication';
+import { ThevieRunner } from '#thevie';
+import { ModelRegistry } from '#model_registry';
+import { NodeEconomics }  from '#economics';
+import { SkyWallet }      from '#wallet';
+import { TreasuryManager }from '#treasury';
+import { UserProfile, VerificationLevel } from '#profile';
+import { i18n as skyI18n, I18nManager }   from '#i18n';
+import { NodeManager }                     from '#node_manager';
+import { ComputeMarketplace }              from '#marketplace';
+import { GpuCpuMarketplaceService }        from '#gpu_cpu';
 
 // =====================================================
 // CONSTANTES
@@ -432,10 +432,6 @@ class T369InferenceEngine {
   }
 }
 
-// =====================================================
-// AGENT AGENTIQUE — implémentation inline (ThevieAgent absent du projet)
-// Planification → Exécution par étapes → Synthèse
-// =====================================================
 
 // =====================================================
 // API KEY STORE
@@ -453,7 +449,6 @@ class T369InferenceEngine {
 //   rewards:claim    — claimRewards
 //   admin            — accès total (toutes les routes)
 // =====================================================
-
 const ALL_SCOPES = Object.freeze([
   'inference:read', 'inference:write',
   'storage:read',   'storage:write',
@@ -750,6 +745,7 @@ function _inferContentType(path) {
 //   ✦ Support statique + backend léger (assets, SPA, API simple)
 //   ✦ Pas de censure — décentralisé sur le réseau SkyAInet
 // =====================================================
+
 class HostedSite {
   constructor({ id, name, domain, owner, createdAt = Date.now() }) {
     this.id            = id;
@@ -794,7 +790,6 @@ class HostedSite {
 const PERSONAS = Object.freeze({
   thevie  : 'Tu es Thevie, une intelligence collective souveraine de SkyAInet.',
   loraevo : 'Tu es LoraÉvo, un guide auto-évolutif bienveillant.',
-  agentic : 'Tu es en mode Agentique. Tu planifies et exécutes des tâches complexes.',
   t369    : 'Tu es T369, le moteur d\'inférence natif de SkyAInet.',
 });
 
@@ -836,7 +831,7 @@ export class SkyCloud {
 
   #dreamCycle;       // DreamCycle
   #loraEvo;          // LoraEvo
-  #agenticRunner;    // AgenticRunner (lazy)
+  #thevieRunner;     // ThevieRunner (lazy)
   #modelRegistry;    // ModelRegistry — catalogue des modèles locaux + cloud
   #skyWallet;        // SkyWallet — wallet ERC-20 de l'utilisateur (optionnel)
   #nodeEcon;         // NodeEconomics — rewards + abonnements + payouts
@@ -884,7 +879,7 @@ export class SkyCloud {
     this.#engine         = new T369InferenceEngine(modelConfig);
     this.#dreamCycle     = new DreamCycle();
     this.#loraEvo        = new LoraEvo();
-    this.#agenticRunner  = null;
+    this.#thevieRunner   = null;
     this.#modelRegistry  = new ModelRegistry();
     this.#skyWallet      = null;
     this.#nodeEcon       = new NodeEconomics(AccountType.Free);
@@ -1000,8 +995,8 @@ export class SkyCloud {
     if (this.#engine.isReady) {
       this.#loraEvo.connectToInference(this.#engine);
       this.#dreamCycle.injectModel(this.#engine.model);
-      // Connecter AgenticRunner au moteur si déjà instancié
-      if (this.#agenticRunner) this.#agenticRunner.connectEngine(this.#engine);
+      // Connecter ThevieRunner au moteur si déjà instancié
+      if (this.#thevieRunner) this.#thevieRunner.connectEngine(this.#engine);
     }
   }
 
@@ -1015,7 +1010,6 @@ export class SkyCloud {
   _registerBuiltinAIs() {
     this.registerAI('thevie',  'Thevie — Intelligence Collective');
     this.registerAI('loraevo', 'LoraÉvo — Guide Évolutif');
-    this.registerAI('agentic', 'Agentic Mode — Tâches Complexes');
     this.registerAI('t369',    'T369 — Moteur d\'Inférence Natif');
   }
 
@@ -1305,9 +1299,7 @@ enableGateway(port = 8080) {
 
 
   // ─── Génération ───────────────────────────────────────────────
-
-
-  /**
+/**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -1411,7 +1403,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Leçon + Évolution ────────────────────────────────────────
-async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
+
+  async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
     if (!lesson?.trim()) throw new Error('Leçon invalide');
 
     const quality = Number(qualityScore) || 0.85;
@@ -1652,34 +1645,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   /** Expose le NodeCommunication pour les peers qui en ont besoin (MixedNode). */
   get communication() { return this.#communication; }
 
-  // ─── Mode agentique ───────────────────────────────────────────
-
-  async runAgenticTask(goal, onStep = null, opts = {}) {
-    if (!this.#agenticRunner) {
-      this.#agenticRunner = new AgenticRunner(this, this.#engine.isReady ? this.#engine : null);
-    }
-    return this.#agenticRunner.run(goal, onStep, opts);
-  }
-
-  /** Retourne le catalogue des outils Agentic. */
-  getAgenticToolCatalog() {
-    if (!this.#agenticRunner) {
-      this.#agenticRunner = new AgenticRunner(this);
-    }
-    return this.#agenticRunner.getToolCatalog();
-  }
-
-  /** Retourne l'historique des sessions Agentic. */
-  listAgenticSessions() {
-    return this.#agenticRunner?.listSessions() ?? [];
-  }
-
-  /** Retourne les stats Agentic. */
-  getAgenticStats() {
-    return this.#agenticRunner?.getStats() ?? { sessions: 0, toolCount: 0, engineReady: false };
-  }
-
-  // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
+  // ─── Orchestration Thevie ─────────────────────────────────────
 
   /**
    * Génère un Smart Contract Solidity via LoraÉvo.
@@ -2047,8 +2013,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   }
 
   // ─── Wallet & Récompenses ─────────────────────────────────────
-
-  /**
+/**
    * Retourne le solde SKY du wallet interne + les stats de récompenses.
    */
   getRewardsStats() {
@@ -2071,7 +2036,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
    *   → SkyWallet.creditLocal(amount)
    *   → #walletBalance mis à jour
    *
-   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @param {import('#wallet').SkyWallet|null} wallet
    * @returns {Promise<{ claimed: number, walletBalance: number }>}
    */
   async claimRewards(wallet = null) {
@@ -2175,7 +2140,8 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-/**
+
+  /**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
@@ -2327,8 +2293,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   }
 
   // ─── Abonnements ──────────────────────────────────────────────
-
-  /**
+/**
    * Souscrit à un plan d'abonnement SKY.
    *
    * Logique :
@@ -2504,7 +2469,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
    *
    * @param {string} context
    * @param {number} amount
-   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @param {import('#wallet').SkyWallet|null} wallet
    */
   #autoDebit(context, amount, wallet = null) {
     const sub = this.#subscriptions.get(context);
@@ -2606,8 +2571,7 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   }
 
   // ─── Dream Cycle direct ───────────────────────────────────────
-
-  async runDreamCycle() {
+async runDreamCycle() {
     const result = await this.#dreamCycle.runDreamCycle();
     this.#evolutionCycles++;
     this.#lastDreamCycle = Date.now();
@@ -2615,7 +2579,8 @@ async injectLesson(lesson, source = 'manual', qualityScore = 0.85) {
   }
 
   // ─── Tauri Commands ───────────────────────────────────────────
-apiHandlers() {
+
+  apiHandlers() {
     const n = this;
     return {
       // Web Hosting
@@ -2694,10 +2659,10 @@ apiHandlers() {
       propagateLessons          : peerComms            => n.propagateLessons(peerComms),
       requestLessons            : (peerComm, filter)  => n.requestLessons(peerComm, filter),
       getCommStats              : ()                   => n.getCommStats(),
-      runAgenticTask            : (goal, onStep, opts) => n.runAgenticTask(goal, onStep, opts),
-      getAgenticToolCatalog     : ()                   => n.getAgenticToolCatalog(),
-      listAgenticSessions       : ()                   => n.listAgenticSessions(),
-      getAgenticStats           : ()                   => n.getAgenticStats(),
+      runThevieTask             : (goal, onStep, opts) => n.runThevieTask(goal, onStep, opts),
+      getThevieToolCatalog      : ()                   => n.getThevieToolCatalog(),
+      listThevieSessions        : ()                   => n.listThevieSessions(),
+      getThevieStats            : ()                   => n.getThevieStats(),
       // Smart Contracts — LoraÉvo
       generateSmartContract     : (desc, opts) => n.generateSmartContract(desc, opts),
       deploySmartContract       : contractId  => n.deploySmartContract(contractId),
@@ -2784,7 +2749,7 @@ apiHandlers() {
       // Internals (debug)
       getLoraEvoStatus          : () => n.#loraEvo?.getStatus(),
       getDreamCycleStats        : () => n.#dreamCycle?.getStats(),
-      getAgentStatus            : () => n.#agenticRunner?.getStatus() ?? { engineReady: n.#engine.isReady, mode: 'agentic' },
+      getThevieRunnerStatus     : () => n.#thevieRunner?.getStatus() ?? { engineReady: n.#engine.isReady, mode: 'thevie' },
     };
   }
 }
