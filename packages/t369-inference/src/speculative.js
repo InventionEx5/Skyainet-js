@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { T369Model } from './t369.js';
+import { T369Model } from '#t369';
 
 export class SpeculativeConfig {
   constructor() {
@@ -15,6 +15,7 @@ export class SpeculativeConfig {
     this.maxSpeculativeTokens = 6;
     this.acceptanceThreshold  = 0.72;
     this.draftLayerRatio      = 0.5;
+    this.adaptive             = true;   // γ adaptatif selon le taux d'acceptation
   }
 }
 
@@ -35,6 +36,8 @@ export class SpeculativeDecoder {
 
     this._proposed = 0;
     this._accepted = 0;
+    this._rounds   = 0;
+    this._acceptedRunSum = 0;
   }
 
   async speculativeGenerate(promptTokens, maxNewTokens) {
@@ -42,23 +45,26 @@ export class SpeculativeDecoder {
     let generated = 0;
 
     while (generated < maxNewTokens) {
-      const draft = await this._propose(tokens);
+      const gamma = this._adaptiveGamma();
+      const draft = await this._propose(tokens, gamma);
       if (draft.length === 0) break;
       const accepted = await this._verify(tokens, draft);
 
+      let run = 0;
       for (const tok of accepted) {
-        tokens.push(tok); generated++;
+        tokens.push(tok); generated++; run++;
         if (tok === 1 || generated >= maxNewTokens) break;
       }
       this._proposed += draft.length;
       this._accepted += accepted.length;
+      this._rounds++; this._acceptedRunSum += run;
       if (generated >= maxNewTokens) break;
     }
     return tokens;
   }
 
-  async _propose(current) {
-    const γ = this.config.maxSpeculativeTokens;
+  async _propose(current, gamma = this.config.maxSpeculativeTokens) {
+    const γ = gamma;
     const draft = [], tmp = [...current];
     for (let i = 0; i < γ; i++) {
       const logits = this.draftModel.forward(tmp);
@@ -96,11 +102,35 @@ export class SpeculativeDecoder {
     return mi;
   }
 
+  // ── Spéculation adaptative (Fusion L1) ──
+  // γ croît avec le taux d'acceptation : on accepte beaucoup → on propose plus loin.
+  static nextGamma(rate, max, proposed) {
+    if (proposed < 4) return max;                        // warmup
+    return Math.max(2, Math.min(max, 2 + Math.round(rate * (max - 2))));
+  }
+  _adaptiveGamma() {
+    return this.config.adaptive
+      ? SpeculativeDecoder.nextGamma(this.acceptanceRate(), this.config.maxSpeculativeTokens, this._proposed)
+      : this.config.maxSpeculativeTokens;
+  }
+
+  setDraftModel(model)      { this.draftModel = model; return this; }
+  setAcceptanceThreshold(t) { this.config.acceptanceThreshold = t; return this; }
+  resetStats() { this._proposed = 0; this._accepted = 0; this._rounds = 0; this._acceptedRunSum = 0; }
+
   setKVCacheEnabled(enabled) {
     if (enabled) { this.mainModel.initKVCache(); this.draftModel.initKVCache(); }
     else { this.mainModel.kvCache = null; this.draftModel.kvCache = null; }
   }
 
   acceptanceRate() { return this._proposed ? this._accepted / this._proposed : 0; }
-  getStats() { return { proposed: this._proposed, accepted: this._accepted, rate: this.acceptanceRate() }; }
+  avgAcceptedRun() { return this._rounds ? this._acceptedRunSum / this._rounds : 0; }
+  getStats() {
+    return {
+      proposed: this._proposed, accepted: this._accepted,
+      rate: this.acceptanceRate(), rounds: this._rounds,
+      avgAcceptedRun: +this.avgAcceptedRun().toFixed(2),
+      gamma: this._adaptiveGamma(), adaptive: this.config.adaptive,
+    };
+  }
 }
