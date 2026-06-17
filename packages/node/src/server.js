@@ -15,9 +15,9 @@ import crypto                from 'crypto';
 import { exec }              from 'child_process';
 import { existsSync }        from 'fs';
 
-import { SkyCloud as SkyCloud }    from './skycloud.js';
-import { ALL_SCOPES, SCOPE_LABELS } from './skycloud.js';
-import { SecureMessagingService }   from './secure_messaging.js';
+import { SkyCloud as SkyCloud }    from '#skycloud';
+import { ALL_SCOPES, SCOPE_LABELS } from '#skycloud';
+import { SecureMessagingService }   from '#secure_messaging';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -731,7 +731,6 @@ app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (r
 //   GET /sites/:domain/*     → fichier demandé (fallback SPA → index.html)
 //   GET /:domain/*           → (optionnel) domaine custom à la racine
 // =====================================================
-
 // Middleware de serving — commun aux deux routes /sites/*
 async function serveSiteMiddleware(req, res) {
   const { domain } = req.params;
@@ -947,7 +946,7 @@ function handleWs(ws) {
       // ── SkyChat — relais temps réel des messages ──────────────
       // Diffuse un message (DM ou groupe) à tous les clients connectés
       // pour une livraison instantanée multi-onglets / multi-appareils.
-case 'sc_relay': {
+      case 'sc_relay': {
         if (cmd.payload) {
           broadcastWs('sc_message', cmd.payload);
         }
@@ -973,7 +972,6 @@ case 'sc_relay': {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
-
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
@@ -1093,7 +1091,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     'list_sites', 'list_files', 'list_api_keys',
     'list_exposed_endpoints', 'get_traffic_logs',
     'list_smart_contracts', 'get_smart_contract_stats',
-    'get_comm_stats', 'get_agentic_stats', 'list_agentic_sessions',
+    'get_comm_stats', 'get_thevie_stats', 'list_thevie_sessions',
     'is_auto_training_enabled', 'is_auto_dream_enabled',
     'get_wisdom',
     // SkyChat — lectures
@@ -1222,7 +1220,6 @@ app.use(express.static(_root, {
 // Génère tous les PNG depuis icon-source.svg au premier démarrage.
 // Aucun PNG à committer sur Github — juste le SVG source.
 // Si le design change → supprimer les PNG → ils se régénèrent.
-
 const _ICON_SIZES = [
     { size: 72,  name: 'icon-72.png'   },
     { size: 96,  name: 'icon-96.png'   },
@@ -1325,8 +1322,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   generateIcons().catch(e => console.warn('[Icons]', e.message));
 
   // Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
-if (process.env.SKYAINET_NO_BROWSER !== '1') {
-    const { exec: _exec } = await import('child_process');
+  if (process.env.SKYAINET_NO_BROWSER !== '1') {
+    const _exec = exec;
     const cmd = process.platform === 'win32'  ? `start "" "${url}"`
               : process.platform === 'darwin' ? `open "${url}"`
               :                                  `xdg-open "${url}"`;
