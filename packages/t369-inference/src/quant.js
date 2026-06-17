@@ -1,8 +1,8 @@
 // packages/t369-inference/src/quant.js
 // =====================================================
-// Quant — Block-wise 4/8-bit Quantization (GGUF-style)
-// Blocs de 32, buffer pool, dequant in-place
-// SkyAInet × Nikola T369
+// Quant — Block-wise 4/8-bit Quantization (GGUF-style) — Fusion L1
+// Blocs de 32, buffer pool, dequant in-place + dequant partiel,
+// précision MIXTE par couche/rôle (per-layer quant). SkyAInet × Nikola T369
 // =====================================================
 
 "use strict";
@@ -22,8 +22,34 @@ class BufferPool {
     const b = this.#pool.get(s);
     if (b.length < 64) { buf.fill(0); b.push(buf); }
   }
+  // Hygiène mémoire : libère le pool (utile entre deux longues sessions)
+  clear() { this.#pool.clear(); }
+  stats() {
+    let buffers = 0, floats = 0;
+    for (const [size, arr] of this.#pool) { buffers += arr.length; floats += size * arr.length; }
+    return { sizes: this.#pool.size, buffers, approxBytes: floats * 4 };
+  }
 }
 export const bufferPool = new BufferPool();
+
+// ─────────────────────────────────────────────────────────────────
+// Politique de précision MIXTE (Fusion L1)
+// Couches sensibles (embedding/attention/router) en 8-bit ; FFN/experts en
+// 4-bit. Réduit la perte de qualité là où elle compte, garde la compression.
+// ─────────────────────────────────────────────────────────────────
+
+export class QuantPolicy {
+  constructor(map = null) {
+    this.map = map || {
+      embedding: 8, attention: 8, router: 8, norm: 8,
+      ffn: 4, expert: 4, lora: 8, default: 4,
+    };
+  }
+  bitsFor(role) { return this.map[role] ?? this.map.default ?? 4; }
+  setBits(role, bits) { this.map[role] = bits; return this; }
+  clone() { return new QuantPolicy({ ...this.map }); }
+}
+export const defaultQuantPolicy = new QuantPolicy();
 
 export class QuantizedTensor {
   constructor(rows = 0, cols = 0, bits = 8) {
@@ -40,6 +66,11 @@ export class QuantizedTensor {
 
   // Compat : ancien nom quantizeFromF32 conservé
   static quantizeFromF32(data, bits = 8) { return QuantizedTensor.fromF32(data, bits); }
+
+  // Quantifie selon une politique de précision mixte (per-layer/role)
+  static fromF32WithPolicy(data, role, policy = defaultQuantPolicy) {
+    return QuantizedTensor.fromF32(data, policy.bitsFor(role));
+  }
 
   static fromF32(data, bits = 8) {
     if (!data || data.length === 0) return new QuantizedTensor(0, 0, bits);
@@ -108,5 +139,29 @@ export class QuantizedTensor {
     }
   }
 
+  // Dequant PARTIEL (Fusion L1) : ne reconstruit que [start, start+count)
+  // dans output[0..count). Évite de déquantifier toute la matrice quand seules
+  // quelques colonnes sont nécessaires (gain en boucle chaude MoE/attention).
+  dequantizeRangeInto(output, start, count) {
+    const end = Math.min(start + count, this._numel);
+    if (this.bits === 8) {
+      for (let i = start; i < end; i++) {
+        const b = (i / BLOCK_SIZE) | 0;
+        output[i - start] = (this.data[i] - this.zeroPoints[b]) * this.scales[b];
+      }
+    } else {
+      for (let i = start; i < end; i++) {
+        const b   = (i / BLOCK_SIZE) | 0;
+        const p   = this.data[i >> 1];
+        const nib = (i & 1) ? ((p >> 4) & 0x0F) : (p & 0x0F);
+        output[i - start] = (nib - this.zeroPoints[b]) * this.scales[b];
+      }
+    }
+    return output;
+  }
+
   get numel() { return this._numel; }
+  // Télémétrie compression
+  get bytes() { return this.data.byteLength + this.scales.byteLength + this.zeroPoints.byteLength; }
+  get compressionRatio() { return (this._numel * 4) / Math.max(1, this.bytes); }
 }
