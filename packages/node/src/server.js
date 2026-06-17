@@ -18,6 +18,7 @@ import { existsSync }        from 'fs';
 import { SkyCloud as SkyCloud }    from '#skycloud';
 import { ALL_SCOPES, SCOPE_LABELS } from '#skycloud';
 import { SecureMessagingService }   from '#secure_messaging';
+import { EngineSupervisor, EngineKind } from '#engine_supervisor';
 
 // =====================================================
 // RATE LIMITER — Sliding Window (anti-burst optimal)
@@ -140,6 +141,7 @@ const state = {
   secure     : new SecureMessagingService(),   // SkyChat — messagerie sécurisée
   rateLimiter: new RateLimiter(60, 60),
   metrics    : new ServerMetrics(),
+  engine     : null,                            // moteur natif embarqué (opt-in)
   apiKeys    : [process.env.SKYNODE_API_KEY    ?? 'dev-key-unsafe'],
   jwtSecret  : process.env.SKYNODE_JWT_SECRET  ?? 'change-me-in-prod',
 };
@@ -148,6 +150,21 @@ const state = {
 state.node.initEngine().catch(e =>
   console.warn('[Server] initEngine:', e.message)
 );
+
+// Moteur d'inférence natif embarqué (llama.cpp / vLLM / MLX) — OPT-IN via env.
+// SKYAINET_ENGINE_MODEL = chemin du modèle ; sans lui, on reste sur le moteur JS.
+// SkyCloud expose alors sa PROPRE API HTTP souveraine par-dessus le sous-processus.
+if (process.env.SKYAINET_ENGINE_MODEL) {
+  state.engine = new EngineSupervisor({
+    kind : process.env.SKYAINET_ENGINE_KIND ?? EngineKind.LlamaCpp,
+    model: process.env.SKYAINET_ENGINE_MODEL,
+    host : process.env.SKYAINET_ENGINE_HOST ?? '127.0.0.1',
+    port : Number(process.env.SKYAINET_ENGINE_PORT ?? 8799),
+  });
+  state.engine.start()
+    .then(()  => console.info(`[Server] Moteur embarqué prêt : ${state.engine.endpoint}`))
+    .catch(e => console.warn('[Server] Moteur embarqué indisponible :', e.message));
+}
 
 // =====================================================
 // MIDDLEWARES
@@ -329,6 +346,28 @@ app.post('/api/ai/generate', requireScope('inference:read'), async (req, res) =>
   } catch (e) {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
+});
+
+// ── Moteur embarqué — cœur d'inférence souverain ──────────────
+app.get('/api/engine/status', (_req, res) => {
+  res.json({ success: true, engine: state.engine?.status() ?? { state: 'disabled', ready: false } });
+});
+
+app.post('/api/engine/generate', requireScope('inference:read'), async (req, res) => {
+  if (!state.engine?.isReady) return apiError(res, 503, 'ENGINE_UNAVAILABLE', 'Moteur embarqué non prêt.');
+  try {
+    const { prompt, maxTokens, temperature } = req.body ?? {};
+    const result = await state.engine.generate(prompt ?? '', { maxTokens, temperature });
+    res.json({ success: true, ...result });
+  } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
+});
+
+app.post('/api/engine/restart', requireScope('inference:read'), async (_req, res) => {
+  if (!state.engine) return apiError(res, 503, 'ENGINE_DISABLED', 'Aucun moteur embarqué configuré.');
+  try {
+    await state.engine.restart();
+    res.json({ success: true, engine: state.engine.status() });
+  } catch (e) { apiError(res, 500, 'INTERNAL_ERROR', e.message); }
 });
 
 app.post('/api/ai/message', async (req, res) => {
