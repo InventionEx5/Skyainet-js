@@ -7,8 +7,8 @@
 
 "use strict";
 
-import { Personality, PersonalityProfile } from './personality.js';
-import { Lesson }                           from '../../t369-inference/src/meshin.js';
+import { Personality, PersonalityProfile } from '#personality';
+import { Lesson }                           from '#meshin';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -158,9 +158,6 @@ class LocalMemory {
   }
 }
 
-
-}
-
 // ─────────────────────────────────────────────────────────────────
 // NEURONE
 // ─────────────────────────────────────────────────────────────────
@@ -196,6 +193,9 @@ export class Neurone {
 
     this.#memory           = new LocalMemory(opts.memorySize ?? 64);
     this.#replicationCount = 0;
+
+    // Liaisons d'adapters du swarm (Fusion L0) : expert -> nom d'adapter
+    this.adapters          = {};
   }
 
   // ─── Création depuis une conscience collective ────────────────
@@ -351,6 +351,50 @@ export class Neurone {
     return { expert: best, competence: max };
   }
 
+  // ─── Adapter swarm & routing (Fusion L0) ─────────────────────
+
+  /** Lie un adapter nommé du swarm à un expert (hot-swap via MoERouter). */
+  bindAdapter(expert, adapterName) { this.adapters[expert] = adapterName; return this; }
+  unbindAdapter(expert)            { delete this.adapters[expert]; return this; }
+  getAdapterFor(expert)            { return this.adapters[expert] ?? null; }
+  listAdapters()                   { return { ...this.adapters }; }
+
+  /**
+   * Biais de routage centré sur la compétence (favorise les experts au-dessus
+   * de la moyenne de ce neurone). Aligné sur l'ordre `experts`, directement
+   * utilisable comme MoELayer.forward(hidden, { bias }).
+   */
+  competenceBias(experts = EXPERTS) {
+    const bias = new Float32Array(experts.length);
+    let mean = 0;
+    for (let i = 0; i < experts.length; i++) {
+      const c = this.expertsCompetence[experts[i]] ?? COMP_INIT;
+      bias[i] = c; mean += c;
+    }
+    mean /= (experts.length || 1);
+    for (let i = 0; i < bias.length; i++) bias[i] -= mean;
+    return bias;
+  }
+
+  /**
+   * Vecteur de contexte compact (personnalité + compétences) pour le
+   * Memory Router → MoERouter.biasFromContext(ctxVec). Déterministe.
+   */
+  contextVector(dim = 16) {
+    const v = new Float32Array(dim);
+    const p = this.personality;
+    const traits = [
+      p.wisdom ?? 0.6, p.creativity ?? 0.5, p.curiosity ?? 0.5,
+      p.cooperation ?? 0.5, p.benevolence ?? 0.5,
+    ];
+    for (let i = 0; i < dim; i++) {
+      const t = traits[i % traits.length];
+      const c = this.expertsCompetence[EXPERTS[i % EXPERTS.length]] ?? COMP_INIT;
+      v[i] = Math.tanh(t * 0.7 + (c - COMP_INIT) * 0.5);
+    }
+    return v;
+  }
+
   // ─── Accesseurs ──────────────────────────────────────────────
 
   get replicationCount() { return this.#replicationCount; }
@@ -367,6 +411,7 @@ export class Neurone {
       birthTime         : this.birthTime,
       lastActivity      : this.lastActivity,
       expertsCompetence : { ...this.expertsCompetence },
+      adapters          : { ...this.adapters },
       replicationCount  : this.#replicationCount,
       memory            : this.#memory.toJSON(),
     };
@@ -378,6 +423,7 @@ export class Neurone {
     n.birthTime          = obj.birthTime        ?? Date.now();
     n.lastActivity       = obj.lastActivity     ?? Date.now();
     n.expertsCompetence  = obj.expertsCompetence ?? n.expertsCompetence;
+    n.adapters           = obj.adapters          ?? {};
     n.#replicationCount  = obj.replicationCount  ?? 0;
     return n;
   }
