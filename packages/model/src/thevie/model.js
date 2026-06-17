@@ -11,39 +11,39 @@
 // THEVIE — Intelligence Collective Principale
 // ─────────────────────────────────────────────────────────────────
 
-export { Thevie }                                           from './thevie/thevie.js';
+export { Thevie }                                           from '#thevie';
 
 // ─────────────────────────────────────────────────────────────────
 // PERSONNALITÉ & RÉSEAU NEURONAL
 // ─────────────────────────────────────────────────────────────────
 
-export { Personality, PersonalityProfile }                  from './thevie/personality.js';
-export { Synapse }                                          from './thevie/synapse.js';
-export { Neurone }                                          from './thevie/neurone.js';
+export { Personality, PersonalityProfile }                  from '#personality';
+export { Synapse }                                          from '#synapse';
+export { Neurone }                                          from '#neurone';
 
 // ─────────────────────────────────────────────────────────────────
 // MÉMOIRE & REPLAY
 // ─────────────────────────────────────────────────────────────────
 
-export { ReplayBuffer, Experience }                         from './thevie/replay_buffer.js';
+export { ReplayBuffer, Experience }                         from '#replay_buffer';
 
 // ─────────────────────────────────────────────────────────────────
 // DREAM CYCLE
 // ─────────────────────────────────────────────────────────────────
 
-export { DreamCycle }                                       from './thevie/dream_cycle.js';
+export { DreamCycle }                                       from '#dream_cycle';
 
 // ─────────────────────────────────────────────────────────────────
 // ÉVOLUTION LORA
 // ─────────────────────────────────────────────────────────────────
 
-export { LoraEvo }                                          from './thevie/lora_evolution.js';
+export { LoraEvo }                                          from '#lora_evolution';
 
 // ─────────────────────────────────────────────────────────────────
 // MIGRATION INTER-NŒUDS
 // ─────────────────────────────────────────────────────────────────
 
-export { MigrationManager, TravelPackage }                  from './thevie/migration_manager.js';
+export { MigrationManager, TravelPackage }                  from '#migration_manager';
 
 // ─────────────────────────────────────────────────────────────────
 // DISTILLATION TEACHER → STUDENT
@@ -53,42 +53,58 @@ export {
   DistillationManager,
   DistillationConfig,
   TrainingExample,
-}                                                           from './thevie/distillation_manager.js';
+}                                                           from '#distillation_manager';
 
 // ─────────────────────────────────────────────────────────────────
 // BENCHMARK
 // ─────────────────────────────────────────────────────────────────
 
-export { TheviesBenchmark, PowerScore, runFullBenchmark }   from './thevie/benchmark.js';
+export { TheviesBenchmark, PowerScore, runFullBenchmark }   from '#benchmark';
 
 // ─────────────────────────────────────────────────────────────────
 // REGISTRE DES MODÈLES
 // ─────────────────────────────────────────────────────────────────
 
-export { ModelRegistry, ModelInfo }                         from './thevie/model_registry.js';
+export { ModelRegistry, ModelInfo, AdapterInfo }            from '#model_registry';
+
+// ─────────────────────────────────────────────────────────────────
+// FUSION L0 — Base MoE clairsemée + Dynamic Adapter Swarm + Inference Core
+// ─────────────────────────────────────────────────────────────────
+
+export { MoEConfig, ExpertFFN, MoELayer, MoERouter, LoraAdapter }  from '#moe';
+export {
+  InferenceCore, BackendKind, InferenceBackend,
+  LocalJSBackend, RemoteHTTPBackend, WebGPUBackend, WasmBackend,
+  T369Inference, ParallelMode,
+}                                                                  from '#inference';
+
+// Fabrique de commodité : un cœur d'inférence prêt à l'emploi
+// (backend LocalJS souverain par défaut ; tri-backend via opts).
+import { InferenceCore as _InferenceCore } from '#inference';
+export function createInferenceCore(opts = {}) { return new _InferenceCore(opts); }
 
 // ─────────────────────────────────────────────────────────────────
 // FLASH SCHEDULER
 // ─────────────────────────────────────────────────────────────────
 
-export { FlashScheduler, ThevieFlashScheduler }             from './thevie/flash_scheduler.js';
+export { FlashScheduler, ThevieFlashScheduler }             from '#flash_scheduler';
 
 // ─────────────────────────────────────────────────────────────────
 // SYNCHRONISATION FÉDÉRÉE
 // ─────────────────────────────────────────────────────────────────
 
-export { FederatedSync }                                    from './thevie/federated_sync.js';
+export { FederatedSync }                                    from '#federated_sync';
 
 // ─────────────────────────────────────────────────────────────────
 // VERSION
 // ─────────────────────────────────────────────────────────────────
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 export const PACKAGE_INFO = Object.freeze({
   name       : 'skyainet-model',
   version    : VERSION,
-  description: 'SkyAInet Model Package — Thevie + Personnalité + Mémoire + Dream + LoRA + Migration + Distillation + Benchmark + Registry + Scheduler + Sync',
+  description: 'SkyAInet Model Package — Thevie + Personnalité + Mémoire + Dream + LoRA + Migration + Distillation + Benchmark + Registry + Scheduler + Sync + Fusion L0 (MoE Swarm + Inference Core)',
   modules    : [
     'Thevie',
     'Personality', 'Synapse', 'Neurone',
@@ -101,5 +117,6 @@ export const PACKAGE_INFO = Object.freeze({
     'ModelRegistry',
     'FlashScheduler',
     'FederatedSync',
+    'MoELayer', 'MoERouter', 'LoraAdapter', 'InferenceCore',
   ],
 });
