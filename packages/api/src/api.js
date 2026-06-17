@@ -11,13 +11,13 @@
 // REST — Routes HTTP
 // ─────────────────────────────────────────────────────────────────
 
-export { createRestRouter }                     from './rest.js';
+export { createRestRouter }                     from '#rest';
 
 // ─────────────────────────────────────────────────────────────────
 // WEBSOCKET — Communication Temps Réel
 // ─────────────────────────────────────────────────────────────────
 
-export { SkyWebSocketServer }                   from './websocket.js';
+export { SkyWebSocketServer }                   from '#websocket';
 
 // ─────────────────────────────────────────────────────────────────
 // GRAPHQL — Queries + Mutations
@@ -27,19 +27,19 @@ export {
   createGraphQLHandler,
   createGraphQLSchema,
   typeDefs,
-}                                               from './graphql.js';
+}                                               from '#graphql';
 
 // ─────────────────────────────────────────────────────────────────
 // USAGE RAPIDE — monte REST + WS + GraphQL sur un serveur Express
 //
-// import { mountApi } from './api.js';
+// import { mountApi } from '#api';
 // mountApi(app, server, { skycloud, chatManager });
 // ─────────────────────────────────────────────────────────────────
 
-export function mountApi(app, httpServer, { skycloud, chatManager, prefix = '/api' } = {}) {
-  const { createRestRouter }    = await import('./rest.js').then(m => m);
-  const { SkyWebSocketServer }  = await import('./websocket.js').then(m => m);
-  const { createGraphQLHandler }= await import('./graphql.js').then(m => m);
+export async function mountApi(app, httpServer, { skycloud, chatManager, prefix = '/api' } = {}) {
+  const { createRestRouter }    = await import('#rest').then(m => m);
+  const { SkyWebSocketServer }  = await import('#websocket').then(m => m);
+  const { createGraphQLHandler }= await import('#graphql').then(m => m);
 
   // REST
   app.use(prefix, createRestRouter({ skycloud, chatManager }));
