@@ -181,6 +181,46 @@ export class TheviesBenchmark {
   async quickBenchmark() {
     return this.runFullBenchmark({ evolutionQueries: 20 });
   }
+
+  /**
+   * Mesure le gain du raisonnement frontière (inference-time compute scaling) :
+   * compare la qualité moyenne d'une réponse simple vs deepReason (best-of-N).
+   * @param {object} [opts]
+   * @param {number} opts.samples — candidats par requête profonde (défaut 3)
+   * @param {string[]} [opts.queries]
+   * @returns {Promise<{ simple, deep, gain, samples, queries }>}
+   */
+  async reasoningScalingBenchmark(opts = {}) {
+    const { samples = 3 } = opts;
+    const qs = opts.queries ?? [
+      'Analyse les implications éthiques d\'une IA collective auto-évolutive',
+      'Propose une architecture de gouvernance émergente et résiliente',
+      'Évalue les risques d\'une fusion massive de consciences',
+    ];
+    let simpleSum = 0, deepSum = 0, n = 0;
+    for (const content of qs) {
+      const s  = await this.thevie.processQuery({ content, priority: 9 }).catch(() => ({ quality: 0.5 }));
+      const sq = s?.quality ?? 0.5;
+      simpleSum += sq;
+
+      let dq = sq;
+      if (typeof this.thevie.deepReason === 'function') {
+        const d = await this.thevie.deepReason({ content }, { samples }).catch(() => ({ quality: sq }));
+        dq = d?.quality ?? sq;
+      }
+      deepSum += dq;
+      n++;
+    }
+    const simple = n ? simpleSum / n : 0;
+    const deep   = n ? deepSum / n : 0;
+    return {
+      simple : +simple.toFixed(4),
+      deep   : +deep.toFixed(4),
+      gain   : +(deep - simple).toFixed(4),
+      samples,
+      queries: n,
+    };
+  }
 }
 
 // Export fonctionnel pour compatibilité avec benchmark.rs API
