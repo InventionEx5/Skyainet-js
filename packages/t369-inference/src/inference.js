@@ -133,7 +133,7 @@ export class T369Inference {
 // =====================================================
 
 export const BackendKind = Object.freeze({
-  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm',
+  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh',
 });
 
 export class InferenceBackend {
@@ -221,6 +221,30 @@ export class WasmBackend extends InferenceBackend {
   async generate() { throw new Error('[WasmBackend] graphe forward en composition — kernels CPU de référence prêts (WASM à compiler)'); }
 }
 
+// Backend MESH (souverain) : inférence distribuée façon Petals via le
+// MeshInferenceRouter (#sharded_inference). Le modèle est sharded sur les nœuds ;
+// le forward traverse la chaîne de pairs. Routeur + executeShard injectés.
+export class MeshBackend extends InferenceBackend {
+  constructor(router, opts = {}) {
+    super(BackendKind.Mesh);
+    this.router       = router ?? null;            // MeshInferenceRouter
+    this.executeShard = opts.executeShard ?? null; // async (nodeId, {start,end}, act) => act
+    this.redundancy   = opts.redundancy ?? 1;
+  }
+  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, distributed: true }; }
+  async init() {
+    if (!this.router) throw new Error('[MeshBackend] router requis (MeshInferenceRouter)');
+    this.ready = true; return this;
+  }
+  async generate(prompt, opts = {}) {
+    if (!this.executeShard) throw new Error('[MeshBackend] executeShard requis pour le forward distribué');
+    const res = await this.router.runDistributed(prompt, this.executeShard, {
+      redundancy: opts.redundancy ?? this.redundancy,
+    });
+    return { text: res.output, hops: res.hops, route: res.route, backend: 'mesh' };
+  }
+}
+
 export class InferenceCore {
   constructor(opts = {}) {
     this.backends = new Map();
@@ -229,7 +253,8 @@ export class InferenceCore {
     this._cache = new Map();
     this._stats = { calls: 0, hits: 0, misses: 0 };
     this.register(BackendKind.LocalJS, new LocalJSBackend(opts.modelConfig || null));
-    if (opts.endpoint) this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
+    if (opts.endpoint)   this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
+    if (opts.meshRouter) this.register(BackendKind.Mesh, new MeshBackend(opts.meshRouter, opts.mesh || {}));
   }
   register(kind, backend) { this.backends.set(kind, backend); return this; }
   get backend() { return this.backends.get(this.kind); }
