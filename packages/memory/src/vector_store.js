@@ -7,7 +7,7 @@
 
 "use strict";
 
-import { ZipMemory } from './zip_memory.js';
+import { ZipMemory } from '#zip_memory';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -171,6 +171,33 @@ export class VectorStore {
     }));
     hybrid.sort((a, b) => b.score - a.score);
     return hybrid.slice(0, topK);
+  }
+
+  // ─── Bridge mémoire sémantique → RAG / volant (Fusion L4) ────
+
+  /**
+   * Ajoute une leçon en mémoire sémantique (sucre sur insert avec métadonnées
+   * orientées leçon). L'embedding provient du modèle.
+   */
+  addLesson(id, embedding, text = '', { quality = 0.7, expert = 'lesson', importance = 0.6, tags = [] } = {}) {
+    this.insert(id, embedding, new VectorMetadata({ quality, expert, importance, tags, source: 'lesson' }), text);
+    return id;
+  }
+
+  /**
+   * Récupère les contenus/leçons les plus pertinents pour une requête (RAG).
+   * @param {Float32Array|number[]} queryEmbedding
+   * @param {number} k
+   * @param {{minQuality?: number}} [opts]
+   * @returns {{ id, text, score, quality }[]}
+   */
+  retrieveLessons(queryEmbedding, k = 5, { minQuality = 0 } = {}) {
+    return this.search(queryEmbedding, k, { minQuality }).map(({ entry, score }) => ({
+      id     : entry.id,
+      text   : entry.contentPreview,
+      score  : +score.toFixed(4),
+      quality: entry.metadata.quality,
+    }));
   }
 
   // ─── CRUD ────────────────────────────────────────────────────
