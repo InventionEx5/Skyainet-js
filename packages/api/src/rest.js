@@ -44,6 +44,11 @@ function err(res, message, status = 400) {
 //   POST /rewards/claim       — réclame les rewards mensuels
 //   POST /learn               — injecte une leçon
 //   GET  /peers               — liste des pairs
+//   POST /thevie/run          — orchestration Thevie (Runner Swarm)
+//   GET  /thevie/tools        — catalogue d'outils de l'orchestrateur
+//   GET  /thevie/sessions     — historique des orchestrations
+//   GET  /thevie/stats        — stats de l'orchestrateur
+//   GET  /mesh/stats          — stats du mesh souverain
 // ─────────────────────────────────────────────────────────────────
 
 export function createRestRouter({ skycloud, chatManager } = {}) {
@@ -160,6 +165,38 @@ export function createRestRouter({ skycloud, chatManager } = {}) {
   // ── GET /peers ────────────────────────────────────────────────
   router.get('/peers', (_req, res) => {
     ok(res, { peers: skycloud.getPeers?.() ?? [] });
+  });
+
+  // ── Orchestration Thevie & mesh souverain (Fusion L6) ─────────
+
+  // POST /thevie/run — exécute un objectif via l'orchestrateur Thevie
+  router.post('/thevie/run', async (req, res) => {
+    const { goal, opts = {} } = req.body ?? {};
+    if (!goal?.trim()) return err(res, 'Champ "goal" requis');
+    try {
+      const session = await skycloud.runThevieTask?.(goal, null, opts);
+      ok(res, { session });
+    } catch (e) { err(res, e.message, 500); }
+  });
+
+  // GET /thevie/tools — catalogue d'outils de l'orchestrateur
+  router.get('/thevie/tools', (_req, res) => {
+    ok(res, { tools: skycloud.getThevieToolCatalog?.() ?? [] });
+  });
+
+  // GET /thevie/sessions — historique des orchestrations
+  router.get('/thevie/sessions', (_req, res) => {
+    ok(res, { sessions: skycloud.listThevieSessions?.() ?? [] });
+  });
+
+  // GET /thevie/stats — stats de l'orchestrateur Thevie
+  router.get('/thevie/stats', (_req, res) => {
+    ok(res, { stats: skycloud.getThevieStats?.() ?? { sessions: 0, toolCount: 0, engineReady: false } });
+  });
+
+  // GET /mesh/stats — stats du mesh souverain (comms inter-nœuds + pairs)
+  router.get('/mesh/stats', (_req, res) => {
+    ok(res, { mesh: skycloud.getCommStats?.() ?? {}, peers: skycloud.getPeers?.()?.length ?? 0 });
   });
 
   return router;
