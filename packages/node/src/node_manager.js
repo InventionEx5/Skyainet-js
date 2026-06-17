@@ -29,14 +29,14 @@ import {
     reputationTierFromScore,
     isPaidNodeType,
     Attestation, NodeIdentity,
-} from './node_types.js';
-import { SkyCloud }           from './skycloud.js';
-import { SkyWallet }          from '../../financial/src/wallet.js';
-import { NodeEconomics }      from '../../core/src/economics.js';
-import { AccountType }        from '../../core/src/rewards.js';
-import { ValidatorNode }      from './validator.js';
-import { Sentinel }           from './auto_healing.js';
-import { MigrationManager }   from './migration_manager.js';
+} from '#node_types';
+import { SkyCloud }           from '#skycloud';
+import { SkyWallet }          from '#wallet';
+import { NodeEconomics }      from '#economics';
+import { AccountType }        from '#rewards';
+import { ValidatorNode }      from '#validator';
+import { Sentinel }           from '#auto_healing';
+import { MigrationManager }   from '#migration_manager';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -356,13 +356,6 @@ export class NodeManager {
     }
 
     // ─── Catalogue des types de nœuds ────────────────────────
-        if (!(wallet instanceof SkyWallet)) throw new TypeError('Expected SkyWallet');
-        this.#wallet       = wallet;
-        this.#ownerAddress = wallet.address;
-        return { address: wallet.address };
-    }
-
-    // ─── Catalogue des types de nœuds ────────────────────────
 
     /**
      * Retourne le catalogue complet des 9 types de nœuds disponibles
@@ -387,9 +380,7 @@ export class NodeManager {
 
     // ─── Création d'un nœud ───────────────────────────────────
 
-    // ─── Connexion wallet ─────────────────────────────────────
-
-    connectWallet(wallet) {
+    async createNode(opts) {
         const { type, alias, port = 8080, role } = opts;
 
         if (!Object.values(NodeType).includes(type)) {
@@ -451,8 +442,18 @@ export class NodeManager {
         return node;
     }
 
+    // ─── Connexion wallet ─────────────────────────────────────
+
+    connectWallet(wallet) {
+        if (!(wallet instanceof SkyWallet)) throw new TypeError('Expected SkyWallet');
+        this.#wallet       = wallet;
+        this.#ownerAddress = wallet.address;
+        return { address: wallet.address };
+    }
+
     // ─── Validator Stake ──────────────────────────────────────
 
+    
     /**
      * Ajoute du stake SKY à un nœud Validator.
      * Débite le wallet de l'utilisateur.
@@ -729,6 +730,12 @@ export class NodeManager {
         node.state = NodeState.Evolving;
         return node.toJSON();
     }
+
+    /**
+     * Met un nœud en veille (mode économie d'énergie).
+     * @param {string} nodeId
+     */
+    sleepNode(nodeId) {
         const node = this.#get(nodeId);
         node.state = NodeState.Sleeping;
         node.capabilities.adjustForState?.(NodeState.Sleeping);
@@ -795,8 +802,7 @@ export class NodeManager {
     }
 
     // ─── Santé ────────────────────────────────────────────────
-
-    /**
+*
      * Retourne un rapport de santé condensé du nœud.
      * @param {string} nodeId
      */
@@ -1021,51 +1027,6 @@ export class NodeManager {
         };
     }
 }
-     */
-    apiHandlers() {
-        const m = this;
-        return {
-            // Catalogue
-            'get_node_catalog'      : ()                         => m.getNodeCatalog(),
-            // CRUD
-            'create_node'           : (type, alias, port, role)  => m.createNode({ type, alias, port, role }),
-            'list_my_nodes'         : ()                         => m.listMyNodes(),
-            'get_node'              : nodeId                     => m.getNode(nodeId),
-            'get_node_ticker'       : ()                         => m.getNodeTicker(),
-            'get_node_stats'        : ()                         => m.getStats(),
-            // Cycle de vie de base
-            'sleep_node'            : nodeId                     => m.sleepNode(nodeId),
-            'wake_node'             : nodeId                     => m.wakeNode(nodeId),
-            'enable_low_power'      : nodeId                     => m.enableLowPowerMode(nodeId),
-            'upgrade_node'          : (nodeId, newType)          => m.upgradeNode(nodeId, newType),
-            // États étendus
-            'set_maintenance'       : nodeId                     => m.setMaintenance(nodeId),
-            'set_syncing'           : nodeId                     => m.setSyncing(nodeId),
-            'stop_node'             : nodeId                     => m.stopNode(nodeId),
-            'set_gateway_mode'      : nodeId                     => m.setGatewayMode(nodeId),
-            'set_evolving'          : nodeId                     => m.setEvolving(nodeId),
-            // Santé
-            'node_health'           : nodeId                     => m.nodeHealth(nodeId),
-            'full_status_report'    : nodeId                     => m.fullStatusReport(nodeId),
-            // Attestation
-            'generate_attestation'  : nodeId                     => m.generateAttestation(nodeId),
-            'verify_attestation'    : nodeId                     => m.verifyAttestation(nodeId),
-            // Validator Stake
-            'add_validator_stake'   : (nodeId, amount)           => m.addValidatorStake(nodeId, amount),
-            'remove_validator_stake': (nodeId, amount)           => m.removeValidatorStake(nodeId, amount),
-            'get_stake_info'        : nodeId                     => m.getStakeInfo(nodeId),
-            // Sentinel
-            'detect_sentinel_issues': nodeId                     => m.detectSentinelIssues(nodeId),
-            'run_sentinel_heal'     : nodeId                     => m.runSentinelHeal(nodeId),
-            // Migration
-            'plan_migration'        : (fromId, toId)             => m.planMigration(fromId, toId),
-            'execute_migration'     : (fromId, toId)             => m.executeMigration(fromId, toId),
-            // Location
-            'set_for_rent'          : (nodeId, opts)             => m.setForRent(nodeId, opts),
-            'remove_from_rent'      : nodeId                     => m.removeFromRent(nodeId),
-        };
-    }
-}
 
 export { NODE_PRICE_SKY, NODE_DESCRIPTIONS, NodeType, NodeState };
 
@@ -1177,7 +1138,6 @@ export class ThevieStakingPool {
 // ═══════════════════════════════════════════════════════════════
 // THEVIE GENESIS NODE — nœud permanent, jamais supprimable
 // ═══════════════════════════════════════════════════════════════
-
 export class ThevieGenesisNode {
     static GENESIS_ID    = 'thevie-genesis-validator-00000001';
     static STAKE_AMOUNT  = 50_000;   // SKY — alimenté depuis wallet Genesis plus tard
