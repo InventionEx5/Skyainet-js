@@ -8,8 +8,8 @@
 
 "use strict";
 
-import { RomanT369, GematriaMode }  from '../../../secure/src/crypto/roman_t369.js';
-import { Lesson }                   from '../../../t369-inference/src/meshin.js';
+import { RomanT369, GematriaMode }  from '#roman_t369';
+import { Lesson }                   from '#meshin';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -53,6 +53,7 @@ export class FederatedSync {
   #mesh;         // MeshIn reference
   #collective;   // CollectivIn reference
   #node;         // SkyNode reference
+  #pending;      // Lesson[] — leçons en file pour la prochaine diffusion
 
   /**
    * @param {object} opts
@@ -78,8 +79,9 @@ export class FederatedSync {
 
     // Clé RomanT369 éphémère par instance pour que chaque nœud produit
     // des ciphertexts distincts (même leçon → ciphertexts différents)
-    this.#roman = new RomanT369(ROMAN_KEY, ROMAN_NONCE, GematriaMode.Hyper256);
-    this.#timer = null;
+    this.#roman   = new RomanT369(ROMAN_KEY, ROMAN_NONCE, GematriaMode.Hyper256);
+    this.#timer   = null;
+    this.#pending = [];
 
     this.#stats = {
       totalSyncs              : 0,
@@ -279,12 +281,53 @@ export class FederatedSync {
 
   get instanceCount() { return this.#instances.size; }
 
+  // ─── File de leçons du volant d'évolution (Fusion L4) ────────
+
+  /**
+   * Met une leçon en file pour la prochaine diffusion : permet au volant
+   * (critic, dream, distillation) de propager directement une leçon apprise.
+   * @param {string|object} lesson
+   * @param {number} [quality]
+   * @returns {number} taille de la file
+   */
+  enqueueLesson(lesson, quality = 0.85) {
+    const payload = (lesson && typeof lesson === 'object')
+      ? { quality, ...lesson }
+      : { content: String(lesson), quality };
+    const l = lesson instanceof Lesson ? lesson : new Lesson(payload);
+    this.#pending.push(l);
+    const cap = this.maxLessonsPerSync * 4;
+    if (this.#pending.length > cap) this.#pending.shift();
+    return this.#pending.length;
+  }
+
+  /** Diffuse immédiatement les leçons en file (chiffrées RomanT369). */
+  async flushPending() {
+    if (this.#pending.length === 0) return { propagated: 0, remaining: 0 };
+    const batch = this.#pending.splice(0, this.maxLessonsPerSync);
+    let propagated = 0;
+    for (const lesson of batch) {
+      try {
+        await this.#broadcastLesson(lesson);
+        this.#stats.lessonsPropagated++;
+        propagated++;
+      } catch (e) {
+        this.#stats.failedBroadcasts++;
+        console.warn(`[FederatedSync] flush broadcast échoué : ${e.message}`);
+      }
+    }
+    this.#stats.totalSyncs++;
+    this.#stats.lastSync = Date.now();
+    return { propagated, remaining: this.#pending.length };
+  }
+
   // ─── Stats ───────────────────────────────────────────────────
 
   getStats() {
     return {
       ...this.#stats,
       activeInstances: this.#instances.size,
+      pendingLessons : this.#pending.length,
     };
   }
 
