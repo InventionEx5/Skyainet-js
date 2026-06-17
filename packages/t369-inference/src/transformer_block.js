@@ -7,9 +7,9 @@
 
 "use strict";
 
-import { RomanAttention } from './roman_attention.js';
-import { MoELayer }       from './moe.js';
-import { RomanDiffusion } from './roman_diffusion.js';
+import { RomanAttention } from '#roman_attention';
+import { MoELayer, MoERouter } from '#moe';
+import { RomanDiffusion } from '#roman_diffusion';
 
 export class TransformerBlock {
   constructor(hiddenSize, numQueryHeads, numKvHeads, headDim, moeConfig = null) {
@@ -25,6 +25,8 @@ export class TransformerBlock {
       numExperts: 8, topK: 2, hiddenSize,
       intermediateSize: hiddenSize * 4, bits: 4,
     });
+    // Memory Router L0 : routing orientable + hot-swap d'adapters sur ce bloc
+    this.moeRouter = new MoERouter(this.moeLayer);
 
     this.romanDiffusion = new RomanDiffusion();
     this.norm1 = new Float32Array(hiddenSize).fill(1.0);
@@ -42,7 +44,7 @@ export class TransformerBlock {
   }
 
   // Forward in-place sur hidden [seqLen × hiddenSize]
-  forward(hidden, seqLen, layerIdx, kvCache = null) {
+  forward(hidden, seqLen, layerIdx, kvCache = null, opts = {}) {
     const H = this.hiddenSize;
 
     // 1. Pre-Norm (sur tout) + Attention + Residual
@@ -63,10 +65,17 @@ export class TransformerBlock {
     const lastOff   = (seqLen - 1) * H;
     const lastTok   = hidden.subarray(lastOff, lastOff + H);
     const normed2   = this._rmsNorm(lastTok, this.norm2, this._normBuf);
-    const moeOut    = this.moeLayer.forward(normed2);
+    const moeOut    = this.moeLayer.forward(normed2, { bias: opts.moeBias || null, trace: opts.trace });
     for (let i = 0; i < H; i++) hidden[lastOff + i] += moeOut[i];
 
     // 3. RomanDiffusion Ultra (in-place)
     this.romanDiffusion.applyUltra(hidden, seqLen, layerIdx, null);
   }
+
+  // ─── Adapter routing du bloc (Fusion L0) ─────────────────────
+  setExpertAdapter(idx, adapter)          { return this.moeLayer.setExpertAdapter(idx, adapter); }
+  registerAdapter(name, adapter)          { this.moeRouter.register(name, adapter); return this; }
+  attachAdapter(name, expertIdx)          { return this.moeRouter.attach(name, expertIdx); }
+  routeFromContext(ctxVec, strength = 1)  { return this.moeRouter.biasFromContext(ctxVec, strength); }
+  moeBalance()                            { return this.moeLayer.loadBalance(); }
 }
