@@ -23,8 +23,8 @@
 
 "use strict";
 
-import { Dilithium5Signer }                from '../../../secure/src/crypto/dilithium.js';
-import { LoraAdapter, crossEntropyGrad }   from '../../node/src/lora_trainer.js';
+import { Dilithium5Signer }                from '#dilithium';
+import { LoraAdapter, crossEntropyGrad }   from '#lora_trainer';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -64,6 +64,7 @@ export class DreamCycle {
   #isTraining;
   #lossHistory;         // Float32Array ring buffer 32
   #dreamLessonsTotal;   // compteur total de leçons générées par le Dream
+  #lastDreamLessons;    // dernières leçons générées (pour le volant d'évolution)
 
   constructor(opts = {}) {
     // Paramètres publics — valeurs par défaut intensives
@@ -83,6 +84,7 @@ export class DreamCycle {
     this.#isTraining       = false;
     this.#lossHistory      = new Float32Array(32);
     this.#dreamLessonsTotal= 0;
+    this.#lastDreamLessons = [];
 
     if (opts.loraTrainer && typeof opts.loraTrainer.train === 'function') {
       this._legacyTrainer = opts.loraTrainer;
@@ -155,6 +157,7 @@ export class DreamCycle {
     }
 
     this.#dreamLessonsTotal += allLessons.length;
+    this.#lastDreamLessons   = allLessons;
 
     // ── 4. Propagation sagesse collective ────────────────────
     if (collective) {
@@ -441,7 +444,7 @@ export class DreamCycle {
   // PRIVÉ — Vrai entraînement LoRA sur le modèle T369
   // ─────────────────────────────────────────────────────────────
 
-  async #runRealLoRA(lessons) {
+ async #runRealLoRA(lessons) {
     const model = this.#model;
     if (!model.tokenizer) {
       throw new Error('model.tokenizer not initialized. Call model.setTokenizer(t) first.');
@@ -598,6 +601,30 @@ export class DreamCycle {
   /** true si le nombre de requêtes atteint le seuil de déclenchement */
   shouldTrigger(totalQueries) {
     return totalQueries > 0 && totalQueries % this.dreamFrequency === 0;
+  }
+
+  /** Expose l'adapter LoRA entraîné (ou null) — pour swarm/migration. */
+  getAdapter() { return this.#loraAdapter; }
+
+  /** Leçons (objets) générées au dernier Dream Cycle. */
+  getLastDreamLessons() { return [...this.#lastDreamLessons]; }
+
+  /**
+   * Volant d'évolution (Fusion L4) : rêve → leçons → entraînement, en un appel.
+   * Le Dream Cycle génère des leçons par recombinaison sémantique, immédiatement
+   * réinjectées dans l'entraînement LoRA. Boucle fermée d'auto-amélioration.
+   */
+  async runFlywheel(mesh, collective, evolution, { train = true } = {}) {
+    const dream = await this.runDreamCycle(mesh, collective, evolution);
+    let training = null;
+    if (train && this.#lastDreamLessons.length) {
+      const texts = this.#lastDreamLessons
+        .map(l => `${l.query}\n${l.response}`)
+        .filter(t => t.trim());
+      try       { training = await this.runTraditionalTraining(texts); }
+      catch (e) { training = { trained: false, reason: e.message }; }
+    }
+    return { dream, training };
   }
 
   /** Injecte le modèle T369 pour activer le vrai LoRA backward */
