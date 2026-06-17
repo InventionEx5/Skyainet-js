@@ -1,8 +1,10 @@
 // packages/model/src/thevie/model_registry.js
 // =====================================================
-// Model Registry — Gestion Centralisée des Modèles IA
-// Sélection dynamique selon tâche, coût, vitesse, qualité
-// Port de model_registry.rs
+// Model Registry — Gestion Centralisée des Modèles + Adapters (Fusion L0)
+// Sélection dynamique selon tâche, coût, vitesse, qualité.
+// Roster aligné : local = Thevie / LoraÉvo / open-weights ;
+// cloud = Claude · Deepseek · Grok · Mistral (gpt-4o + gemini retirés).
+// + Catalogue du Dynamic Adapter Swarm (découverte d'adapters LoRA par tâche).
 // SkyAInet × Nikola T369
 // =====================================================
 
@@ -65,9 +67,46 @@ export class ModelInfo {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ADAPTER INFO — métadonnées d'un adapter LoRA du swarm (Fusion L0)
+//
+// Le swarm = pool d'adapters hot-swappables (cf. moe.js / MoERouter).
+// Le registre permet de DÉCOUVRIR le bon adapter pour une tâche puis de
+// l'activer sur un expert via le Memory Router.
+// ─────────────────────────────────────────────────────────────────
+
+export class AdapterInfo {
+  constructor({
+    name,
+    task           = 'general',
+    rank           = 8,
+    scale          = 1.0,
+    baseModel      = 'thevie-distilled-3b',
+    source         = 'lesson',        // 'lesson' | 'distilled' | 'manual' | 'dream'
+    runner         = 'thevie',        // Runner propriétaire (thevie | loraevo | t369)
+    supportsHotSwap = true,
+    version        = 1,
+    specialties    = [],
+  }) {
+    this.name            = name;
+    this.task            = task;
+    this.rank            = rank;
+    this.scale           = scale;
+    this.baseModel       = baseModel;
+    this.source          = source;
+    this.runner          = runner;
+    this.supportsHotSwap = supportsHotSwap;
+    this.version         = version;
+    this.specialties     = specialties.length ? specialties : [task];
+    this._uses           = 0;
+  }
+  recordUse() { this._uses++; }
+  get uses()  { return this._uses; }
+}
+
+// ─────────────────────────────────────────────────────────────────
 // MODEL REGISTRY
 //
-// Registre central des modèles IA disponibles.
+// Registre central des modèles IA + adapters disponibles.
 // Sélection intelligente via score composite :
 //   score = quality×0.55 + speed×0.35 + spécialité×0.18 + local×0.22 - coût×45
 //
@@ -77,11 +116,14 @@ export class ModelInfo {
 
 export class ModelRegistry {
   #models;    // Map<name, ModelInfo>
+  #adapters;  // Map<name, AdapterInfo>
 
   constructor() {
-    this.#models = new Map();
+    this.#models   = new Map();
+    this.#adapters = new Map();
     this.#registerDefaults();
-    console.info(`[ModelRegistry] ${this.#models.size} modèles chargés`);
+    this.#registerDefaultAdapters();
+    console.info(`[ModelRegistry] ${this.#models.size} modèles, ${this.#adapters.size} adapters chargés`);
   }
 
   // ─── Enregistrement ──────────────────────────────────────────
@@ -173,6 +215,38 @@ export class ModelRegistry {
     this.#models.get(name)?.recordCall(latencyMs, success);
   }
 
+  // ─── Adapter Swarm (Fusion L0) ───────────────────────────────
+
+  registerAdapter(info) {
+    const a = info instanceof AdapterInfo ? info : new AdapterInfo(info);
+    this.#adapters.set(a.name, a);
+    return this;
+  }
+  unregisterAdapter(name) { return this.#adapters.delete(name); }
+  getAdapter(name)        { return this.#adapters.get(name) ?? null; }
+  hasAdapter(name)        { return this.#adapters.has(name); }
+  listAdapters()          { return [...this.#adapters.values()]; }
+  listAdaptersFor(runner) { return [...this.#adapters.values()].filter(a => a.runner === runner); }
+  get totalAdapters()     { return this.#adapters.size; }
+
+  /**
+   * Découvre le meilleur adapter pour une tâche (spécialité > tâche exacte >
+   * léger biais d'usage). Sert au Memory Router pour l'activation à chaud.
+   * @param {string} taskType
+   * @returns {AdapterInfo|null}
+   */
+  getBestAdapter(taskType = 'general') {
+    let best = null, bestScore = -Infinity;
+    for (const a of this.#adapters.values()) {
+      let s = 0;
+      if (a.specialties.some(x => x.includes(taskType) || taskType.includes(x))) s += 1.0;
+      if (a.task === taskType) s += 0.5;
+      s += Math.min(a._uses, 50) * 0.001; // adapters éprouvés légèrement favorisés
+      if (s > bestScore) { bestScore = s; best = a; }
+    }
+    return best;
+  }
+
   // ─── Lecture ─────────────────────────────────────────────────
 
   getModel(name)       { return this.#models.get(name) ?? null; }
@@ -189,6 +263,7 @@ export class ModelRegistry {
       local    : models.filter(m => m.isLocal).length,
       cloud    : models.filter(m => !m.isLocal).length,
       loraReady: models.filter(m => m.supportsLora).length,
+      adapters : this.#adapters.size,
       avgQuality: +(models.reduce((s, m) => s + m.avgQuality, 0) / models.length).toFixed(3),
     };
   }
@@ -196,17 +271,17 @@ export class ModelRegistry {
   // ─── Defaults ─────────────────────────────────────────────────
 
   #registerDefaults() {
-    // ─── Modèles locaux (priorité) ─────────────────────────────
+    // ─── Modèles locaux (priorité, souverains) ─────────────────
     this.register({
       name: 'thevie-distilled-3b', backend: 't369', modelId: 'thevie/distilled-3b',
       costPer1kTokens: 0, avgQuality: 0.87, avgSpeed: 135,
-      specialties: ['general','fast','thevie'],
+      specialties: ['general','fast','thevie','rag','orchestration'],
       supportsLora: true, isLocal: true, contextWindow: 8192,
     });
     this.register({
       name: 'loraevo', backend: 't369', modelId: 'thevie/lora-evo',
       costPer1kTokens: 0, avgQuality: 0.85, avgSpeed: 110,
-      specialties: ['evolution','learning','lora','adaptation','thevie'],
+      specialties: ['evolution','learning','lora','adaptation','code','contracts','thevie'],
       supportsLora: true, isLocal: true, contextWindow: 8192,
     });
     this.register({
@@ -222,13 +297,7 @@ export class ModelRegistry {
       supportsLora: true, isLocal: true, contextWindow: 32768,
     });
 
-    // ─── Modèles cloud ─────────────────────────────────────────
-    this.register({
-      name: 'gpt-4o', backend: 'openai', modelId: 'gpt-4o',
-      costPer1kTokens: 0.005, avgQuality: 0.94, avgSpeed: 92,
-      specialties: ['code','creativity','multimodal'],
-      supportsLora: false, isLocal: false, contextWindow: 128000,
-    });
+    // ─── Modèles cloud (partenaires : Claude · Deepseek · Grok · Mistral) ──
     this.register({
       name: 'claude-sonnet-4-6', backend: 'anthropic', modelId: 'claude-sonnet-4-6',
       costPer1kTokens: 0.003, avgQuality: 0.96, avgSpeed: 68,
@@ -238,14 +307,8 @@ export class ModelRegistry {
     this.register({
       name: 'deepseek-r1', backend: 'deepseek', modelId: 'deepseek-r1',
       costPer1kTokens: 0.0014, avgQuality: 0.89, avgSpeed: 110,
-      specialties: ['code','math','fast'],
+      specialties: ['code','math','fast','reasoning'],
       supportsLora: false, isLocal: false, contextWindow: 64000,
-    });
-    this.register({
-      name: 'gemini-2-flash', backend: 'google', modelId: 'gemini-2.0-flash',
-      costPer1kTokens: 0.0010, avgQuality: 0.88, avgSpeed: 120,
-      specialties: ['fast','multimodal','general'],
-      supportsLora: false, isLocal: false, contextWindow: 1000000,
     });
     this.register({
       name: 'grok-3', backend: 'xai', modelId: 'grok-3',
@@ -258,6 +321,32 @@ export class ModelRegistry {
       costPer1kTokens: 0.0006, avgQuality: 0.87, avgSpeed: 150,
       specialties: ['fast','reasoning','math','code'],
       supportsLora: false, isLocal: false, contextWindow: 131072,
+    });
+    this.register({
+      name: 'mistral-large', backend: 'mistral', modelId: 'mistral-large-latest',
+      costPer1kTokens: 0.002, avgQuality: 0.90, avgSpeed: 90,
+      specialties: ['multilingual','reasoning','code','general'],
+      supportsLora: false, isLocal: false, contextWindow: 128000,
+    });
+  }
+
+  // Adapters représentatifs du swarm, rattachés aux Runners (Thevie/LoraÉvo/T369)
+  #registerDefaultAdapters() {
+    this.registerAdapter({
+      name: 'thevie-rag', task: 'rag', runner: 'thevie', source: 'distilled',
+      baseModel: 'thevie-distilled-3b', specialties: ['rag','synthesis','orchestration','general'],
+    });
+    this.registerAdapter({
+      name: 'loraevo-code', task: 'code', runner: 'loraevo', source: 'lesson',
+      baseModel: 'loraevo', rank: 16, specialties: ['code','contracts','web','governance'],
+    });
+    this.registerAdapter({
+      name: 't369-security', task: 'security', runner: 't369', source: 'manual',
+      baseModel: 'thevie-distilled-3b', specialties: ['security','verification','attestation'],
+    });
+    this.registerAdapter({
+      name: 't369-dreamweaver', task: 'imagination', runner: 't369', source: 'dream',
+      baseModel: 'thevie-distilled-3b', specialties: ['imagination','synthesis','creativity'],
     });
   }
 }
