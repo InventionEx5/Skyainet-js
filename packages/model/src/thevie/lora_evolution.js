@@ -5,8 +5,8 @@
 
 "use strict";
 
-import { Dilithium5Signer }              from '../../../secure/src/crypto/dilithium.js';
-import { LoraAdapter, crossEntropyGrad } from '../../node/src/lora_trainer.js';
+import { Dilithium5Signer }              from '#dilithium';
+import { LoraAdapter, crossEntropyGrad } from '#lora_trainer';
 import { writeFile, mkdir }              from 'fs/promises';
 
 // ─────────────────────────────────────────────────────────────────
@@ -694,8 +694,7 @@ export class LoraEvo {
   // ═══════════════════════════════════════════════════════════════
   // GÉNÉRATION AVEC APPRENTISSAGE EN TEMPS RÉEL
   // ═══════════════════════════════════════════════════════════════
-
-  async generate(prompt, maxTokens = 256) {
+async generate(prompt, maxTokens = 256) {
     if (!this.#inferenceEngine) {
       throw new Error("LoraEvo n'est pas connectée au moteur d'inférence");
     }
@@ -724,7 +723,8 @@ export class LoraEvo {
 
     return response;
   }
-// ═══════════════════════════════════════════════════════════════
+
+  // ═══════════════════════════════════════════════════════════════
   // ENTRAÎNEMENT LOURD — vrai LoRA forward/backward sur T369
   // ═══════════════════════════════════════════════════════════════
 
@@ -1107,8 +1107,7 @@ export class LoraEvo {
   }
 
   // ─── Helpers privés ───────────────────────────────────────────
-
-  /** Extrait les paramètres structurés de la description + options. */
+/** Extrait les paramètres structurés de la description + options. */
   #extractContractParams(description, options, type) {
     const desc = description.toLowerCase();
     return {
@@ -1214,7 +1213,7 @@ export class LoraEvo {
     };
   }
 
- // ═══════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════
   // API PUBLIQUE
   // ═══════════════════════════════════════════════════════════════
 
@@ -1251,8 +1250,38 @@ export class LoraEvo {
     };
   }
 
-  // Compat EvolutionManager duck-typing { train() }
-  get train() { return this.train.bind(this); }
+  // ─── Bridge poids vivants → swarm d'adapters (Fusion L2) ──────
+
+  /** Expose l'adapter LoRA entraîné (ou null). */
+  getAdapter() { return this.#loraAdapter; }
+
+  /**
+   * Enregistre l'adapter entraîné comme entrée du Dynamic Adapter Swarm
+   * (model_registry) → découvrable + hot-swappable (boucle des poids vivants :
+   * l'entraînement de LoraÉvo nourrit le routing L0).
+   * @param {object} registry — ModelRegistry
+   * @param {string} [name]
+   */
+  registerInSwarm(registry, name = `loraevo-v${this.#trainingCount}`) {
+    if (!registry || typeof registry.registerAdapter !== 'function')
+      throw new Error('registry.registerAdapter requis');
+    registry.registerAdapter({
+      name, task: 'code', runner: 'loraevo', source: 'lesson', baseModel: 'loraevo',
+      rank: this.#loraAdapter?.rank ?? 8, version: this.#trainingCount,
+      specialties: ['code', 'contracts', 'web', 'governance'],
+    });
+    return name;
+  }
+
+  /**
+   * Test-Time Training explicite : entraîne sur les connaissances accumulées
+   * pendant la session (mémoire long-terme + court-terme).
+   */
+  async trainOnRecent(opts = {}) {
+    const lessons = [...this.longTermKnowledge, ...this.shortTermMemory]
+      .filter(l => typeof l === 'string' && l.length >= 8);
+    return this.train({ lessons, ...opts });
+  }
 }
 
 export default LoraEvo;
