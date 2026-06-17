@@ -8,11 +8,11 @@
 
 "use strict";
 
-import { T369Model, ModelConfig }                          from './t369.js';
-import { KVCache }                                         from './kv_cache.js';
-import { SpeculativeDecoder, SpeculativeConfig }            from './speculative.js';
-import { ParallelExecutor, ParallelConfig, ParallelStrategy } from './parallel.js';
-import { BpeTokenizer }                                    from './tokenizer.js';
+import { T369Model, ModelConfig }                          from '#t369';
+import { KVCache }                                         from '#kv_cache';
+import { SpeculativeDecoder, SpeculativeConfig }            from '#speculative';
+import { ParallelExecutor, ParallelConfig, ParallelStrategy } from '#parallel';
+import { BpeTokenizer }                                    from '#tokenizer';
 
 export const ParallelMode = Object.freeze({
   None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Speculative: 'Speculative',
@@ -121,4 +121,150 @@ export class T369Inference {
       speculative: this.speculativeDecoder?.getStats() ?? null,
     };
   }
+}
+
+// =====================================================
+// Inference Core (Fusion L0/L1) — abstraction tri-backend
+// Un seul contrat (generate/embed) ; moteur interchangeable :
+//   LocalJS (ce runtime) · RemoteHTTP (SkyCloud embarque llama.cpp/vLLM,
+//   endpoint LOCAL souverain) · WebGPU (kernels WGSL pilotés JS) · WASM.
+// + cache de réponses + hook Memory Router (aiguillage d'adapters).
+// =====================================================
+
+export const BackendKind = Object.freeze({
+  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm',
+});
+
+export class InferenceBackend {
+  constructor(name) { this.name = name; this.ready = false; }
+  get capabilities() { return { streaming: false, adapters: false, gpu: false, sovereign: false }; }
+  async init() { this.ready = true; return this; }
+  async generate(prompt, opts = {}) { throw new Error('[Backend] generate non implémenté'); }
+  async embed(text) { throw new Error('[Backend] embed non supporté'); }
+  async dispose() {}
+}
+
+// Backend par défaut : ce runtime JS (souverain, sans binaire). Construction
+// paresseuse : le modèle n'est bâti qu'à l'init (évite de charger la chaîne lourde).
+export class LocalJSBackend extends InferenceBackend {
+  constructor(config = null) { super(BackendKind.LocalJS); this._config = config; this.engine = null; }
+  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true }; }
+  async init() {
+    if (!this.engine) {
+      this.engine = this._config ? new T369Inference(this._config) : new T369Inference();
+      if (this.engine.initKVCache) this.engine.initKVCache();
+    }
+    this.ready = true; return this;
+  }
+  configure(fn) { if (this.engine && fn) fn(this.engine); return this; }
+  get router() { return (this.engine && this.engine.model && this.engine.model.moeRouter) || null; }
+  async generate(prompt, opts = {}) {
+    if (!this.engine) await this.init();
+    return this.engine.generate(prompt, opts.maxNewTokens ?? 128);
+  }
+}
+
+// SkyCloud embarque le moteur natif (llama.cpp/vLLM/MLX) et expose sa PROPRE
+// API HTTP en localhost -> souverain, pas une dépendance tierce.
+export class RemoteHTTPBackend extends InferenceBackend {
+  constructor(endpoint = 'http://127.0.0.1:8799') { super(BackendKind.Native); this.endpoint = endpoint; }
+  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true }; }
+  async init() { this.ready = true; return this; }
+  async generate(prompt, opts = {}) {
+    const res = await fetch(this.endpoint + '/api/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, max_tokens: opts.maxNewTokens ?? 128, adapters: opts.adapters ?? [], stream: false }),
+    });
+    if (!res.ok) throw new Error('[RemoteHTTPBackend] HTTP ' + res.status);
+    const j = await res.json();
+    return j.text ?? j.content ?? '';
+  }
+  async embed(text) {
+    const res = await fetch(this.endpoint + '/api/embed', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: text }),
+    });
+    if (!res.ok) throw new Error('[RemoteHTTPBackend] embed HTTP ' + res.status);
+    const j = await res.json();
+    return j.embedding ?? j.data ?? [];
+  }
+}
+
+// Inférence pilotée 100% depuis JS via WebGPU (kernels WGSL) — sans binaire,
+// tourne aussi dans le navigateur. Kernels portés en L1.
+export class WebGPUBackend extends InferenceBackend {
+  constructor() { super(BackendKind.WebGPU); this.device = null; }
+  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true, browser: true }; }
+  static available() { return typeof navigator !== 'undefined' && !!navigator.gpu; }
+  async init() {
+    if (!WebGPUBackend.available()) throw new Error('[WebGPUBackend] WebGPU indisponible sur cet hôte');
+    this.ready = true; return this; // adapter/device + shaders WGSL câblés en L1
+  }
+  async generate() { throw new Error('[WebGPUBackend] kernels WGSL à venir (L1)'); }
+}
+
+// Fallback CPU portable, sans binaire : kernels AssemblyScript -> WASM SIMD (L1).
+export class WasmBackend extends InferenceBackend {
+  constructor() { super(BackendKind.Wasm); }
+  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, portable: true }; }
+  async generate() { throw new Error('[WasmBackend] kernels AssemblyScript/WASM à venir (L1)'); }
+}
+
+export class InferenceCore {
+  constructor(opts = {}) {
+    this.backends = new Map();
+    this.kind = opts.backend || BackendKind.LocalJS;
+    this.cacheEnabled = opts.cache ?? true;
+    this._cache = new Map();
+    this._stats = { calls: 0, hits: 0, misses: 0 };
+    this.register(BackendKind.LocalJS, new LocalJSBackend(opts.modelConfig || null));
+    if (opts.endpoint) this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
+  }
+  register(kind, backend) { this.backends.set(kind, backend); return this; }
+  get backend() { return this.backends.get(this.kind); }
+  async use(kind) { this.kind = kind; const b = this.backends.get(kind); if (b && !b.ready) await b.init(); return this; }
+
+  // Sélection auto selon les capacités disponibles : natif > webgpu > local-js > wasm
+  async autoSelect() {
+    const order = [BackendKind.Native, BackendKind.WebGPU, BackendKind.LocalJS, BackendKind.Wasm];
+    for (const k of order) {
+      const b = this.backends.get(k);
+      if (b) { try { await b.init(); this.kind = k; return k; } catch (_) { /* indispo -> suivant */ } }
+    }
+    return this.kind;
+  }
+
+  _key(prompt, opts) {
+    let h = 2166136261;
+    const s = prompt + '|' + (opts.maxNewTokens ?? 128) + '|' + (opts.adapters ? opts.adapters.join(',') : '');
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(36);
+  }
+
+  // Memory Router : si le backend expose un MoERouter, on dérive un biais de
+  // routing d'adapters depuis un vecteur de contexte (à passer en opts.bias).
+  routeAdapters(contextVec) {
+    const b = this.backend;
+    if (b && b.router && contextVec) { try { return b.router.biasFromContext(contextVec); } catch (_) { return null; } }
+    return null;
+  }
+
+  async generate(prompt, opts = {}) {
+    this._stats.calls++;
+    const b = this.backend;
+    if (this.cacheEnabled) {
+      const k = this._key(prompt, opts);
+      if (this._cache.has(k)) { this._stats.hits++; return this._cache.get(k); }
+      if (b && !b.ready) await b.init();
+      const out = await b.generate(prompt, opts);
+      this._cache.set(k, out); this._stats.misses++;
+      return out;
+    }
+    if (b && !b.ready) await b.init();
+    return b.generate(prompt, opts);
+  }
+
+  async embed(text) { const b = this.backend; if (b && !b.ready) await b.init(); return b.embed(text); }
+  clearCache() { this._cache.clear(); }
+  stats() { return { ...this._stats, backend: this.kind, cacheSize: this._cache.size, capabilities: this.backend?.capabilities }; }
 }
