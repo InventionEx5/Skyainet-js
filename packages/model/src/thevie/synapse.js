@@ -113,6 +113,33 @@ export class Synapse {
     return this.strength * Math.log1p(this.usageCount);
   }
 
+  // ─── Transmission & apprentissage (Fusion L0) ────────────────
+
+  /**
+   * Transmet un signal à travers la synapse : sortie pondérée par la force.
+   * La synapse agit comme une porte de routage du « consciousness bus ».
+   * @param {number} signal
+   * @returns {number} signal transmis (0 si synapse inactive)
+   */
+  transmit(signal) {
+    if (this.strength <= 0.12) return 0;
+    this.usageCount++;
+    this.lastUsed = _now();
+    return signal * this.strength;
+  }
+
+  /**
+   * Mise à jour hebbienne unifiée depuis une corrélation pré/post-activation :
+   * corrélation positive → renforcement, négative → affaiblissement (anti-Hebb).
+   * @param {number} correlation — [-1, 1]
+   * @param {number} rate
+   */
+  hebbianUpdate(correlation, rate = 0.1) {
+    if (correlation >= 0) this.strengthen(rate * correlation);
+    else                  this.weaken(rate * -correlation);
+    return this;
+  }
+
   // ─── Sérialisation ───────────────────────────────────────────
 
   toJSON() {
