@@ -204,6 +204,58 @@ export class LoraAdapter {
     }
   }
 
+  // ─── Test-Time Training (Fusion L2) ──────────────────────────
+
+  /**
+   * Un pas d'apprentissage complet sur un exemple : forward + grad + Adam.
+   * Le cœur des "poids vivants" — l'adapter apprend au moment de l'inférence.
+   * @param {Float32Array} h          — caché du dernier token [H]
+   * @param {Float32Array} baseLogits — logits du modèle gelé [V]
+   * @param {number}       target     — token cible
+   * @returns {number} loss
+   */
+  trainStep(h, baseLogits, target) {
+    const delta    = this.forward(h);
+    const V        = this.V;
+    const combined = new Float32Array(V);
+    for (let i = 0; i < V; i++) combined[i] = baseLogits[i] + delta[i];
+    const { loss, dLogits } = crossEntropyGrad(combined, target);
+    this.step(h, dLogits);
+    return loss;
+  }
+
+  // ─── Consolidation / fusion d'adapters (Fusion L2 / fédéré L6) ──
+
+  /** Moyenne pondérée des poids d'un autre adapter compatible (in-place). */
+  merge(other, weight = 0.5) {
+    if (other.H !== this.H || other.V !== this.V || other.rank !== this.#rank)
+      throw new Error('[LoraAdapter] merge: dimensions incompatibles');
+    const oa = other._exportA(), ob = other._exportB(), w = weight, iw = 1 - weight;
+    for (let i = 0; i < this.#A.length; i++) this.#A[i] = this.#A[i] * iw + oa[i] * w;
+    for (let i = 0; i < this.#B.length; i++) this.#B[i] = this.#B[i] * iw + ob[i] * w;
+    return this;
+  }
+  _exportA() { return this.#A; }
+  _exportB() { return this.#B; }
+
+  /** Réinitialise poids + moments Adam (A~He, B=0). */
+  reset() {
+    this.#A = _randnF32(this.#rank * this.H, 1 / Math.sqrt(this.H));
+    this.#B.fill(0);
+    this.#mA.fill(0); this.#vA.fill(0); this.#mB.fill(0); this.#vB.fill(0);
+    this.#step = 0;
+    return this;
+  }
+
+  /** Copie indépendante de l'adapter (poids dupliqués, moments à zéro). */
+  clone() {
+    const c = new LoraAdapter(this.H, this.V, {
+      rank: this.#rank, alpha: this.#scale * this.#rank, lr: this.#lr, weightDecay: this.#weightDecay,
+    });
+    c._restoreWeights(this.#A, this.#B);
+    return c;
+  }
+
   // ─── Sérialisation ────────────────────────────────────────────
 
   /**
