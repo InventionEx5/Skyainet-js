@@ -407,6 +407,71 @@ export class MeshIn {
     return [this.#activeCount(), this.averageWisdom, this.totalSynapses];
   }
 
+  // ─── Mesh souverain : vitalité + réplication (Fusion L6) ─────
+
+  /**
+   * Score de vitalité du mesh local [0,1] — signal de contribution/réputation
+   * du nœud dans le mesh souverain (entrée PoSI). Combine sagesse moyenne,
+   * densité synaptique et ratio de neurones actifs.
+   */
+  meshHealth() {
+    const active      = this.#activeCount();
+    const capacity    = Math.max(1, this.#idCounter);
+    const density     = this.#synapses.size / Math.max(1, active * AUTO_CONNECT_K);
+    const activeRatio = active / capacity;
+    const score = 0.5 * this.averageWisdom + 0.3 * Math.min(1, density) + 0.2 * activeRatio;
+    return +Math.max(0, Math.min(1, score)).toFixed(4);
+  }
+
+  /**
+   * Capture l'état du mesh (poids + synapses) pour migration/réplication
+   * inter-nœuds. Sérialisable JSON.
+   */
+  snapshot() {
+    const n = this.#idCounter;
+    const synapses = [];
+    for (const syn of this.#synapses.values()) {
+      synapses.push({ from: syn.from, to: syn.to, strength: +syn.strength.toFixed(4), usageCount: syn.usageCount });
+    }
+    return {
+      idCounter    : n,
+      wisdom       : Array.from(this.#wisdom.subarray(0, n)),
+      active       : Array.from(this.#active.subarray(0, n)),
+      actScore     : Array.from(this.#actScore.subarray(0, n)),
+      synapses,
+      averageWisdom: this.averageWisdom,
+    };
+  }
+
+  /**
+   * Restaure un mesh depuis un snapshot (réplication d'un nœud vers un autre).
+   * @param {object} snap — produit par snapshot()
+   */
+  restore(snap) {
+    if (!snap || !Array.isArray(snap.wisdom)) throw new TypeError('snapshot invalide');
+    const n = Math.min(snap.idCounter ?? snap.wisdom.length, MAX_NEURONS);
+    this.#neurons.clear();
+    this.#synapses.clear();
+    this.#idCounter = n;
+    for (let i = 0; i < n; i++) {
+      this.#wisdom[i]     = snap.wisdom[i] ?? 0.5;
+      this.#active[i]     = snap.active?.[i] ?? 1;
+      this.#actScore[i]   = snap.actScore?.[i] ?? 0;
+      this.#activation[i] = 0;
+      this.#lastUsed[i]   = Date.now();
+      this.#neurons.set(i, new Neuron(i, this.#wisdom[i]));
+    }
+    for (const s of (snap.synapses ?? [])) {
+      const syn = new Synapse(s.from, s.to, s.strength ?? 0.5);
+      syn.usageCount = s.usageCount ?? 0;
+      this.#synapses.set(`${s.from}:${s.to}`, syn);
+    }
+    this.totalSynapses = this.#synapses.size;
+    this.averageWisdom = snap.averageWisdom ?? 0.5;
+    this.#updateAvg();
+    return this;
+  }
+
   // ─── Privés ───────────────────────────────────────────────────
 
   /** Connexions automatiques pour un nouveau neurone (port de auto_establish_synapses). */
