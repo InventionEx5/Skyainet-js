@@ -12,13 +12,13 @@ import { existsSync }                from 'fs';
 import os                            from 'os';
 import { randomUUID }                from 'crypto';
 
-import { UserRewards }               from '../../core/src/rewards.js';
-import { PeerPool }                  from '../../secure/src/roots/pool.js';
+import { UserRewards }               from '#rewards';
+import { PeerPool }                  from '#pool';
 import {
   ComputeMarketplace,
   RentalOffer, ActiveRental,
   RentalStatus, MarketplaceError,
-} from './marketplace.js';
+} from '#marketplace';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
