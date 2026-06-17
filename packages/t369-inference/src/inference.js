@@ -14,6 +14,7 @@ import { SpeculativeDecoder, SpeculativeConfig }            from '#speculative';
 import { ParallelExecutor, ParallelConfig, ParallelStrategy } from '#parallel';
 import { BpeTokenizer }                                    from '#tokenizer';
 import { GpuKernels, CpuKernels }                          from '#gpu_kernels';
+import { EngineSupervisor, EngineKind }                    from '#engine_supervisor';
 
 export const ParallelMode = Object.freeze({
   None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Speculative: 'Speculative',
@@ -133,7 +134,7 @@ export class T369Inference {
 // =====================================================
 
 export const BackendKind = Object.freeze({
-  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh',
+  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh', Embedded: 'embedded',
 });
 
 export class InferenceBackend {
@@ -245,6 +246,22 @@ export class MeshBackend extends InferenceBackend {
   }
 }
 
+// Backend MOTEUR EMBARQUÉ (souverain) : possède et supervise un moteur natif
+// (llama.cpp / vLLM / MLX) via EngineSupervisor — spawn, health, redémarrage
+// auto. C'est le cœur d'inférence souverain de SkyCloud. Backend-agnostique :
+// le moteur est choisi par EngineKind sans changer l'API.
+export class EmbeddedEngineBackend extends InferenceBackend {
+  constructor(opts = {}) {
+    super(BackendKind.Embedded);
+    this.engine = opts.engine instanceof EngineSupervisor ? opts.engine : new EngineSupervisor(opts);
+  }
+  get capabilities() { return { streaming: false, adapters: true, gpu: true, sovereign: true, embedded: true, kind: this.engine.kind }; }
+  async init()                 { await this.engine.start(); this.ready = this.engine.isReady; return this; }
+  async generate(prompt, opts) { return this.engine.generate(prompt, opts); }
+  async embed(text)            { return this.engine.embed(text); }
+  async dispose()              { await this.engine.stop(); }
+}
+
 export class InferenceCore {
   constructor(opts = {}) {
     this.backends = new Map();
@@ -255,6 +272,7 @@ export class InferenceCore {
     this.register(BackendKind.LocalJS, new LocalJSBackend(opts.modelConfig || null));
     if (opts.endpoint)   this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
     if (opts.meshRouter) this.register(BackendKind.Mesh, new MeshBackend(opts.meshRouter, opts.mesh || {}));
+    if (opts.engine || opts.embeddedEngine) this.register(BackendKind.Embedded, new EmbeddedEngineBackend(opts.engine ? { engine: opts.engine } : (opts.embeddedEngine || {})));
   }
   register(kind, backend) { this.backends.set(kind, backend); return this; }
   get backend() { return this.backends.get(this.kind); }
