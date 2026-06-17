@@ -82,6 +82,37 @@ const typeDefs = /* GraphQL */ `
     alive     : Boolean!
   }
 
+  """Outil de l'orchestrateur Thevie"""
+  type RunnerTool {
+    name  : String!
+    desc  : String!
+    runner: String!
+  }
+
+  """Étape d'une orchestration Thevie"""
+  type ThevieStep {
+    index  : Int!
+    type   : String!
+    runner : String!
+    status : String!
+    content: String
+  }
+
+  """Résultat d'une orchestration Thevie (Runner Swarm)"""
+  type ThevieSession {
+    goal     : String!
+    stepCount: Int!
+    success  : Boolean!
+    steps    : [ThevieStep!]!
+  }
+
+  """Stats de l'orchestrateur Thevie"""
+  type ThevieRunnerStats {
+    sessions   : Int!
+    toolCount  : Int!
+    engineReady: Boolean!
+  }
+
   # ── Queries ──────────────────────────────────────────────────
 
   type Query {
@@ -99,6 +130,12 @@ const typeDefs = /* GraphQL */ `
 
     """Liste des pairs"""
     peers: [Peer!]!
+
+    """Catalogue d'outils de l'orchestrateur Thevie"""
+    thevieTools: [RunnerTool!]!
+
+    """Stats de l'orchestrateur Thevie"""
+    thevieStats: ThevieRunnerStats!
   }
 
   # ── Mutations ────────────────────────────────────────────────
@@ -115,6 +152,9 @@ const typeDefs = /* GraphQL */ `
 
     """Injecte une leçon dans SkyCloud"""
     injectLesson(lesson: String!): String!
+
+    """Exécute un objectif via l'orchestrateur Thevie (Runner Swarm)"""
+    runThevieTask(goal: String!): ThevieSession!
   }
 `;
 
@@ -201,6 +241,31 @@ function createResolvers({ skycloud, chatManager }) {
     injectLesson: async ({ lesson }) => {
       const result = await skycloud.injectLesson?.(lesson);
       return result?.synthesis ?? 'Leçon injectée';
+    },
+
+    // ── Orchestration Thevie (Runner Swarm, L6) ────────────────
+
+    thevieTools: () => skycloud.getThevieToolCatalog?.() ?? [],
+
+    thevieStats: () => {
+      const s = skycloud.getThevieStats?.() ?? {};
+      return { sessions: s.sessions ?? 0, toolCount: s.toolCount ?? 0, engineReady: s.engineReady ?? false };
+    },
+
+    runThevieTask: async ({ goal }) => {
+      const session = await skycloud.runThevieTask?.(goal, null, {});
+      return {
+        goal     : session?.goal      ?? goal,
+        stepCount: session?.stepCount ?? 0,
+        success  : session?.success   ?? false,
+        steps    : (session?.steps ?? []).map(st => ({
+          index  : st.index,
+          type   : st.type,
+          runner : st.runner,
+          status : st.status,
+          content: st.content ?? null,
+        })),
+      };
     },
   };
 }
