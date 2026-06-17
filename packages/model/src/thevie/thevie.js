@@ -181,6 +181,134 @@ class LocalMemory {
 // THEVIE — Orchestrateur principal
 // ═══════════════════════════════════════════════════════════════
 
+// ─────────────────────────────────────────────────────────────────
+// THEVIE RUNNER — moteur d'orchestration du Runner Swarm (Fusion L5)
+//
+// Thevie EST l'orchestrateur. Il décompose un objectif complexe en étapes,
+// confie chacune au meilleur runner du swarm (Thevie principal, LoraÉvo pour
+// code/contrats, T369 pour sécurité/imagination), agrège le résultat et émet
+// un journal d'étapes (callback onStep). Indépendant du moteur : testable avec
+// un nœud factice (generateWithAI).
+// ─────────────────────────────────────────────────────────────────
+
+const RUNNER_MAX_STEPS = 10;
+
+const RUNNER_TOOL_CATALOG = [
+  { name: 'reason',    desc: 'Raisonner / planifier',          runner: 'thevie'  },
+  { name: 'research',  desc: 'Rechercher et synthétiser',      runner: 'thevie'  },
+  { name: 'code',      desc: 'Générer ou corriger du code',    runner: 'loraevo' },
+  { name: 'contract',  desc: 'Générer un smart contract',      runner: 'loraevo' },
+  { name: 'verify',    desc: 'Vérifier / sécuriser / auditer', runner: 't369'    },
+  { name: 'imagine',   desc: 'Imagination / DreamWeaver',      runner: 't369'    },
+  { name: 'summarize', desc: 'Synthétiser le résultat final',  runner: 'thevie'  },
+];
+
+export class ThevieRunner {
+  #node;
+  #engine;
+  #maxSteps;
+  #sessions;
+
+  constructor(node, engine = null) {
+    this.#node     = node   ?? null;
+    this.#engine   = engine ?? null;
+    this.#maxSteps = RUNNER_MAX_STEPS;
+    this.#sessions = [];
+  }
+
+  connectEngine(engine) { this.#engine = engine ?? null; }
+
+  /**
+   * Exécute un objectif complexe en le décomposant en étapes confiées aux
+   * meilleurs runners.
+   * @param {string}   goal
+   * @param {Function} [onStep] — callback(step) après chaque étape
+   * @param {object}   [opts]   — { maxSteps, maxTokens, temperature }
+   * @returns {Promise<{ goal, steps, stepCount, durationMs, success }>}
+   */
+  async run(goal, onStep = null, opts = {}) {
+    const maxSteps = Math.min(opts.maxSteps ?? this.#maxSteps, 25);
+    const plan     = this.#plan(goal, maxSteps);
+    const steps    = [];
+    const started  = Date.now();
+
+    for (let i = 0; i < plan.length; i++) {
+      const task = plan[i];
+      const step = { index: i + 1, type: task.tool, runner: task.runner, goal: task.description, timestamp: Date.now() };
+      try {
+        const prompt = this.#stepPrompt(goal, task, steps);
+        step.content = await this.#generate(prompt, task.runner, opts);
+        step.status  = 'ok';
+      } catch (e) {
+        step.content = `[échec: ${e.message}]`;
+        step.status  = 'error';
+      }
+      steps.push(step);
+      if (typeof onStep === 'function') { try { onStep(step); } catch { /* callback sûr */ } }
+    }
+
+    const session = {
+      goal, steps,
+      stepCount : steps.length,
+      durationMs: Date.now() - started,
+      at        : started,
+      success   : steps.every(s => s.status === 'ok'),
+    };
+    this.#sessions.push(session);
+    if (this.#sessions.length > 50) this.#sessions.shift();
+    console.info(`[ThevieRunner] Objectif exécuté — ${steps.length} étapes | succès: ${session.success}`);
+    return session;
+  }
+
+  getToolCatalog() { return RUNNER_TOOL_CATALOG.map(t => ({ ...t })); }
+  listSessions()   { return [...this.#sessions]; }
+  getStats()  { return { sessions: this.#sessions.length, toolCount: RUNNER_TOOL_CATALOG.length, engineReady: this.#engineReady(), maxSteps: this.#maxSteps }; }
+  getStatus() { return { engineReady: this.#engineReady(), mode: 'thevie', runner: 'thevie' }; }
+
+  // ─── Privé ───────────────────────────────────────────────────
+
+  #engineReady() { return !!(this.#engine?.isReady ?? this.#engine); }
+
+  #plan(goal, maxSteps) {
+    const g    = String(goal).toLowerCase();
+    const plan = [{ tool: 'reason', runner: 'thevie', description: `Analyser et planifier : ${goal}` }];
+
+    if (/(code|fonction|script|bug|implément|implement|refactor)/.test(g))
+      plan.push({ tool: 'code', runner: 'loraevo', description: 'Produire le code nécessaire' });
+    if (/(contrat|contract|token|nft|dao|erc|staking|vesting)/.test(g))
+      plan.push({ tool: 'contract', runner: 'loraevo', description: 'Générer le smart contract' });
+    if (/(recherche|research|compar|analys|explain|explique|étudi)/.test(g))
+      plan.push({ tool: 'research', runner: 'thevie', description: 'Rechercher et synthétiser' });
+    if (/(image|imagine|design|créa|creativ|rêve|dream)/.test(g))
+      plan.push({ tool: 'imagine', runner: 't369', description: 'Imaginer / concevoir' });
+    if (/(sécur|secur|vérif|verify|audit|test|chiffr)/.test(g))
+      plan.push({ tool: 'verify', runner: 't369', description: 'Vérifier et sécuriser' });
+
+    plan.push({ tool: 'summarize', runner: 'thevie', description: 'Synthétiser le résultat final' });
+    return plan.slice(0, Math.max(2, maxSteps));
+  }
+
+  #stepPrompt(goal, task, priorSteps) {
+    const ctx = priorSteps.length
+      ? `\n\nÉtapes précédentes:\n${priorSteps.map(s => `- [${s.type}] ${String(s.content).slice(0, 160)}`).join('\n')}`
+      : '';
+    return `Objectif global: ${goal}\n\nÉtape actuelle (${task.tool}): ${task.description}${ctx}\n\nExécute cette étape de façon concise et utile.`;
+  }
+
+  async #generate(prompt, runner, opts) {
+    if (this.#node && typeof this.#node.generateWithAI === 'function') {
+      const r = await this.#node.generateWithAI({
+        prompt, ai: runner,
+        maxTokens  : opts.maxTokens   ?? 400,
+        temperature: opts.temperature ?? 0.6,
+      });
+      return (r?.text ?? r ?? '').toString().trim() || '[vide]';
+    }
+    return `[plan:${runner}] ${prompt.slice(0, 80)}`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
 export class Thevie {
 
   // Subsystèmes
@@ -399,6 +527,23 @@ export class Thevie {
     return response;
   }
 
+  // ── Orchestration Runner Swarm (Fusion L5) ───────────────────
+  // Thevie EST l'orchestrateur : il décompose un objectif complexe en étapes
+  // confiées aux meilleurs runners du swarm, via son ThevieRunner intégré.
+  async orchestrate(goal, onStep = null, opts = {}) {
+    if (!this._runner) {
+      this._runner = new ThevieRunner(this.#node, this.#node?._engine ?? null);
+    }
+    return this._runner.run(goal, onStep, opts);
+  }
+
+  /** Catalogue d'outils de l'orchestrateur Thevie. */
+  getRunnerToolCatalog() { return (this._runner ??= new ThevieRunner(this.#node)).getToolCatalog(); }
+  /** Historique des orchestrations Thevie. */
+  listRunnerSessions()   { return this._runner?.listSessions() ?? []; }
+  /** Stats de l'orchestrateur Thevie. */
+  getRunnerStats()       { return (this._runner ??= new ThevieRunner(this.#node)).getStats(); }
+
   // ─────────────────────────────────────────────────────────────
   // Tâches périodiques regroupées
   // ─────────────────────────────────────────────────────────────
@@ -442,10 +587,7 @@ export class Thevie {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Détection mode agentique
-  // ─────────────────────────────────────────────────────────────
   // Auto-amélioration récursive
-  // (Mode agentique supprimé — délégué à AgenticRunner dans agentic.js)
   // ─────────────────────────────────────────────────────────────
 
   async #recursiveSelfImprovement() {
@@ -662,8 +804,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // RÔLE VALIDATEUR
   // ═══════════════════════════════════════════════════════════════
-
-  /**
+/**
    * Statut du nœud courant vis-à-vis de son rôle de validateur :
    * type, éligibilité, stake minimum requis, scores éthiques enregistrés
    * on-chain et rééquilibrages réseau déclenchés.
@@ -726,7 +867,8 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // GESTION D'ÉNERGIE DU NŒUD
   // ═══════════════════════════════════════════════════════════════
-/** Met le nœud en veille intelligente — réduit les cycles périodiques. */
+
+  /** Met le nœud en veille intelligente — réduit les cycles périodiques. */
   async sleepNode() {
     this.#node.setState('Sleeping');
     // Suspendre le moteur LoraEvo pour libérer la mémoire
@@ -990,7 +1132,8 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // RÉSEAU & CONNEXION
   // ═══════════════════════════════════════════════════════════════
-/**
+
+  /**
    * Génère les données QR de connexion du nœud courant.
    * Format : JSON encodé avec id, wisdomScore et adresses pairs.
    */
