@@ -74,6 +74,10 @@ export class T369Model {
     this._embF32  = null;   // override embedding Float32 déterministe (via seed)
     this._seed    = 0;
     this.loraHead = null;   // adaptateur LoRA entraîné, injecté dans les logits
+
+    // Chemin d'attention par défaut : CAUSAL cross-token + cache KV incrémental
+    // (correct, déterministe, O(n)). Mettre à false pour l'ancien chemin _mhla.
+    this.useCausalAttention = true;
   }
 
   initKVCache() {
@@ -165,7 +169,13 @@ export class T369Model {
     // (chemin sur lequel la tête a appris). La surcouche cognitive est volontairement
     // stochastique (état évolutif) -> inadaptée à une tête déterministe : on la
     // contourne pour l'inférence apprise, on la garde pour la génération exploratoire.
-    if (this.loraHead) return this.generateLearned(promptTokens, maxNewTokens);
+    if (this.loraHead) {
+      // Défaut causal : décodage incrémental (cache KV, O(n)), prouvé identique
+      // au recalcul plein. Sinon, ancien chemin déterministe plein.
+      return this.useCausalAttention
+        ? this.generateIncremental(promptTokens, maxNewTokens)
+        : this.generateLearned(promptTokens, maxNewTokens);
+    }
 
     this.initKVCache();
     const tokens = [...promptTokens];
@@ -226,6 +236,9 @@ export class T369Model {
   // par token. Retourne le caché du dernier token (déterministe, sans surcouche
   // cognitive) — c'est le vecteur sur lequel la tête LoRA s'entraîne et infère.
   _encodeHidden(tokens) {
+    // Défaut : chemin causal cross-token (mêmes représentations que le décodage
+    // incrémental → tête entraînée et inférence cohérentes).
+    if (this.useCausalAttention) return this.encodeCausalFull(tokens).slice();
     const { hiddenSize: H, vocabSize: V } = this.config;
     const seqLen = tokens.length;
     let emb;
@@ -234,9 +247,14 @@ export class T369Model {
     const hidden = new Float32Array(seqLen * H);
     for (let i = 0; i < seqLen; i++) hidden.set(emb.subarray(tokens[i] * H, tokens[i] * H + H), i * H);
 
-    // Passe d'encodage en une fois : pas de cache incrémental (le KV-cache
-    // renvoie des buffers non initialisés -> NaN ; cf. bug diagnostiqué).
+    // Passe d'encodage en une fois (cache null = attention pleine-séquence,
+    // pas de décodage incrémental). On GÈLE la phase de diffusion de chaque
+    // couche (roman_diffusion.js : this.phase += 0.009 à chaque appel, utilisée
+    // par le mode _hybrid) afin que l'encodage soit une fonction PURE des tokens
+    // -> inférence DÉTERMINISTE (sinon la tête LoRA voit un caché qui dérive).
+    const savedPhase = this.layers.map(l => l.romanDiffusion ? l.romanDiffusion.phase : null);
     for (let li = 0; li < this.layers.length; li++) this.layers[li].forward(hidden, seqLen, li, null);
+    for (let li = 0; li < this.layers.length; li++) if (savedPhase[li] !== null) this.layers[li].romanDiffusion.phase = savedPhase[li];
 
     const lastOff = (seqLen - 1) * H;
     const hl = hidden.slice(lastOff, lastOff + H);
@@ -271,50 +289,202 @@ export class T369Model {
     return tokens;
   }
 
-  // ── Persistance binaire réelle ──
-  // Format : 'T369' | u32 version | u32 V | u32 H | u32 numLayers | i32 seed |
-  //          u32 loraLen | finalNorm(H×f32) | loraAdapter.serialize()
+  // ════════════════════════════════════════════════════════════════
+  //  DÉCODAGE INCRÉMENTAL CORRECT — vraie attention causale + cache KV
+  //  Le modèle est désormais CAUSAL (diffusion causale, MoE par token,
+  //  attention causale cross-token) → la représentation d'un token ne change
+  //  plus quand on en ajoute après. On peut donc préremplir le KV du prompt
+  //  UNE fois, puis n'encoder qu'UN token par pas (O(n) au lieu de O(n²)),
+  //  avec un résultat IDENTIQUE au recalcul pleine-séquence.
+  // ════════════════════════════════════════════════════════════════
+
+  _rms(vec, weights, out) {
+    const H = vec.length; let ss = 0;
+    for (let i = 0; i < H; i++) ss += vec[i] * vec[i];
+    const inv = 1 / Math.sqrt(ss / H + 1e-6);
+    for (let i = 0; i < H; i++) out[i] = vec[i] * inv * weights[i];
+    return out;
+  }
+
+  // Une couche, version causale : pre-norm + attention causale (cache) + résidu,
+  // puis MoE PAR TOKEN (tous les tokens, pas seulement le dernier) + résidu,
+  // puis diffusion causale. `dec` = KVCache (slot numKvHeads·headDim).
+  _layerForwardCausal(L, hidden, seqLen, layerIdx, dec, basePos) {
+    const H = this.config.hiddenSize, total = H * seqLen;
+
+    const normedFull = new Float32Array(total);
+    const tmp = new Float32Array(H);
+    for (let t = 0; t < seqLen; t++) {
+      this._rms(hidden.subarray(t * H, t * H + H), L.norm1, tmp);
+      normedFull.set(tmp, t * H);
+    }
+
+    const attn = L.attention.causalSelfAttention(normedFull, seqLen, layerIdx, dec, basePos);
+    for (let i = 0; i < total; i++) hidden[i] += attn[i];
+
+    const n2 = new Float32Array(H);
+    for (let t = 0; t < seqLen; t++) {
+      const off = t * H;
+      this._rms(hidden.subarray(off, off + H), L.norm2, n2);
+      const moeOut = L.moeLayer.forward(n2, {});
+      for (let i = 0; i < H; i++) hidden[off + i] += moeOut[i];
+    }
+
+    L.romanDiffusion.applyUltra(hidden, seqLen, layerIdx, basePos, H);
+  }
+
+  // Encode `tokens` (placés à partir de basePos) à travers toutes les couches
+  // via le chemin causal + cache. Renvoie le caché [seqLen×H] (normé final).
+  _encodeCausal(tokens, dec, basePos) {
+    const { hiddenSize: H, vocabSize: V } = this.config;
+    const seqLen = tokens.length;
+    let emb;
+    if (this._embF32 && this._embF32.length === V * H) emb = this._embF32;
+    else { if (this._embBuf.length !== V * H) this._embBuf = new Float32Array(V * H); this.embedding.dequantizeInto(this._embBuf); emb = this._embBuf; }
+    const hidden = new Float32Array(seqLen * H);
+    for (let i = 0; i < seqLen; i++) hidden.set(emb.subarray(tokens[i] * H, tokens[i] * H + H), i * H);
+
+    for (let li = 0; li < this.layers.length; li++)
+      this._layerForwardCausal(this.layers[li], hidden, seqLen, li, dec, basePos);
+
+    const tmp = new Float32Array(H);
+    for (let t = 0; t < seqLen; t++) { this._rms(hidden.subarray(t * H, t * H + H), this.finalNorm, tmp); hidden.set(tmp, t * H); }
+    return hidden;
+  }
+
+  // Logits depuis un caché de dernier token : LM head (gelé) + delta LoRA.
+  _logitsAt(hVec) {
+    const { hiddenSize: H, vocabSize: V } = this.config;
+    if (this._lmBuf.length !== H * V) this._lmBuf = new Float32Array(H * V);
+    this.lmHead.dequantizeInto(this._lmBuf);
+    const logits = new Float32Array(V);
+    for (let i = 0; i < H; i++) { const hi = hVec[i]; if (hi === 0) continue; const row = i * V; for (let j = 0; j < V; j++) logits[j] += hi * this._lmBuf[row + j]; }
+    if (this.loraHead) { const dlt = this.loraHead.forward(hVec); for (let j = 0; j < V; j++) logits[j] += dlt[j]; }
+    return logits;
+  }
+
+  // Recalcul pleine-séquence (cache neuf) — RÉFÉRENCE pour valider l'incrémental.
+  encodeCausalFull(tokens) {
+    const { numLayers, numKvHeads, headDim, maxSeqLen } = this.config;
+    const dec = new KVCache(numLayers, numKvHeads, headDim, maxSeqLen);
+    const hidden = this._encodeCausal(tokens, dec, 0);
+    const H = this.config.hiddenSize;
+    return hidden.subarray((tokens.length - 1) * H, tokens.length * H);
+  }
+  logitsFull(tokens) { return this._logitsAt(this.encodeCausalFull(tokens)); }
+
+  // Génération incrémentale : préremplit le prompt puis encode 1 token/pas.
+  // opts.collect = true -> renvoie aussi les logits par pas (pour validation).
+  generateIncremental(promptTokens, maxNewTokens, opts = {}) {
+    const { numLayers, numKvHeads, headDim, maxSeqLen, hiddenSize: H } = this.config;
+    const dec = new KVCache(numLayers, numKvHeads, headDim, maxSeqLen);
+    const tokens = [...promptTokens];
+    const steps = [];
+
+    // Préremplissage du prompt (positions 0..P-1) en une passe
+    let hidden = this._encodeCausal(tokens, dec, 0);
+    let logits = this._logitsAt(hidden.subarray((tokens.length - 1) * H, tokens.length * H));
+    if (opts.collect) steps.push(logits.slice());
+    tokens.push(this._argmax(logits));
+
+    // Décodage : un seul token par pas, à sa position absolue
+    for (let s = 1; s < maxNewTokens; s++) {
+      const basePos = tokens.length - 1;
+      const h1 = this._encodeCausal([tokens[basePos]], dec, basePos);
+      logits = this._logitsAt(h1.subarray(0, H));
+      if (opts.collect) steps.push(logits.slice());
+      tokens.push(this._argmax(logits));
+    }
+    return opts.collect ? { tokens, steps } : tokens;
+  }
+
+  // ── Persistance binaire réelle (v2) ──
+  // 'T369' | u32 version | u32 V | u32 H | u32 numLayers | i32 seed |
+  //   u32 loraLen | [lora] | f32arr finalNorm |
+  //   QT embedding | QT lmHead |
+  //   par couche : f32arr norm1 | f32arr norm2 | u32 numExperts |
+  //                {QT up,gate,down}×experts | f32arr routerRow ×experts
+  // (f32arr = u32 longueur + floats ; QT = u32 longueur + QuantizedTensor.serialize)
   async saveWeights(path) {
     const fs = await import('node:fs');
     const { vocabSize: V, hiddenSize: H, numLayers } = this.config;
+
+    const chunks = [];
+    const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n >>> 0, true); chunks.push(b); };
+    const i32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setInt32(0, n | 0, true); chunks.push(b); };
+    const raw = (u8) => chunks.push(u8);
+    const f32arr = (arr) => { const b = new Uint8Array(4 + arr.length * 4); const d = new DataView(b.buffer); d.setUint32(0, arr.length, true); for (let i = 0; i < arr.length; i++) d.setFloat32(4 + i * 4, arr[i], true); chunks.push(b); };
+    const qt = (t) => { const s = t.serialize(); u32(s.byteLength); raw(s); };
+
+    raw(new Uint8Array([0x54, 0x33, 0x36, 0x39]));   // 'T369'
+    u32(2); u32(V); u32(H); u32(numLayers); i32(this._seed);
+
     const loraBytes = this.loraHead ? this.loraHead.serialize() : new Uint8Array(0);
-    const normBytes = new Uint8Array(this.finalNorm.buffer.slice(0));
-    const headerLen = 4 + 4 * 6;
-    const total = headerLen + normBytes.byteLength + loraBytes.byteLength;
-    const buf = new ArrayBuffer(total);
-    const dv = new DataView(buf), u8 = new Uint8Array(buf);
-    u8[0] = 0x54; u8[1] = 0x33; u8[2] = 0x36; u8[3] = 0x39;   // 'T369'
-    let o = 4;
-    dv.setUint32(o, 1, true); o += 4;
-    dv.setUint32(o, V, true); o += 4;
-    dv.setUint32(o, H, true); o += 4;
-    dv.setUint32(o, numLayers, true); o += 4;
-    dv.setInt32(o, this._seed, true); o += 4;
-    dv.setUint32(o, loraBytes.byteLength, true); o += 4;
-    u8.set(normBytes, o); o += normBytes.byteLength;
-    u8.set(loraBytes, o);
-    fs.writeFileSync(path, Buffer.from(buf));
+    u32(loraBytes.byteLength); raw(loraBytes);
+    f32arr(this.finalNorm);
+
+    qt(this.embedding);
+    qt(this.lmHead);
+    for (let li = 0; li < numLayers; li++) {
+      const L = this.layers[li];
+      f32arr(L.norm1); f32arr(L.norm2);
+      const ex = L.moeLayer.experts;
+      u32(ex.length);
+      for (let e = 0; e < ex.length; e++) { qt(ex[e].up); qt(ex[e].gate); qt(ex[e].down); }
+      for (let e = 0; e < ex.length; e++) f32arr(L.moeLayer.routerRows[e]);
+    }
+
+    let total = 0; for (const c of chunks) total += c.byteLength;
+    const out = new Uint8Array(total); let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.byteLength; }
+    fs.writeFileSync(path, Buffer.from(out.buffer, out.byteOffset, out.byteLength));
     return total;
   }
 
   async loadWeights(path) {
     const fs = await import('node:fs');
-    const raw = fs.readFileSync(path);
-    const buf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+    const rawBuf = fs.readFileSync(path);
+    const buf = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength);
     const dv = new DataView(buf), u8 = new Uint8Array(buf);
     if (!(u8[0] === 0x54 && u8[1] === 0x33 && u8[2] === 0x36 && u8[3] === 0x39))
       throw new Error('[T369Model] format de poids invalide (magic)');
     let o = 4;
-    const version = dv.getUint32(o, true); o += 4;
-    const V = dv.getUint32(o, true); o += 4;
-    const H = dv.getUint32(o, true); o += 4;
-    const numLayers = dv.getUint32(o, true); o += 4;
-    const seed = dv.getInt32(o, true); o += 4;
-    const loraLen = dv.getUint32(o, true); o += 4;
-    this.finalNorm = new Float32Array(buf.slice(o, o + H * 4)); o += H * 4;
-    this.initEmbeddings(seed);
-    if (loraLen > 0) { this.loraHead = LoraAdapter.deserialize(new Uint8Array(buf, o, loraLen)); }
-    console.info(`[T369Model] Poids chargés : V=${V} H=${H} L=${numLayers} seed=${seed} lora=${loraLen}o (v${version})`);
+    const rdU32 = () => { const v = dv.getUint32(o, true); o += 4; return v; };
+    const rdI32 = () => { const v = dv.getInt32(o, true); o += 4; return v; };
+    const rdF32 = (n) => { const a = new Float32Array(n); for (let i = 0; i < n; i++) { a[i] = dv.getFloat32(o, true); o += 4; } return a; };
+    const rdF32len = () => rdF32(rdU32());
+    const rdQT = () => { const len = rdU32(); const t = QuantizedTensor.deserialize(new Uint8Array(buf, o, len)); o += len; return t; };
+
+    const version = rdU32();
+    const V = rdU32(), H = rdU32(), numLayers = rdU32();
+    const seed = rdI32();
+
+    if (version === 1) {
+      // Ancien format : finalNorm (brut, sans préfixe) puis lora.
+      const loraLen = rdU32();
+      this.finalNorm = rdF32(H);
+      if (loraLen > 0) this.loraHead = LoraAdapter.deserialize(new Uint8Array(buf, o, loraLen));
+      this.initEmbeddings(seed);
+      console.info(`[T369Model] Poids chargés : V=${V} H=${H} L=${numLayers} seed=${seed} lora=${loraLen}o (v1)`);
+      return this;
+    }
+
+    // v2 : lora + finalNorm + poids de base complets
+    const loraLen = rdU32();
+    if (loraLen > 0) { this.loraHead = LoraAdapter.deserialize(new Uint8Array(buf, o, loraLen)); o += loraLen; }
+    this.finalNorm = rdF32len();
+    this.initEmbeddings(seed);                 // restaure l'override _embF32 seedé
+
+    this.embedding = rdQT();
+    this.lmHead = rdQT();
+    for (let li = 0; li < numLayers; li++) {
+      const L = this.layers[li];
+      L.norm1.set(rdF32len()); L.norm2.set(rdF32len());
+      const ne = rdU32();
+      for (let e = 0; e < ne; e++) { L.moeLayer.experts[e].up = rdQT(); L.moeLayer.experts[e].gate = rdQT(); L.moeLayer.experts[e].down = rdQT(); }
+      for (let e = 0; e < ne; e++) L.moeLayer.routerRows[e].set(rdF32len());
+    }
+    console.info(`[T369Model] Poids chargés : V=${V} H=${H} L=${numLayers} seed=${seed} lora=${loraLen}o, base quantifiée complète (v${version})`);
     return this;
   }
 
