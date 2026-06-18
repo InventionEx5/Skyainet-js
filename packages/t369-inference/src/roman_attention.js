@@ -171,6 +171,90 @@ export class RomanAttention {
     return Math.tanh(x) * 0.88 + Math.sin(x * 0.6) * this.config.diffusionStrength * 0.12;
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  ATTENTION CAUSALE INCRÉMENTALE CORRECTE (cross-token, GQA, RoPE)
+  //  x : [seqLen × H] normé, H = numQueryHeads·headDim.
+  //  dec : KVCache (slot = numKvHeads·headDim) ; basePos : position absolue
+  //  de x[0]. Écrit le K/V des positions [basePos, basePos+seqLen) puis chaque
+  //  token interroge tout le préfixe causal [0, basePos+t]. Identique en
+  //  recalcul complet (basePos=0) et en décodage pas-à-pas (basePos=pos).
+  //
+  //  Réduction GQA : faute de projection K/V apprise dans ce modèle, chaque
+  //  tête KV agrège (moyenne) ses `rep = qH/kvH` têtes-requête → mapping
+  //  déterministe et sans paramètre de qH·headDim vers kvH·headDim.
+  // ═══════════════════════════════════════════════════════════════
+  causalSelfAttention(x, seqLen, layerIdx, dec, basePos = 0) {
+    const { numQueryHeads: qH, numKvHeads: kvH, headDim } = this.config;
+    const rep     = qH / kvH;
+    const H       = qH * headDim;
+    const kvWidth = kvH * headDim;
+    const scale   = this._scale;
+    const out     = new Float32Array(seqLen * H);
+
+    // 1) K/V réduits + RoPE, écrits au cache à leur position absolue
+    const kvK = new Float32Array(kvWidth), kvV = new Float32Array(kvWidth);
+    for (let t = 0; t < seqLen; t++) {
+      const absPos = basePos + t, xoff = t * H;
+      for (let kh = 0; kh < kvH; kh++) {
+        for (let d = 0; d < headDim; d++) {
+          let s = 0;
+          for (let r = 0; r < rep; r++) s += x[xoff + (kh * rep + r) * headDim + d];
+          const v = s / rep;
+          kvK[kh * headDim + d] = v;
+          kvV[kh * headDim + d] = v;
+        }
+      }
+      this._ropeAt(kvK, absPos, kvH, headDim);   // RoPE sur K (pas sur V)
+      dec.writeStep(layerIdx, absPos, kvK, kvV);
+    }
+
+    const total = basePos + seqLen;
+    const got = dec.viewUpTo(layerIdx, total);
+    const Kb = got[0], Vb = got[1];
+    const q  = new Float32Array(headDim);
+    const scores = new Float32Array(total);
+
+    // 2) Chaque token-requête attend son préfixe causal
+    for (let t = 0; t < seqLen; t++) {
+      const absPos = basePos + t, xoff = t * H, limit = absPos + 1;
+      for (let qh = 0; qh < qH; qh++) {
+        const kh = (qh / rep) | 0, qbase = xoff + qh * headDim;
+        for (let d = 0; d < headDim; d++) q[d] = x[qbase + d];
+        this._ropeAt(q, absPos, 1, headDim);
+
+        let mx = -Infinity;
+        for (let ki = 0; ki < limit; ki++) {
+          const kBase = ki * kvWidth + kh * headDim;
+          let dot = 0;
+          for (let d = 0; d < headDim; d++) dot += q[d] * Kb[kBase + d];
+          dot *= scale; scores[ki] = dot; if (dot > mx) mx = dot;
+        }
+        let sum = 0;
+        for (let ki = 0; ki < limit; ki++) { const e = Math.exp(scores[ki] - mx); scores[ki] = e; sum += e; }
+        const inv = sum > 0 ? 1 / sum : 0;
+        for (let ki = 0; ki < limit; ki++) {
+          const w = scores[ki] * inv, vBase = ki * kvWidth + kh * headDim;
+          for (let d = 0; d < headDim; d++) out[qbase + d] += w * Vb[vBase + d];
+        }
+      }
+    }
+    return out;
+  }
+
+  // RoPE appliqué à `nHeads` blocs headDim consécutifs, à la position absolue `pos`.
+  _ropeAt(vec, pos, nHeads, headDim) {
+    const cb = (pos % this.config.maxSeqLen) * headDim;
+    for (let h = 0; h < nHeads; h++) {
+      const hb = h * headDim;
+      for (let i = 0; i < headDim; i += 2) {
+        const c = this._cos[cb + i], s = this._sin[cb + i];
+        const a = vec[hb + i], b = vec[hb + i + 1];
+        vec[hb + i]     = a * c - b * s;
+        vec[hb + i + 1] = a * s + b * c;
+      }
+    }
+  }
+
   // ─── Réglages runtime — long-contexte / diffusion (Fusion L0) ──
 
   /** Étend le contexte en recalculant les tables RoPE (style YaRN). */
