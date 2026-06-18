@@ -297,7 +297,7 @@ export class ModelRegistry {
       supportsLora: true, isLocal: true, contextWindow: 32768,
     });
 
-    // ─── Modèles cloud (partenaires : Claude · Deepseek · Grok · Mistral) ──
+    // ─── Modèles cloud (partenaires : Grok · Claude · DeepSeek) ──
     this.register({
       name: 'claude-sonnet-4-6', backend: 'anthropic', modelId: 'claude-sonnet-4-6',
       costPer1kTokens: 0.003, avgQuality: 0.96, avgSpeed: 68,
@@ -305,28 +305,16 @@ export class ModelRegistry {
       supportsLora: false, isLocal: false, contextWindow: 200000,
     });
     this.register({
-      name: 'deepseek-r1', backend: 'deepseek', modelId: 'deepseek-r1',
-      costPer1kTokens: 0.0014, avgQuality: 0.89, avgSpeed: 110,
+      name: 'deepseek-v4', backend: 'deepseek', modelId: 'deepseek-v4',
+      costPer1kTokens: 0.0014, avgQuality: 0.91, avgSpeed: 115,
       specialties: ['code','math','fast','reasoning'],
       supportsLora: false, isLocal: false, contextWindow: 64000,
     });
     this.register({
-      name: 'grok-3', backend: 'xai', modelId: 'grok-3',
-      costPer1kTokens: 0.003, avgQuality: 0.93, avgSpeed: 85,
+      name: 'grok-4', backend: 'xai', modelId: 'grok-4',
+      costPer1kTokens: 0.003, avgQuality: 0.95, avgSpeed: 88,
       specialties: ['reasoning','code','math','science','general'],
       supportsLora: false, isLocal: false, contextWindow: 131072,
-    });
-    this.register({
-      name: 'grok-3-mini', backend: 'xai', modelId: 'grok-3-mini',
-      costPer1kTokens: 0.0006, avgQuality: 0.87, avgSpeed: 150,
-      specialties: ['fast','reasoning','math','code'],
-      supportsLora: false, isLocal: false, contextWindow: 131072,
-    });
-    this.register({
-      name: 'mistral-large', backend: 'mistral', modelId: 'mistral-large-latest',
-      costPer1kTokens: 0.002, avgQuality: 0.90, avgSpeed: 90,
-      specialties: ['multilingual','reasoning','code','general'],
-      supportsLora: false, isLocal: false, contextWindow: 128000,
     });
   }
 
