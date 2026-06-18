@@ -56,6 +56,29 @@ export class KVCache {
     const n    = Math.min(keys.length, this._layerSize);
     this._K.set(keys.subarray(0, n), base);
     this._V.set(values.subarray(0, n), base);
+    // BUG FIX : sans ceci, currentSeqLen reste 0 -> getLayer() renvoie une vue
+    // vide -> l'attention lit au-delà du tableau -> NaN -> argmax=0 systématique.
+    this.currentSeqLen = Math.floor(n / this._slot);
+  }
+
+  // ── Décodage incrémental correct (Fusion L1) ─────────────────
+  // Écrit le K/V d'UNE position absolue dans une couche, sans toucher au
+  // compteur logique. Le slot vaut numKvHeads·headDim (couche KV réelle).
+  writeStep(layer, pos, key, value) {
+    if (layer >= this.numLayers || pos >= this.maxSeqLen) return;
+    const base = layer * this._layerSize + pos * this._slot;
+    const n = Math.min(this._slot, key.length);
+    for (let i = 0; i < n; i++) { this._K[base + i] = key[i]; this._V[base + i] = value[i]; }
+    if (pos + 1 > this.currentSeqLen) this.currentSeqLen = pos + 1;
+  }
+
+  // Vues plates des `len` premières positions d'une couche (zéro copie).
+  // Indépendant de currentSeqLen → lecture déterministe pendant le décodage.
+  viewUpTo(layer, len) {
+    if (layer >= this.numLayers) return null;
+    const base = layer * this._layerSize;
+    const end  = Math.min(len, this.maxSeqLen) * this._slot;
+    return [this._K.subarray(base, base + end), this._V.subarray(base, base + end)];
   }
 
   clear()   { this.currentSeqLen = 0; }
