@@ -164,4 +164,36 @@ export class QuantizedTensor {
   // Télémétrie compression
   get bytes() { return this.data.byteLength + this.scales.byteLength + this.zeroPoints.byteLength; }
   get compressionRatio() { return (this._numel * 4) / Math.max(1, this.bytes); }
+
+  // ── Sérialisation binaire octet-exacte (DataView -> sûr en alignement) ──
+  // [u32 rows][u32 cols][u32 bits][u32 dataLen][u32 scalesLen]
+  //   [int8 data][f32 scales][f32 zeroPoints]
+  // Les longueurs sont aussi dérivables de (rows,cols,bits) : on les stocke
+  // comme garde-fou et on reconstruit les tableaux via le constructeur.
+  serialize() {
+    const [rows, cols] = this.originalShape;
+    const dLen = this.data.length, sLen = this.scales.length, zLen = this.zeroPoints.length;
+    const buf = new ArrayBuffer(20 + dLen + sLen * 4 + zLen * 4);
+    const dv = new DataView(buf);
+    dv.setUint32(0, rows, true); dv.setUint32(4, cols, true); dv.setUint32(8, this.bits, true);
+    dv.setUint32(12, dLen, true); dv.setUint32(16, sLen, true);
+    let o = 20;
+    for (let i = 0; i < dLen; i++) dv.setInt8(o++, this.data[i]);
+    for (let i = 0; i < sLen; i++) { dv.setFloat32(o, this.scales[i], true); o += 4; }
+    for (let i = 0; i < zLen; i++) { dv.setFloat32(o, this.zeroPoints[i], true); o += 4; }
+    return new Uint8Array(buf);
+  }
+
+  static deserialize(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const rows = dv.getUint32(0, true), cols = dv.getUint32(4, true), bits = dv.getUint32(8, true);
+    const dLen = dv.getUint32(12, true), sLen = dv.getUint32(16, true);
+    const qt = new QuantizedTensor(rows, cols, bits);
+    let o = 20;
+    for (let i = 0; i < dLen; i++) qt.data[i] = dv.getInt8(o++);
+    for (let i = 0; i < sLen; i++) { qt.scales[i] = dv.getFloat32(o, true); o += 4; }
+    const zLen = qt.zeroPoints.length;
+    for (let i = 0; i < zLen; i++) { qt.zeroPoints[i] = dv.getFloat32(o, true); o += 4; }
+    return qt;
+  }
 }
