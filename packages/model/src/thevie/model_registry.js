@@ -11,6 +11,30 @@
 "use strict";
 
 // ─────────────────────────────────────────────────────────────────
+// MESURES RÉELLES (bancs kernel_bench.mjs / engine_bench.mjs, ce dépôt)
+// Données HONNÊTES, mesurées sur CPU en JS pur, à PETITE échelle (modèle non
+// entraîné). Elles ne représentent PAS une cible 3B/GPU et ne servent donc pas
+// à fixer avgSpeed/avgQuality des entrées ci-dessous (qui restent des objectifs
+// provisoires tant que de vrais poids entraînés n'existent pas). On les expose
+// pour traçabilité et pour alimenter les métriques dynamiques à l'exécution.
+// ─────────────────────────────────────────────────────────────────
+export const MEASURED_REFERENCE = {
+  measuredAt   : '2026-06 (CPU, Node, JS pur)',
+  engine       : {
+    backend          : 't369',
+    path             : 'causal incrémental (cache KV)',
+    decodeTokPerSec  : { 'H256_L6': 19, 'H512_L8': 3 },   // mesuré
+    note             : 'moteur JS de référence, petite échelle — non extrapolable à 3B/GPU',
+  },
+  matmulKernel : {
+    impl             : 'CpuKernels.matmulTiled (transpose + accum. registre)',
+    speedupVsNaive   : 1.14,                               // ×, mesuré 256³–512³
+    gflops           : 1.12,                               // GFLOP/s, mesuré
+    relErrorVsF64    : 5.9e-8,                             // plus précis que l'oracle naïf
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────
 // MODEL INFO
 // ─────────────────────────────────────────────────────────────────
 
@@ -272,6 +296,9 @@ export class ModelRegistry {
 
   #registerDefaults() {
     // ─── Modèles locaux (priorité, souverains) ─────────────────
+    // NB : avgQuality / avgSpeed ci-dessous sont des OBJECTIFS provisoires
+    // (poids 3B entraînés pas encore disponibles), utilisés pour le scoring du
+    // sélecteur. Mesures réelles du moteur actuel : voir MEASURED_REFERENCE.
     this.register({
       name: 'thevie-distilled-3b', backend: 't369', modelId: 'thevie/distilled-3b',
       costPer1kTokens: 0, avgQuality: 0.87, avgSpeed: 135,
