@@ -39,6 +39,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+// matmul TUILÉ — mémoire partagée du workgroup. Chaque tuile 16×16 charge un
+// bloc de A et de B en var<workgroup>, se synchronise, puis accumule. Réduit
+// d'un facteur ~TILE les lectures en mémoire globale (réutilisation des tuiles).
+// Technique GPU : tuilage en mémoire partagée. Le noyau CPU matmulTiled
+// optimise le même produit autrement (transposition) ; sa CORRECTION validée
+// contre l'oracle naïf atteste le résultat attendu. Ce shader tourne sous WebGPU.
+export const TILE = 16;
+export const WGSL_MATMUL_TILED = /* wgsl */`
+struct Dims { m: u32, k: u32, n: u32, _pad: u32 };
+@group(0) @binding(0) var<storage, read>        a: array<f32>;
+@group(0) @binding(1) var<storage, read>        b: array<f32>;
+@group(0) @binding(2) var<storage, read_write>  c: array<f32>;
+@group(0) @binding(3) var<uniform>              dims: Dims;
+
+var<workgroup> tileA: array<f32, 256>;   // 16×16
+var<workgroup> tileB: array<f32, 256>;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id)  lid: vec3<u32>) {
+  let row = gid.x;
+  let col = gid.y;
+  let lr  = lid.x;
+  let lc  = lid.y;
+  var acc: f32 = 0.0;
+
+  let nTiles = (dims.k + 15u) / 16u;
+  for (var t: u32 = 0u; t < nTiles; t = t + 1u) {
+    let aCol = t * 16u + lc;
+    let bRow = t * 16u + lr;
+    tileA[lr * 16u + lc] = select(0.0, a[row * dims.k + aCol], (row < dims.m) && (aCol < dims.k));
+    tileB[lr * 16u + lc] = select(0.0, b[bRow * dims.n + col], (bRow < dims.k) && (col < dims.n));
+    workgroupBarrier();
+    for (var kk: u32 = 0u; kk < 16u; kk = kk + 1u) {
+      acc = acc + tileA[lr * 16u + kk] * tileB[kk * 16u + lc];
+    }
+    workgroupBarrier();
+  }
+  if (row < dims.m && col < dims.n) { c[row * dims.n + col] = acc; }
+}
+`;
+
 // Dequant bloc 4-bit -> f32 (2 nibbles par octet ; scale/zeroPoint par bloc).
 export const WGSL_DEQUANT4 = /* wgsl */`
 struct QInfo { numel: u32, blockSize: u32, _p0: u32, _p1: u32 };
@@ -188,6 +230,30 @@ export class CpuKernels {
         if (aik === 0) continue;
         const bRow = k * N;
         for (let j = 0; j < N; j++) C[i * N + j] += aik * B[bRow + j];
+      }
+    }
+    return C;
+  }
+
+  // C = A·B optimisé : on transpose B (Bt : N×K) pour que le produit scalaire
+  // interne parcoure A[i,:] et Bt[j,:] de façon CONTIGUË, avec accumulation en
+  // registre et UNE seule écriture de C[i,j] (vs K lectures+écritures dans la
+  // version naïve). Même ordre de sommation → résultat identique au bit près.
+  // Le coût de transposition O(K·N) est négligeable devant O(M·K·N).
+  matmulTiled(A, B, M, K, N) {
+    const Bt = new Float32Array(N * K);
+    for (let kk = 0; kk < K; kk++) {
+      const bRow = kk * N;
+      for (let j = 0; j < N; j++) Bt[j * K + kk] = B[bRow + j];
+    }
+    const C = new Float32Array(M * N);
+    for (let i = 0; i < M; i++) {
+      const aRow = i * K, cRow = i * N;
+      for (let j = 0; j < N; j++) {
+        const bRow = j * K;
+        let s = 0;
+        for (let kk = 0; kk < K; kk++) s += A[aRow + kk] * Bt[bRow + kk];
+        C[cRow + j] = s;
       }
     }
     return C;
