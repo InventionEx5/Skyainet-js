@@ -53,6 +53,45 @@ export class RomanAttention {
     }
 
     this._scale = 1.0 / Math.sqrt(headDim);
+
+    // ── Projections d'attention APPRISES (Q/K/V/O) ──────────────────
+    // Vraies matrices linéaires par token, remplaçant la réduction GQA sans
+    // paramètre. Elles permettent d'ACCUEILLIR les poids d'attention d'un vrai
+    // checkpoint, et restent compatibles avec le cache causal (transformation
+    // linéaire par token → causalité et équivalence incrémentale préservées).
+    // Stockées en f32, sérialisées dans le checkpoint (format v3).
+    //   W_Q : H×H   W_K,W_V : H×(kvH·headDim)   W_O : H×H   (H = qH·headDim)
+    const Hd  = config.numQueryHeads * headDim;
+    const kvW = config.numKvHeads   * headDim;
+    this.projDim    = Hd;
+    this.projKvDim  = kvW;
+    this.wQ = new Float32Array(Hd * Hd);
+    this.wK = new Float32Array(Hd * kvW);
+    this.wV = new Float32Array(Hd * kvW);
+    this.wO = new Float32Array(Hd * Hd);
+    this.initProjections(0x51A7);   // init déterministe par défaut
+  }
+
+  // Init Q/K/V/O déterministe (seedée, échelle 1/√fan_in). À appeler par couche
+  // avec un seed distinct (via T369Model) pour casser la symétrie inter-couches.
+  initProjections(seed = 0x51A7) {
+    const Hd = this.projDim, kvW = this.projKvDim;
+    let s = seed >>> 0;
+    const rnd = () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    const fill = (W, inDim) => { const sc = 1 / Math.sqrt(inDim); for (let i = 0; i < W.length; i++) W[i] = (rnd() * 2 - 1) * sc; };
+    fill(this.wQ, Hd); fill(this.wK, Hd); fill(this.wV, Hd); fill(this.wO, Hd);
+    return this;
+  }
+
+  // y[outDim] = x[xoff .. xoff+inDim] · W[inDim × outDim]   (row-major)
+  _projVec(x, xoff, W, inDim, outDim, y) {
+    for (let o = 0; o < outDim; o++) y[o] = 0;
+    for (let i = 0; i < inDim; i++) {
+      const xv = x[xoff + i]; if (xv === 0) continue;
+      const row = i * outDim;
+      for (let o = 0; o < outDim; o++) y[o] += xv * W[row + o];
+    }
+    return y;
   }
 
   forward(query, key, value, seqLen, kvCache = null, layerIdx = 0) {
@@ -189,21 +228,16 @@ export class RomanAttention {
     const H       = qH * headDim;
     const kvWidth = kvH * headDim;
     const scale   = this._scale;
-    const out     = new Float32Array(seqLen * H);
+    const attnOut = new Float32Array(seqLen * H);   // sortie d'attention (avant W_O)
 
-    // 1) K/V réduits + RoPE, écrits au cache à leur position absolue
     const kvK = new Float32Array(kvWidth), kvV = new Float32Array(kvWidth);
+    const qProj = new Float32Array(H);
+
+    // 1) Projections K/V apprises (W_K, W_V) + RoPE sur K → cache
     for (let t = 0; t < seqLen; t++) {
       const absPos = basePos + t, xoff = t * H;
-      for (let kh = 0; kh < kvH; kh++) {
-        for (let d = 0; d < headDim; d++) {
-          let s = 0;
-          for (let r = 0; r < rep; r++) s += x[xoff + (kh * rep + r) * headDim + d];
-          const v = s / rep;
-          kvK[kh * headDim + d] = v;
-          kvV[kh * headDim + d] = v;
-        }
-      }
+      this._projVec(x, xoff, this.wK, H, kvWidth, kvK);
+      this._projVec(x, xoff, this.wV, H, kvWidth, kvV);
       this._ropeAt(kvK, absPos, kvH, headDim);   // RoPE sur K (pas sur V)
       dec.writeStep(layerIdx, absPos, kvK, kvV);
     }
@@ -211,22 +245,21 @@ export class RomanAttention {
     const total = basePos + seqLen;
     const got = dec.viewUpTo(layerIdx, total);
     const Kb = got[0], Vb = got[1];
-    const q  = new Float32Array(headDim);
     const scores = new Float32Array(total);
 
-    // 2) Chaque token-requête attend son préfixe causal
+    // 2) Projection Q apprise (W_Q) + RoPE par tête + attention causale
     for (let t = 0; t < seqLen; t++) {
-      const absPos = basePos + t, xoff = t * H, limit = absPos + 1;
+      const absPos = basePos + t, xoff = t * H, limit = absPos + 1, obase = t * H;
+      this._projVec(x, xoff, this.wQ, H, H, qProj);
       for (let qh = 0; qh < qH; qh++) {
-        const kh = (qh / rep) | 0, qbase = xoff + qh * headDim;
-        for (let d = 0; d < headDim; d++) q[d] = x[qbase + d];
-        this._ropeAt(q, absPos, 1, headDim);
+        const kh = (qh / rep) | 0, qhoff = qh * headDim;
+        this._ropeAt(qProj, absPos, 1, headDim, qhoff);
 
         let mx = -Infinity;
         for (let ki = 0; ki < limit; ki++) {
           const kBase = ki * kvWidth + kh * headDim;
           let dot = 0;
-          for (let d = 0; d < headDim; d++) dot += q[d] * Kb[kBase + d];
+          for (let d = 0; d < headDim; d++) dot += qProj[qhoff + d] * Kb[kBase + d];
           dot *= scale; scores[ki] = dot; if (dot > mx) mx = dot;
         }
         let sum = 0;
@@ -234,18 +267,27 @@ export class RomanAttention {
         const inv = sum > 0 ? 1 / sum : 0;
         for (let ki = 0; ki < limit; ki++) {
           const w = scores[ki] * inv, vBase = ki * kvWidth + kh * headDim;
-          for (let d = 0; d < headDim; d++) out[qbase + d] += w * Vb[vBase + d];
+          for (let d = 0; d < headDim; d++) attnOut[obase + qhoff + d] += w * Vb[vBase + d];
         }
       }
+    }
+
+    // 3) Projection de sortie apprise (W_O) : attnOut (qH·headDim) → H
+    const out = new Float32Array(seqLen * H);
+    const oVec = new Float32Array(H);
+    for (let t = 0; t < seqLen; t++) {
+      this._projVec(attnOut, t * H, this.wO, H, H, oVec);
+      out.set(oVec, t * H);
     }
     return out;
   }
 
-  // RoPE appliqué à `nHeads` blocs headDim consécutifs, à la position absolue `pos`.
-  _ropeAt(vec, pos, nHeads, headDim) {
+  // RoPE appliqué à `nHeads` blocs headDim consécutifs depuis l'offset `off`,
+  // à la position absolue `pos`.
+  _ropeAt(vec, pos, nHeads, headDim, off = 0) {
     const cb = (pos % this.config.maxSeqLen) * headDim;
     for (let h = 0; h < nHeads; h++) {
-      const hb = h * headDim;
+      const hb = off + h * headDim;
       for (let i = 0; i < headDim; i += 2) {
         const c = this._cos[cb + i], s = this._sin[cb + i];
         const a = vec[hb + i], b = vec[hb + i + 1];
