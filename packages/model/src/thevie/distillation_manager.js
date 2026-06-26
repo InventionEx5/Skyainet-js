@@ -9,6 +9,7 @@
 "use strict";
 
 import { ZipMemory } from '#zip_memory';
+import { ReplayBuffer, Experience } from '#replay_buffer';
 
 // ─────────────────────────────────────────────────────────────────
 // TYPES
@@ -247,6 +248,79 @@ export class DistillationManager {
     }
     console.info(`[Distillation] ${dataset.length} exemples depuis teacher externe`);
     return dataset;
+  }
+
+  /**
+   * PONT distillation → POIDS (le maillon qui manquait : ce module ne reliait
+   * ni lora_trainer ni replay_buffer). Convertit les sorties maître (texte) en
+   * signal d'entraînement par tokens et entraîne réellement la tête LoRA du
+   * student, alimenté par un ReplayBuffer priorisé, avec checkpoint v2.
+   *
+   * Distillation par SÉQUENCE / cibles dures : les API maîtres fermées (Grok 4,
+   * Claude, DeepSeek) ne renvoient que du texte (pas de logits) → on entraîne le
+   * student à reproduire la séquence de tokens du maître en autorégressif. Si des
+   * logits maître deviennent disponibles, on passera en KD soft (KL sur logits).
+   *
+   * @param {TrainingExample[]} dataset            — issu de generateFromTeacher()
+   * @param {object}            opts
+   * @param {Function}          opts.tokenize      — (text)=>number[] : tokeniseur RÉEL injecté
+   * @param {number}            [opts.epochs]      — défaut: config.epochs
+   * @param {number}            [opts.batchSize=8]
+   * @param {number}            [opts.maxLen=64]   — tokens max par exemple
+   * @param {string}            [opts.checkpointPath] — si fourni : saveWeights() à la fin
+   * @returns {Promise<{epochs:number,lossStart:number,lossEnd:number,steps:number,curve:number[]}>}
+   */
+  async distillToWeights(dataset, opts = {}) {
+    const tokenize = opts.tokenize;
+    if (typeof tokenize !== 'function') throw new Error('opts.tokenize (text->number[]) requis');
+    const model = this.#inference;
+    if (typeof model.trainHead !== 'function')
+      throw new Error('inference doit exposer trainHead(tokens,target) — tête LoRA attachée ?');
+
+    const epochs    = opts.epochs    ?? this.#config.epochs;
+    const batchSize = opts.batchSize ?? 8;
+    const maxLen    = opts.maxLen    ?? 64;
+
+    // 1) ReplayBuffer priorisé : les exemples haute qualité sont rejoués plus souvent
+    const buffer = new ReplayBuffer(Math.max(64, dataset.length * 2));
+    for (const ex of dataset) {
+      buffer.push(new Experience({
+        query   : ex.instruction ?? '',
+        response: ex.output ?? '',
+        quality : ex.qualityScore ?? 0.8,
+      }));
+    }
+
+    // 2) Boucle : distillation autorégressive sur les tokens du maître via la
+    //    tête LoRA (vrai pas de gradient — cf. lora_trainer.LoraAdapter.trainStep)
+    const curve = [];
+    let lossStart = NaN, lossEnd = NaN, steps = 0;
+    for (let e = 0; e < epochs; e++) {
+      const batch = buffer.prioritizedSample(batchSize);
+      let epLoss = 0, epCount = 0;
+      for (const exp of batch) {
+        let toks = tokenize(`${exp.query}\n${exp.response}`);
+        if (!toks || toks.length < 2) continue;
+        if (toks.length > maxLen) toks = toks.slice(0, maxLen);
+        for (let i = 1; i < toks.length; i++) {      // prédire toks[i] depuis toks[0..i-1]
+          epLoss += model.trainHead(toks.slice(0, i), toks[i]);
+          epCount++; steps++;
+        }
+      }
+      const avg = epCount ? epLoss / epCount : NaN;
+      curve.push(avg);
+      if (e === 0) lossStart = avg;
+      lossEnd = avg;
+      console.info(`[Distillation→poids] époque ${e + 1}/${epochs} : loss ${Number.isFinite(avg) ? avg.toFixed(4) : 'n/a'} (${epCount} pas)`);
+    }
+
+    // 3) Checkpoint réel (format v2 complet, poids + tête)
+    if (opts.checkpointPath && typeof model.saveWeights === 'function') {
+      const bytes = await model.saveWeights(opts.checkpointPath);
+      console.info(`[Distillation→poids] checkpoint ${bytes} o → ${opts.checkpointPath}`);
+    }
+
+    return { epochs, lossStart, lossEnd, steps, curve };
   }
 
   /** Convertit un dataset en leçons d'entraînement (bridge volant d'évolution). */
