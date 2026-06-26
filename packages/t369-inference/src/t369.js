@@ -219,6 +219,10 @@ export class T369Model {
     const e = new Float32Array(V * H);
     for (let i = 0; i < e.length; i++) e[i] = (rnd() * 2 - 1) * sigma;
     this._embF32 = e; this._seed = seed;
+    // Projections d'attention Q/K/V/O : seed distinct par couche (brise la
+    // symétrie inter-couches), déterministe à partir du seed du modèle.
+    for (let li = 0; li < this.layers.length; li++)
+      this.layers[li].attention.initProjections((seed + 1 + li * 1013) >>> 0);
     return this;
   }
 
@@ -417,7 +421,7 @@ export class T369Model {
     const qt = (t) => { const s = t.serialize(); u32(s.byteLength); raw(s); };
 
     raw(new Uint8Array([0x54, 0x33, 0x36, 0x39]));   // 'T369'
-    u32(2); u32(V); u32(H); u32(numLayers); i32(this._seed);
+    u32(3); u32(V); u32(H); u32(numLayers); i32(this._seed);
 
     const loraBytes = this.loraHead ? this.loraHead.serialize() : new Uint8Array(0);
     u32(loraBytes.byteLength); raw(loraBytes);
@@ -428,6 +432,8 @@ export class T369Model {
     for (let li = 0; li < numLayers; li++) {
       const L = this.layers[li];
       f32arr(L.norm1); f32arr(L.norm2);
+      const A = L.attention;                                    // projections Q/K/V/O (v3)
+      f32arr(A.wQ); f32arr(A.wK); f32arr(A.wV); f32arr(A.wO);
       const ex = L.moeLayer.experts;
       u32(ex.length);
       for (let e = 0; e < ex.length; e++) { qt(ex[e].up); qt(ex[e].gate); qt(ex[e].down); }
@@ -480,6 +486,10 @@ export class T369Model {
     for (let li = 0; li < numLayers; li++) {
       const L = this.layers[li];
       L.norm1.set(rdF32len()); L.norm2.set(rdF32len());
+      if (version >= 3) {                                       // projections Q/K/V/O
+        const A = L.attention;
+        A.wQ.set(rdF32len()); A.wK.set(rdF32len()); A.wV.set(rdF32len()); A.wO.set(rdF32len());
+      }
       const ne = rdU32();
       for (let e = 0; e < ne; e++) { L.moeLayer.experts[e].up = rdQT(); L.moeLayer.experts[e].gate = rdQT(); L.moeLayer.experts[e].down = rdQT(); }
       for (let e = 0; e < ne; e++) L.moeLayer.routerRows[e].set(rdF32len());
