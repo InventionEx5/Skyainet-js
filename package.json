@@ -144,6 +144,7 @@
     "#society": "./society.js",
     "#peer_learning": "./peer_learning.js",
     "#internal_shadow": "./internal_shadow.js",
-    "#mixed_panel": "./mixed_panel.js"
+    "#mixed_panel": "./mixed_panel.js",
+    "#society_orchestrator": "./society_orchestrator.js"
   }
 }
