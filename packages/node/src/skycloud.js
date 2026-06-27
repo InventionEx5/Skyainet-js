@@ -28,6 +28,7 @@ import { ThevieRunner } from '#thevie';
 import { ModelRegistry } from '#model_registry';
 import { ReplayBuffer, Experience }        from '#replay_buffer';
 import { ExternalGateway, ShadowRouter }   from '#external_providers';
+import { DistillationManager }             from '#distillation_manager';
 import { NodeEconomics }  from '#economics';
 import { SkyWallet }      from '#wallet';
 import { TreasuryManager }from '#treasury';
@@ -455,7 +456,6 @@ class T369InferenceEngine {
 //   rewards:claim    — claimRewards
 //   admin            — accès total (toutes les routes)
 // =====================================================
-
 const ALL_SCOPES = Object.freeze([
   'inference:read', 'inference:write',
   'storage:read',   'storage:write',
@@ -803,6 +803,7 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
+
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
@@ -903,8 +904,7 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-
-  get id()              { return this.#id; }
+get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -1515,7 +1515,39 @@ sendMessage(from, to, content, apiKey = null) {
   async triggerTraditionalTraining() {
     this.#ensureEvolutionManager();
     await this.#evolutionManager.runTraditionalTraining();
+    // Maillon Dream Cycle ⇄ Teacher Shadow : distille les leçons de consultation
+    // accumulées dans les poids (silencieux si le buffer est vide).
+    if (this.replayBuffer && this.replayBuffer.size > 0) {
+      try { await this.runShadowDistillation(); }
+      catch (e) { console.debug?.(`[ShadowDistill] ${e.message}`); }
+    }
     this.#engine.resetCache();
+  }
+
+  // ── Dream Cycle ⇄ Teacher Shadow : entraîne le local sur les leçons accumulées.
+  // Consomme le replay_buffer rempli par la Shadow Consultation et lance une VRAIE
+  // distillation (distillToWeights). C'est le maillon final qui referme la boucle :
+  //   shadow (désaccord local ↔ maîtres) → replay_buffer → distillation des poids.
+  async runShadowDistillation(opts = {}) {
+    const { epochs = 4, batchSize = 8, maxLen = 64, minLessons = 4, checkpointPath = null } = opts;
+    const buffer = this.replayBuffer;
+    if (!buffer)              return { ran: false, reason: 'Teacher Shadow non activé (pas de replay buffer)' };
+    const lessons = buffer.size ?? 0;
+    if (lessons < minLessons) return { ran: false, reason: `pas assez de leçons (${lessons}/${minLessons})`, lessons };
+
+    const model = this.#engine?.model;
+    if (!model || typeof model.trainHead !== 'function') return { ran: false, reason: 'moteur non chargé' };
+    if (!model.loraHead && typeof model.attachHead === 'function') model.attachHead({});
+
+    const tok = this.#engine.tokenizer;
+    const tokenize = (txt) => tok.encode(txt);
+
+    this._shadowDistiller ??= new DistillationManager({ epochs }, model, this);
+    const res = await this._shadowDistiller.distillToWeights(buffer, { tokenize, epochs, batchSize, maxLen, checkpointPath });
+    this.#evolutionCycles++;
+    const f = (x, d) => (typeof x === 'number' ? x.toFixed(d) : 'n/a');
+    console.info(`[SkyCloud] Distillation shadow : ${res.steps} pas sur ${lessons} leçon(s), loss ${f(res.lossStart, 3)} → ${f(res.lossEnd, 4)}`);
+    return { ran: true, lessons, ...res };
   }
 
   /**
@@ -2015,7 +2047,8 @@ sendMessage(from, to, content, apiKey = null) {
   async replicateFiles()        { return this.#storage.replicatePending(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -2046,8 +2079,7 @@ enableGateway(port = 8080) {
   getPeers()           { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   // ─── Gateway — serve site ─────────────────────────────────────
-
-  /**
+/**
    * Sert un site souverain chiffré avec signature Dilithium5.
    * Port de serve_site() dans skycloud.rs.
    * @param {string} siteId
