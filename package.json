@@ -140,6 +140,7 @@
     "#weaning": "./weaning.js",
     "#domain_classifier": "./domain_classifier.js",
     "#semantic_disagreement": "./semantic_disagreement.js",
-    "#space_teacher": "./space_teacher.js"
+    "#space_teacher": "./space_teacher.js",
+    "#society": "./society.js"
   }
 }
