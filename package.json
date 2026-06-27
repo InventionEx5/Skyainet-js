@@ -135,6 +135,8 @@
     "#pii_redaction": "./pii_redaction.js",
     "#attention_backward": "./attention_backward.js",
     "#transformer_backward": "./transformer_backward.js",
-    "#production_backward": "./production_backward.js"
+    "#production_backward": "./production_backward.js",
+    "#t369_trainer": "./t369_trainer.js",
+    "#weaning": "./weaning.js"
   }
 }
