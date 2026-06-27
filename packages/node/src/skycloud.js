@@ -28,6 +28,7 @@ import { ThevieRunner } from '#thevie';
 import { ModelRegistry } from '#model_registry';
 import { ReplayBuffer, Experience }        from '#replay_buffer';
 import { ExternalGateway, ShadowRouter }   from '#external_providers';
+import { WeaningController }                from '#weaning';
 import { DistillationManager }             from '#distillation_manager';
 import { DEFAULT_REDACTOR }                 from '#pii_redaction';
 import { NodeEconomics }  from '#economics';
@@ -905,7 +906,8 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-get id()              { return this.#id; }
+
+  get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -949,7 +951,7 @@ get id()              { return this.#id; }
   // Délègue au module WebSearch : provider HTTP réel si configuré, sinon
   // base de connaissances locale SkyAInet, sinon tableau vide (le frontend
   // bascule alors sur son contexte simulé).
-  async webSearch(query, maxResults = 3) {
+async webSearch(query, maxResults = 3) {
     if (!query || !String(query).trim()) return [];
     if (!this.#webSearch) {
       // Provider configurable via variables d'environnement (optionnel).
@@ -1401,7 +1403,7 @@ get id()              { return this.#id; }
     // valeur → replay_buffer. NE BLOQUE PAS : l'utilisateur a déjà sa réponse.
     this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
 
-    turn {
+    return {
       text           : result.text,
       tokensGenerated: result.tokensGenerated,
       aiUsed         : ai,
@@ -1429,25 +1431,34 @@ get id()              { return this.#id; }
   //   threshold : complexité mini pour déclencher (1 − confiance), défaut 0.25
   enableTeacherShadow({ keys = {}, embed = null, transport = undefined,
                         threshold = 0.25, providers = ['xai', 'anthropic', 'deepseek'],
-                        primaryTeacher = null, bufferCapacity = 2048, redact = true } = {}) {
+                        primaryTeacher = null, bufferCapacity = 2048, redact = true,
+                        weaning = false, domainFn = null } = {}) {
     this.externalGateway = new ExternalGateway({
       registry: this.#modelRegistry, keys, embed,
       redactor: redact ? DEFAULT_REDACTOR : null,   // souveraineté : PII masquée par défaut
       ...(transport ? { transport } : {}),
     });
     this.replayBuffer = this.replayBuffer ?? new ReplayBuffer(bufferCapacity);
+    // Sevrage progressif (opt-in) : consulter moins là où la compétence locale
+    // grandit. domainFn classe les requêtes par domaine ; défaut = compétence
+    // globale ('general') si seul `weaning` est fourni.
+    this.weaningController = weaning ? (weaning === true ? new WeaningController() : weaning) : null;
+    const weaningDomainFn = this.weaningController ? (domainFn ?? (() => 'general')) : null;
     this.shadowRouter = new ShadowRouter({
       gateway : this.externalGateway,
       registry: this.#modelRegistry,
       threshold, providers, primaryTeacher,
+      weaning : this.weaningController, domainFn: weaningDomainFn,
       ingest  : (lesson) => this.replayBuffer.push(new Experience({
         query: lesson.query, response: lesson.response,
         quality: lesson.quality, importance: lesson.importance,
       })),
     });
-    console.info('[SkyCloud] Teacher Shadow activé — IA externes en professeurs (arrière-plan)');
+    console.info(`[SkyCloud] Teacher Shadow activé${this.weaningController ? ' (sevrage progressif ON)' : ''}`);
     return this;
   }
+
+  weaningStats() { return this.weaningController?.globalStats() ?? null; }
 
   getReplayBuffer() { return this.replayBuffer ?? null; }
   teacherStats() {
@@ -1802,87 +1813,6 @@ get id()              { return this.#id; }
   }
 
   // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
-
-  /**
-   * Génère un Smart Contract Solidity via LoraÉvo.
-   * Comme Thevie crée des nœuds, LoraÉvo crée des Smart Contracts.
-   *
-   * @param {string} description  — description en langage naturel
-   * @param {object} options
-   * @param {string}  options.type          — 'ERC20'|'NFT'|'DAO'|'VESTING'|'STAKING'|'MARKETPLACE'|'MULTISIG'
-   * @param {string}  options.network       — 'testnet'|'mainnet'|'local'
-   * @param {boolean} options.audit         — activer l'audit sécurité (défaut: true)
-   * @param {boolean} options.deploy        — déployer automatiquement après génération
-   * @param {number}  options.taxPercent    — taxe % (ERC20/Marketplace)
-   * @param {number}  options.vestingMonths — durée vesting en mois
-   * @param {number}  options.totalSupply   — supply totale (ERC20)
-   * @param {string}  options.tokenName     — nom du token
-   * @param {string}  options.tokenSymbol   — symbole du token
-   * @param {number}  options.royaltyPercent— royalties % (NFT)
-   * @param {number}  options.apyPercent    — APY staking
-   * @param {number}  options.signaturesRequired — seuil multi-sig
-   * @returns {Promise<GeneratedContract>}
-   */
-  async generateSmartContract(description, options = {}) {
-    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
-    return this.#loraEvo.generateSmartContract(description, options);
-  }
-
-  /**
-   * Déploie un contrat généré sur le réseau configuré.
-   * @param {string} contractId
-   * @returns {Promise<{ contractAddress, txHash, deployedAt }>}
-   */
-  async deploySmartContract(contractId) {
-    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
-    return this.#loraEvo.deployContract(contractId);
-  }
-
-  /**
-   * Retourne la liste de tous les contrats générés.
-   * @returns {ContractSummary[]}
-   */
-  listSmartContracts() {
-    return this.#loraEvo?.listContracts() ?? [];
-  }
-
-  /**
-   * Retourne un contrat complet avec son code Solidity.
-   * @param {string} contractId
-   * @returns {GeneratedContract | null}
-   */
-  getSmartContract(contractId) {
-    return this.#loraEvo?.getContract(contractId) ?? null;
-  }
-
-  /**
-   * Supprime un contrat de la liste locale.
-   * @param {string} contractId
-   */
-  deleteSmartContract(contractId) {
-    if (!this.#loraEvo) throw new Error('LoraÉvo non initialisée');
-    this.#loraEvo.deleteContract(contractId);
-  }
-
-  /**
-   * Retourne les stats Smart Contracts de LoraÉvo.
-   * @returns {{ contractsGenerated, contractsDeployed, types }}
-   */
-  getSmartContractStats() {
-    const contracts = this.listSmartContracts();
-    const byType    = contracts.reduce((acc, c) => {
-      acc[c.type] = (acc[c.type] ?? 0) + 1;
-      return acc;
-    }, {});
-    return {
-      contractsGenerated: contracts.length,
-      contractsDeployed : contracts.filter(c => c.deployStatus === 'deployed').length,
-      skySpent          : contracts.reduce((s, c) => s + (c.skyFee ?? 0), 0),
-      byType,
-    };
-  }
-
-  // ─── Web Hosting ──────────────────────────────────────────────
 
   /**
    * Crée un site hébergé vide.
@@ -2247,8 +2177,7 @@ get id()              { return this.#id; }
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-
-  /**
+/**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2297,7 +2226,8 @@ get id()              { return this.#id; }
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-/**
+
+  /**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
