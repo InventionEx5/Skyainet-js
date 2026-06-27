@@ -137,13 +137,15 @@ export class ExternalGateway {
    * @param {object}   [o.providers]   — override PROVIDER_CONFIG
    */
   constructor({ registry = null, embed = null, transport = defaultTransport, keys = {},
-                cacheThreshold = 0.92, cacheDim = 128, rateLimits = {}, providers = PROVIDER_CONFIG } = {}) {
+                cacheThreshold = 0.92, cacheDim = 128, rateLimits = {}, providers = PROVIDER_CONFIG,
+                redactor = null } = {}) {
     this.registry = registry;
     this.embed = embed;
     this.transport = transport;
     this.keys = keys;
     this.providers = providers;
     this.cacheThreshold = cacheThreshold;
+    this.redactor = redactor;   // souveraineté : masque la PII avant tout départ
     this.ledger = new CostLedger();
 
     this.buckets = {};
@@ -204,14 +206,20 @@ export class ExternalGateway {
     if (!cfg) throw new Error(`Fournisseur inconnu : ${provider}`);
     const schema = SCHEMAS[cfg.schema];
 
-    // 1) Cache sémantique
+    // 0) Rédaction PII : on masque AVANT le cache et le transport, donc rien de
+    //    sensible ne quitte le périmètre ni n'est mémorisé en cache.
+    const red = (this.redactor && !opts.noRedact) ? this.redactor.redactMessages(messages) : null;
+    const msgs = red ? red.messages : messages;
+    const redactions = red ? red.found : null;
+
+    // 1) Cache sémantique (sur le texte déjà masqué)
     let emb = null;
     if (this._cacheEnabled && !opts.noCache) {
-      emb = this.embed(this._promptText(messages));
+      emb = this.embed(this._promptText(msgs));
       const hit = this._cacheGet(emb);
       if (hit) {
         this.cacheHits++;
-        return { ...hit, cached: true, costUSD: 0, provider, latencyMs: 0 };
+        return { ...hit, cached: true, costUSD: 0, provider, latencyMs: 0, redactions };
       }
       this.cacheMisses++;
     }
@@ -234,7 +242,7 @@ export class ExternalGateway {
     const model = this._model(provider, opts);
     const url = cfg.baseUrl + cfg.path;
     const headers = schema.headers(key ?? 'MISSING', cfg);
-    const body = schema.body(model, messages, opts);
+    const body = schema.body(model, msgs, opts);
 
     const t0 = Date.now();
     const res = await this.transport(url, { method: 'POST', headers, body });
@@ -250,7 +258,7 @@ export class ExternalGateway {
       text: parsed.text,
       usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens },
       finishReason: parsed.finishReason,
-      provider, model, cached: false, costUSD, latencyMs,
+      provider, model, cached: false, costUSD, latencyMs, redactions,
     };
     if (emb) this._cachePut(emb, { text: out.text, usage: out.usage, finishReason: out.finishReason, model });
     return out;
