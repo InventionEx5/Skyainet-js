@@ -18,6 +18,7 @@
 // fourni explicitement.
 
 import { VectorStore, VectorMetadata } from '#vector_store';
+import { disagreement as semanticScore, lexicalDisagreement } from '#semantic_disagreement';
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration des fournisseurs (endpoints réels — ajustables).
@@ -293,24 +294,18 @@ export class ExternalGateway {
       else responses.push({ provider: providersList[i], error: settled[i].reason?.message ?? 'échec', text: null });
     }
     const ok = responses.filter(r => r.text);
-    const disagreement = ExternalGateway.disagreement(ok.map(r => r.text));
+    const disagreement = this.scoreDisagreement(ok.map(r => r.text));
     const costUSD = +ok.reduce((s, r) => s + (r.costUSD ?? 0), 0).toFixed(6);
     return { responses, disagreement, agreed: ok.length, costUSD };
   }
 
-  // Désaccord lexical = 1 − moyenne des similarités de Jaccard par paire (sur
-  // ensembles de tokens). 0 = consensus parfait ; →1 = forte divergence.
-  static disagreement(texts) {
-    const sets = texts.map(t => new Set((t ?? '').toLowerCase().match(/\w+/g) ?? []));
-    if (sets.length < 2) return 0;
-    let sum = 0, pairs = 0;
-    for (let i = 0; i < sets.length; i++) for (let j = i + 1; j < sets.length; j++) {
-      let inter = 0; for (const w of sets[i]) if (sets[j].has(w)) inter++;
-      const uni = sets[i].size + sets[j].size - inter;
-      sum += uni > 0 ? inter / uni : 1; pairs++;
-    }
-    return pairs ? +(1 - sum / pairs).toFixed(4) : 0;
-  }
+  // Désaccord SÉMANTIQUE si un embedder est branché (1 − cosinus moyen des
+  // embeddings), sinon LEXICAL (Jaccard). Robuste aux paraphrases.
+  // 0 = consensus parfait ; →1 = forte divergence.
+  scoreDisagreement(texts) { return semanticScore(texts, { embed: this.embed }); }
+
+  // Repli lexical exposé en statique (rétrocompatibilité).
+  static disagreement(texts) { return lexicalDisagreement(texts); }
 
   costReport() {
     return {
@@ -369,25 +364,34 @@ export class ShadowRouter {
     if (this.complexityFn) return this.complexityFn(prompt, localResult);
     return 1 - (localResult?.confidence ?? 1);   // faible confiance ⇒ forte complexité
   }
-  shouldShadow(prompt, localResult) {
-    if (!this.gateway) return false;
+  // Évalue UNE FOIS : incertitude, domaine (classé une seule fois — le
+  // classifieur met à jour son centroïde à chaque appel, donc on ne le rappelle
+  // pas), puis décision de sevrage. Renvoie { shadow, domain, u }.
+  _evaluate(prompt, localResult) {
+    if (!this.gateway) return { shadow: false, domain: null, u: 0 };
     const u = this.complexity(prompt, localResult);
     // Sevrage : si un WeaningController est branché, la décision dépend de la
-    // compétence MESURÉE du domaine (consulter moins là où le local a fait ses
-    // preuves), pas du simple seuil d'incertitude.
-    if (this.weaning && this.domainFn) return this.weaning.decideConsult(this.domainFn(prompt), u, this.rng).consult;
-    return u >= this.threshold;
+    // compétence MESURÉE du domaine, pas du simple seuil d'incertitude.
+    if (this.weaning && this.domainFn) {
+      const domain = this.domainFn(prompt);                       // ← classé UNE seule fois
+      const { consult } = this.weaning.decideConsult(domain, u, this.rng);
+      return { shadow: consult, domain, u };
+    }
+    return { shadow: u >= this.threshold, domain: null, u };
   }
+
+  shouldShadow(prompt, localResult) { return this._evaluate(prompt, localResult).shadow; }
 
   // Fire-and-forget : NE BLOQUE PAS l'utilisateur. Lance la shadow en tâche de
   // fond et avale toute erreur (un échec de consultation ne doit JAMAIS impacter
   // la réponse déjà rendue). Renvoie true si déclenchée.
   maybeShadow(prompt, localResult, opts = {}) {
     this.stats.evaluated++;
-    if (!this.shouldShadow(prompt, localResult)) { this.stats.skipped++; return false; }
+    const ev = this._evaluate(prompt, localResult);               // ← domaine classé une seule fois ici
+    if (!ev.shadow) { this.stats.skipped++; return false; }
     this.stats.triggered++;
     queueMicrotask(() => {
-      this.shadowOnce(prompt, localResult, opts).catch(e => {
+      this.shadowOnce(prompt, localResult, { ...opts, _domain: ev.domain }).catch(e => {
         this.stats.failures++; console.debug?.(`[Shadow] échec : ${e.message}`);
       });
     });
@@ -403,7 +407,7 @@ export class ShadowRouter {
 
     const teacher = this._pickTeacher(answered);
     const localText = localResult?.text ?? '';
-    const studentGap = ExternalGateway.disagreement([localText, teacher.text]);  // 0..1
+    const studentGap = this.gateway.scoreDisagreement([localText, teacher.text]);  // 0..1 (sémantique si embed)
     const masterConsensus = 1 - consultation.disagreement;                        // 0..1
 
     // Deux signaux DISTINCTS (le replay_buffer dérive importance = 1 − quality,
@@ -426,7 +430,11 @@ export class ShadowRouter {
     this.stats.spendUSD = +(this.stats.spendUSD + (consultation.costUSD ?? 0)).toFixed(6);
     // Sevrage : on vient de mesurer l'écart local↔maîtres pour ce domaine → on
     // met à jour la compétence (qui pilotera les prochaines décisions de consulter).
-    if (this.weaning && this.domainFn) this.weaning.record(this.domainFn(prompt), studentGap, consultation.costUSD);
+    // Sevrage : domaine DÉJÀ classé à la décision (passé via opts._domain) → on
+    // NE re-classe PAS (évite une 2ᵉ mise à jour du centroïde). Repli : appel
+    // direct de shadowOnce hors maybeShadow.
+    const domain = opts._domain ?? ((this.weaning && this.domainFn) ? this.domainFn(prompt) : null);
+    if (this.weaning && domain != null) this.weaning.record(domain, studentGap, consultation.costUSD);
     if (this.ingest) this.ingest(lesson);
     return lesson;
   }
