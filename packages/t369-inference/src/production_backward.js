@@ -163,4 +163,29 @@ export function gqaRopeBackward(dY, cache) {
   return { dX, dWq, dWk, dWv, dWo };
 }
 
+// ════════════════ (5) EMBEDDINGS — gather + scatter-add ════════════════
+// Forward : hidden[t] = Emb[token[t]] (gather). Backward : dEmb[token[t]] += dHidden[t]
+// (scatter-ADD — les contributions s'accumulent si un token apparaît plusieurs fois).
+export function embeddingForward(Emb, tokens) {
+  const T = tokens.length, H = Emb[0].length, hidden = mat(T, H);
+  for (let t = 0; t < T; t++) hidden[t].set(Emb[tokens[t]]);
+  return hidden;
+}
+export function embeddingBackward(dHidden, tokens, V) {
+  const H = dHidden[0].length, dEmb = mat(V, H);
+  for (let t = 0; t < tokens.length; t++) { const r = dEmb[tokens[t]], d = dHidden[t]; for (let j = 0; j < H; j++) r[j] += d[j]; }
+  return dEmb;
+}
+
+// ════════════════ (3) applyUltra — STRAIGHT-THROUGH ESTIMATOR ════════════════
+// La diffusion gematria (S-box + xor de BITS + chaos + clamp) est NON
+// différentiable. STE : forward = transform RÉEL (fidélité d'inférence) ;
+// backward = IDENTITÉ (le gradient traverse inchangé) — exactement comme la
+// quantification en QAT. `transformFn(hidden)` applique le vrai applyUltra.
+// C'est une APPROXIMATION assumée, pas le gradient exact.
+export function ultraSteForward(hidden, transformFn) { transformFn(hidden); return hidden; }
+export function ultraSteBackward(dOut) { return dOut; }
+// Variante possible (non fournie) : linéarisation locale (pente par différence
+// finie) là où le transform est lisse ; dénuée de sens sur les branches à bits.
+
 export const _pb = { copyMat, dot, softmax, ropeFwd, ropeBwd };
