@@ -1,7 +1,6 @@
 {
   "name": "skyainet",
   "version": "1.0.0",
-  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "SkyAInet x Nikola T369 - sovereign decentralized AI runtime (pure JS)",
@@ -125,6 +124,12 @@
     "#wallet": "./wallet.js",
     "#web_search": "./web_search.js",
     "#websocket": "./websocket.js",
-    "#zip_memory": "./zip_memory.js"
+    "#zip_memory": "./zip_memory.js",
+    "#critic": "./critic.js",
+    "#file_lessons": "./file_lessons.js",
+    "#space_ai": "./space_ai.js",
+    "#sharded_inference": "./sharded_inference.js",
+    "#engine_supervisor": "./engine_supervisor.js",
+    "#external_providers": "./external_providers.js"
   }
 }
