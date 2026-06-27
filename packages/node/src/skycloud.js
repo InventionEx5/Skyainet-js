@@ -28,6 +28,7 @@ import { ThevieRunner } from '#thevie';
 import { ModelRegistry } from '#model_registry';
 import { ReplayBuffer, Experience }        from '#replay_buffer';
 import { ExternalGateway, ShadowRouter }   from '#external_providers';
+import { SpaceTeacher }                     from '#space_teacher';
 import { WeaningController }                from '#weaning';
 import { EmbeddingDomainClassifier }        from '#domain_classifier';
 import { DistillationManager }             from '#distillation_manager';
@@ -437,12 +438,6 @@ class T369InferenceEngine {
     };
   }
 }
-
-// =====================================================
-// AGENT AGENTIQUE — implémentation inline (ThevieAgent absent du projet)
-// Planification → Exécution par étapes → Synthèse
-// =====================================================
-
 // =====================================================
 // API KEY STORE
 //
@@ -908,8 +903,7 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-
-  get id()              { return this.#id; }
+get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -1098,7 +1092,8 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1402,7 +1397,7 @@ enableGateway(port = 8080) {
     // Si la confiance est faible (tâche incertaine/complexe), on consulte les
     // maîtres EN ARRIÈRE-PLAN (fire-and-forget) pour produire une leçon de haute
     // valeur → replay_buffer. NE BLOQUE PAS : l'utilisateur a déjà sa réponse.
-    this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
+this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
 
     return {
       text           : result.text,
@@ -1472,6 +1467,45 @@ enableGateway(port = 8080) {
 
   weaningStats() { return this.weaningController?.globalStats() ?? null; }
   domainStats() { return this.domainClassifier?.stats() ?? null; }
+
+  // ── AI SPACE comme professeur : trilogue (proposer/critic/synthesizer) →
+  //    critique → leçon → MÊME tampon de rejeu que la distillation. Les 3 IA
+  //    externes débattent réellement (rôle→fournisseur via le gateway REST).
+  enableSpaceTeaching({ keys = {}, embed = null, transport = undefined, redact = true,
+                        roleProviders = undefined, maxRounds = 2, names = undefined,
+                        acceptScore = 0.5, bufferCapacity = 2048 } = {}) {
+    // Réutilise le gateway/tampon du Teacher Shadow s'ils existent (mêmes IA,
+    // même tampon → le trilogue et le shadow alimentent la même distillation).
+    this.externalGateway = this.externalGateway ?? new ExternalGateway({
+      registry: this.#modelRegistry, keys, embed,
+      redactor: redact ? DEFAULT_REDACTOR : null,
+      ...(transport ? { transport } : {}),
+    });
+    this.replayBuffer = this.replayBuffer ?? new ReplayBuffer(bufferCapacity);
+    this.spaceTeacher = new SpaceTeacher({
+      gateway: this.externalGateway,
+      ingest : (lesson) => this.replayBuffer.push(new Experience({
+        query: lesson.query, response: lesson.response,
+        quality: lesson.quality, importance: lesson.importance,
+      })),
+      embed: embed ?? this.externalGateway.embed ?? null,
+      roleProviders, maxRounds, names, acceptScore,
+    });
+    console.info('[SkyCloud] AI Space professeur activé — trilogue → leçons → distillation');
+    return this;
+  }
+
+  // Un acte d'enseignement par débat (remplit le tampon ; distiller ensuite via
+  // runShadowDistillation pour entraîner les vrais poids).
+  async teachViaTrilogue(query, opts = {}) {
+    if (!this.spaceTeacher) throw new Error('[SkyCloud] appeler enableSpaceTeaching() d\'abord');
+    return this.spaceTeacher.teach(query, opts);
+  }
+  async teachBatchViaTrilogue(queries, opts = {}) {
+    if (!this.spaceTeacher) throw new Error('[SkyCloud] appeler enableSpaceTeaching() d\'abord');
+    return this.spaceTeacher.teachBatch(queries, opts);
+  }
+  spaceTeachingStats() { return this.spaceTeacher?.getStats() ?? null; }
 
   getReplayBuffer() { return this.replayBuffer ?? null; }
   teacherStats() {
@@ -1799,8 +1833,7 @@ enableGateway(port = 8080) {
   get communication() { return this.#communication; }
 
   // ─── Orchestration Thevie ─────────────────────────────────────
-
-  async runThevieTask(goal, onStep = null, opts = {}) {
+async runThevieTask(goal, onStep = null, opts = {}) {
     if (!this.#thevieRunner) {
       this.#thevieRunner = new ThevieRunner(this, this.#engine.isReady ? this.#engine : null);
     }
@@ -1907,7 +1940,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Web Hosting ──────────────────────────────────────────────
-/**
+
+  /**
    * Crée un site hébergé vide.
    *
    * Avantages automatiques dès la création :
@@ -2192,7 +2226,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Wallet & Récompenses ─────────────────────────────────────
-/**
+
+  /**
    * Retourne le solde SKY du wallet interne + les stats de récompenses.
    */
   getRewardsStats() {
@@ -2269,8 +2304,7 @@ enableGateway(port = 8080) {
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-
-  /**
+/**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
