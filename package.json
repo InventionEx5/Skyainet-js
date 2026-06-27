@@ -131,6 +131,8 @@
     "#space_ai": "./space_ai.js",
     "#sharded_inference": "./sharded_inference.js",
     "#engine_supervisor": "./engine_supervisor.js",
-    "#external_providers": "./external_providers.js"
+    "#external_providers": "./external_providers.js",
+    "#pii_redaction": "./pii_redaction.js",
+    "#attention_backward": "./attention_backward.js"
   }
 }
