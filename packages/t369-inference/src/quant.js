@@ -78,33 +78,46 @@ export class QuantizedTensor {
     const numBlocks = Math.ceil(numel / BLOCK_SIZE);
     const qt        = new QuantizedTensor(numel, 1, bits);
     qt._numel       = numel;
-    const range     = bits === 4 ? 15 : 127;
+    // Quantification SYMÉTRIQUE (zéro centré) : corrige le bug de l'ancien schéma
+    // asymétrique (zp≈127 + clamp symétrique) qui écrasait toute la moitié POSITIVE
+    // de la plage à ~0. Ici : scale = max(|v|)/range, valeurs signées centrées.
+    //   • 8-bit : q ∈ [-127,127], zp = 0      → dequant (q - 0)·scale = q·scale
+    //   • 4-bit : q ∈ [-7,7] stocké en nibble non signé (q+8 ∈ [1,15]), zp = 8
+    //             → dequant (nib - 8)·scale = q·scale
+    // La formule de dequant `(data - zp)·scale` est INCHANGÉE : elle reste exacte
+    // pour les anciens tenseurs (zp stocké ≈127) ET les nouveaux (zp=0/8).
+    const range  = bits === 4 ? 7 : 127;
+    const offset = bits === 4 ? 8 : 0;
 
     for (let b = 0; b < numBlocks; b++) {
       const start = b * BLOCK_SIZE;
       const end   = Math.min(start + BLOCK_SIZE, numel);
-      let mn = Infinity, mx = -Infinity;
-      for (let i = start; i < end; i++) {
-        const v = data[i];
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-      }
-      const scale = mx !== mn ? (mx - mn) / (2 * range) : 1.0;
-      const zp    = Math.round(-mn / scale);
-      qt.scales[b] = scale; qt.zeroPoints[b] = zp;
+      let absMax = 0;
+      for (let i = start; i < end; i++) { const a = Math.abs(data[i]); if (a > absMax) absMax = a; }
+      const scale = absMax > 0 ? absMax / range : 1.0;
+      qt.scales[b] = scale; qt.zeroPoints[b] = offset;
 
       if (bits === 8) {
         for (let i = start; i < end; i++)
-          qt.data[i] = Math.max(-range, Math.min(range, Math.round(data[i] / scale) + zp));
+          qt.data[i] = Math.max(-range, Math.min(range, Math.round(data[i] / scale)));
       } else {
         for (let i = start; i < end; i += 2) {
-          const q1 = Math.max(0, Math.min(15, Math.round(data[i] / scale) + zp));
-          const q2 = (i + 1 < end) ? Math.max(0, Math.min(15, Math.round(data[i+1] / scale) + zp)) : 0;
+          const q1 = Math.max(-range, Math.min(range, Math.round(data[i] / scale))) + offset;
+          const q2 = (i + 1 < end) ? Math.max(-range, Math.min(range, Math.round(data[i+1] / scale))) + offset : offset;
           qt.data[i >> 1] = (q1 & 0x0F) | ((q2 & 0x0F) << 4);
         }
       }
     }
     return qt;
+  }
+
+  // Migration d'un checkpoint : re-quantifie un tenseur vers le schéma symétrique.
+  // ⚠ Ne RÉCUPÈRE PAS la précision déjà perdue par l'ancien bug (la moitié positive
+  // écrasée reste perdue) — met à niveau le FORMAT. La précision correcte revient
+  // au ré-entraînement (où les poids sont re-quantifiés depuis le f64 plein).
+  static migrate(qt) {
+    const f32 = qt.dequantize();                        // valeurs actuelles via le zp stocké (schéma d'origine)
+    return QuantizedTensor.fromF32(f32, qt.bits);       // re-quantifiées symétriquement
   }
 
   dequantize() {
