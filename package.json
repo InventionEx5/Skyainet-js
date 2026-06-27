@@ -143,6 +143,7 @@
     "#space_teacher": "./space_teacher.js",
     "#society": "./society.js",
     "#peer_learning": "./peer_learning.js",
-    "#internal_shadow": "./internal_shadow.js"
+    "#internal_shadow": "./internal_shadow.js",
+    "#mixed_panel": "./mixed_panel.js"
   }
 }
