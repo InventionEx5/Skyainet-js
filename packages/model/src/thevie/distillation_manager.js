@@ -296,9 +296,11 @@ export class DistillationManager {
     const curve = [];
     let lossStart = NaN, lossEnd = NaN, steps = 0;
     for (let e = 0; e < epochs; e++) {
-      const batch = buffer.prioritizedSample(batchSize);
+      const batch = buffer.prioritizedSample(batchSize);   // -> [{ exp, weight }]
       let epLoss = 0, epCount = 0;
-      for (const exp of batch) {
+      for (const item of batch) {
+        const exp = item?.exp ?? item;                     // prioritizedSample enveloppe dans {exp,weight}
+        if (!exp?.query || !exp?.response) continue;
         let toks = tokenize(`${exp.query}\n${exp.response}`);
         if (!toks || toks.length < 2) continue;
         if (toks.length > maxLen) toks = toks.slice(0, maxLen);
