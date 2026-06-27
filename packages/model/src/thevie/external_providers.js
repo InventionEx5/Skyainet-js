@@ -17,7 +17,7 @@
 // au déploiement. Aucune donnée ne sort tant qu'un transport réseau n'est pas
 // fourni explicitement.
 
-import { VectorStore } from '#vector_store';
+import { VectorStore, VectorMetadata } from '#vector_store';
 
 // ─────────────────────────────────────────────────────────────────
 // Configuration des fournisseurs (endpoints réels — ajustables).
@@ -187,7 +187,10 @@ export class ExternalGateway {
   _cachePut(emb, payload) {
     if (!this._cacheEnabled) return;
     const id = `c${this._cacheSeq++}`;
-    this._cacheStore.insert(id, emb, null, (payload.text ?? '').slice(0, 120));
+    // qualité 1.0 : une entrée de cache est une correspondance exacte autoritaire,
+    // le score de recherche ne doit pas être sous-pondéré (search applique
+    // cosine × (0.6 + 0.4 × quality)).
+    this._cacheStore.insert(id, emb, new VectorMetadata({ quality: 1.0, source: 'cache' }), (payload.text ?? '').slice(0, 120));
     this._cachePayload.set(id, payload);
   }
   _promptText(messages) { return messages.map(m => `${m.role}:${m.content}`).join('\n'); }
@@ -306,5 +309,123 @@ export class ExternalGateway {
       ...this.ledger.report(),
       cache: this._cacheEnabled ? { hits: this.cacheHits, misses: this.cacheMisses, stored: this._cachePayload.size } : { enabled: false },
     };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  SHADOW ROUTER — local-par-défaut + consultation fantôme asynchrone.
+//
+//  Principe (corrige le défaut du flux naïf) : on NE fait JAMAIS attendre
+//  l'utilisateur sur les externes. Le local répond immédiatement ; si la tâche
+//  est incertaine/complexe, une consultation des maîtres part EN ARRIÈRE-PLAN
+//  (fire-and-forget) et produit une leçon de haute valeur déversée via `ingest`
+//  (typiquement vers le replay_buffer → distillToWeights / Dream Cycle).
+//
+//  ACTIVE LEARNING : la qualité de la leçon n'est pas constante. On privilégie
+//  les exemples où (a) le local DIVERGE des maîtres (le student a quelque chose
+//  à apprendre) ET (b) les maîtres SONT D'ACCORD (cible fiable) :
+//      quality = écart_student × (0.5 + 0.5 × consensus_maîtres)
+//  Fort consensus + fort écart local = correction fiable et utile → priorité.
+//  Découplé : aucune dépendance au replay_buffer ici (callback `ingest`).
+// ═══════════════════════════════════════════════════════════════════
+export class ShadowRouter {
+  /**
+   * @param {object}   o
+   * @param {ExternalGateway} o.gateway
+   * @param {Function} [o.ingest]      — (lesson)=>void : où déverser la leçon
+   *                                     (ex: exp => replayBuffer.push(exp))
+   * @param {object}   [o.registry]    — pour choisir le maître primaire (qualité)
+   * @param {number}   [o.threshold=0.25] — complexité mini pour déclencher (0..1)
+   * @param {string[]} [o.providers]   — maîtres à consulter
+   * @param {string}   [o.primaryTeacher] — fournisseur cible (sinon : meilleur du registre)
+   * @param {Function} [o.complexityFn]   — (prompt, localResult)=>score 0..1
+   *                                     (défaut : 1 − confiance du local)
+   */
+  constructor({ gateway, ingest = null, registry = null, threshold = 0.25,
+                providers = ['xai', 'anthropic', 'deepseek'], primaryTeacher = null,
+                complexityFn = null } = {}) {
+    this.gateway = gateway;
+    this.ingest = ingest;
+    this.registry = registry;
+    this.threshold = threshold;
+    this.providers = providers;
+    this.primaryTeacher = primaryTeacher;
+    this.complexityFn = complexityFn;
+    this.stats = { evaluated: 0, triggered: 0, skipped: 0, lessons: 0, failures: 0, spendUSD: 0 };
+  }
+
+  complexity(prompt, localResult) {
+    if (this.complexityFn) return this.complexityFn(prompt, localResult);
+    return 1 - (localResult?.confidence ?? 1);   // faible confiance ⇒ forte complexité
+  }
+  shouldShadow(prompt, localResult) {
+    return !!this.gateway && this.complexity(prompt, localResult) >= this.threshold;
+  }
+
+  // Fire-and-forget : NE BLOQUE PAS l'utilisateur. Lance la shadow en tâche de
+  // fond et avale toute erreur (un échec de consultation ne doit JAMAIS impacter
+  // la réponse déjà rendue). Renvoie true si déclenchée.
+  maybeShadow(prompt, localResult, opts = {}) {
+    this.stats.evaluated++;
+    if (!this.shouldShadow(prompt, localResult)) { this.stats.skipped++; return false; }
+    this.stats.triggered++;
+    queueMicrotask(() => {
+      this.shadowOnce(prompt, localResult, opts).catch(e => {
+        this.stats.failures++; console.debug?.(`[Shadow] échec : ${e.message}`);
+      });
+    });
+    return true;
+  }
+
+  // Version awaitable : consultation + construction de leçon + déversement.
+  async shadowOnce(prompt, localResult, opts = {}) {
+    const messages = [{ role: 'user', content: prompt }];
+    const consultation = await this.gateway.consult(messages, { noCache: true, ...opts }, this.providers);
+    const answered = consultation.responses.filter(r => r.text);
+    if (!answered.length) throw new Error('aucun maître n\'a répondu');
+
+    const teacher = this._pickTeacher(answered);
+    const localText = localResult?.text ?? '';
+    const studentGap = ExternalGateway.disagreement([localText, teacher.text]);  // 0..1
+    const masterConsensus = 1 - consultation.disagreement;                        // 0..1
+
+    // Deux signaux DISTINCTS (le replay_buffer dérive importance = 1 − quality,
+    // donc on les sépare pour ne pas inverser la priorité) :
+    //   quality    = fiabilité de la CIBLE (consensus des maîtres) → 0.6..1.0
+    //   importance = VALEUR D'APPRENTISSAGE (écart local × consensus) → priorité
+    //                de rejeu : fort écart + fort consensus = correction utile.
+    const quality    = +(0.6 + 0.4 * masterConsensus).toFixed(4);
+    const importance = +(studentGap * (0.5 + 0.5 * masterConsensus)).toFixed(4);
+
+    const lesson = {
+      query: prompt, response: teacher.text, quality, importance,
+      teacher: teacher.provider,
+      studentGap, masterConsensus, disagreement: consultation.disagreement,
+      localText, masters: answered.map(r => ({ provider: r.provider, text: r.text })),
+      costUSD: consultation.costUSD, ts: Date.now(),
+    };
+
+    this.stats.lessons++;
+    this.stats.spendUSD = +(this.stats.spendUSD + (consultation.costUSD ?? 0)).toFixed(6);
+    if (this.ingest) this.ingest(lesson);
+    return lesson;
+  }
+
+  // Maître cible : explicite, sinon meilleur avgQuality du registre, sinon 1er.
+  _pickTeacher(answered) {
+    if (this.primaryTeacher) {
+      const t = answered.find(r => r.provider === this.primaryTeacher);
+      if (t) return t;
+    }
+    if (this.registry) {
+      let best = answered[0], bestQ = -1;
+      for (const r of answered) {
+        const name = PROVIDER_CONFIG[r.provider]?.registryName;
+        const q = name ? (this.registry.getModel(name)?.avgQuality ?? 0) : 0;
+        if (q > bestQ) { bestQ = q; best = r; }
+      }
+      return best;
+    }
+    return answered[0];
   }
 }
