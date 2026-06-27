@@ -27,6 +27,40 @@ export function makeRoleGenerate(gateway, { roleProviders = { proposer: 'xai', c
   };
 }
 
+// Construit generate(prompt, {role}) à PANEL MIXTE : les rôles proposer et
+// synthesizer sont joués par des CŒURS LOCAUX (gratuit), le rôle critic par une
+// IA EXTERNE via le gateway (l'ancre anti-chambre-d'écho, obligatoire). Les
+// identités locales (proposerId/synthesizerId) sont choisies par assignPanel().
+export function makeMixedRoleGenerate({ society, proposerId, synthesizerId, gateway,
+                                        criticProvider = 'anthropic', tokenizer = null } = {}) {
+  if (!society) throw new Error('[makeMixedRoleGenerate] society requise');
+  if (!gateway) throw new Error('[makeMixedRoleGenerate] gateway requis (critique externe)');
+  return async (prompt, { role = 'proposer', temperature, maxTokens } = {}) => {
+    if (role === 'critic') {                                   // ancre externe obligatoire
+      const r = await gateway.complete(criticProvider, [{ role: 'user', content: prompt }], { temperature, maxTokens });
+      return (r?.text ?? '').toString();
+    }
+    const id = role === 'synthesizer' ? synthesizerId : proposerId;   // cœurs locaux
+    return (await society.brain(id).generate(prompt, { tokenizer })).toString();
+  };
+}
+
+// Évalue un trilogue et fabrique la leçon (partagé par SpaceTeacher et MixedPanel).
+// quality = fiabilité de la cible (depuis le score critique) ; importance = apport
+// du débat (écart proposition→synthèse). Renvoie {accept, lesson, improvement}.
+export function evaluateTrilogue(query, tri, crit, { embed = null, acceptScore = 0.5, source = 'trilogue' } = {}) {
+  const proposal0   = tri.transcript.find(t => t.role === 'proposer')?.text ?? '';
+  const improvement = embed ? semanticScore([proposal0, tri.answer], { embed }) : 0.5;
+  const accept      = crit.score >= acceptScore && !tri.answer.startsWith('[');
+  const lesson = accept ? {
+    query, response: tri.answer,
+    quality   : +Math.min(1, 0.6 + 0.4 * crit.score).toFixed(4),
+    importance: +Math.max(0.05, improvement).toFixed(4),
+    source, converged: tri.converged, rounds: tri.rounds, criticScore: crit.score, ts: Date.now(),
+  } : null;
+  return { accept, lesson, improvement };
+}
+
 export class SpaceTeacher {
   /**
    * @param {object}   o
@@ -53,23 +87,10 @@ export class SpaceTeacher {
   async teach(query, { context = '', reference = null, rounds } = {}) {
     const tri = await this.space.trilogue(query, { context, rounds });   // {answer, transcript, converged, rounds}
     const crit = this.critic.critique(query, tri.answer, { reference });
-
-    // Valeur d'apprentissage = à quel point le débat a amélioré la proposition
-    // initiale (fort écart proposition→synthèse = le débat a beaucoup apporté).
-    const proposal0 = tri.transcript.find(t => t.role === 'proposer')?.text ?? '';
-    const improvement = this.embed ? semanticScore([proposal0, tri.answer], { embed: this.embed }) : 0.5;
-
     this.stats.taught++; this.stats.rounds += tri.rounds;
-    // Garde-fou qualité : on n'ingère que si la réponse synthétisée est solide.
-    const accept = crit.score >= this.acceptScore && !tri.answer.startsWith('[');
-    if (!accept) { this.stats.rejected++; return { ...tri, critique: crit, lesson: null, ingested: false }; }
 
-    const lesson = {
-      query, response: tri.answer,
-      quality   : +Math.min(1, 0.6 + 0.4 * crit.score).toFixed(4),   // fiabilité de la cible
-      importance: +Math.max(0.05, improvement).toFixed(4),           // apport du débat → priorité de rejeu
-      source: 'trilogue', converged: tri.converged, rounds: tri.rounds, criticScore: crit.score, ts: Date.now(),
-    };
+    const { accept, lesson } = evaluateTrilogue(query, tri, crit, { embed: this.embed, acceptScore: this.acceptScore });
+    if (!accept) { this.stats.rejected++; return { ...tri, critique: crit, lesson: null, ingested: false }; }
     this.ingest?.(lesson); this.stats.ingested++;
     return { ...tri, critique: crit, lesson, ingested: true };
   }
