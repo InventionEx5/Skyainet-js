@@ -270,7 +270,7 @@ export class DistillationManager {
    * @param {string}            [opts.checkpointPath] — si fourni : saveWeights() à la fin
    * @returns {Promise<{epochs:number,lossStart:number,lossEnd:number,steps:number,curve:number[]}>}
    */
-  async distillToWeights(dataset, opts = {}) {
+  async distillToWeights(source, opts = {}) {
     const tokenize = opts.tokenize;
     if (typeof tokenize !== 'function') throw new Error('opts.tokenize (text->number[]) requis');
     const model = this.#inference;
@@ -281,14 +281,22 @@ export class DistillationManager {
     const batchSize = opts.batchSize ?? 8;
     const maxLen    = opts.maxLen    ?? 64;
 
-    // 1) ReplayBuffer priorisé : les exemples haute qualité sont rejoués plus souvent
-    const buffer = new ReplayBuffer(Math.max(64, dataset.length * 2));
-    for (const ex of dataset) {
-      buffer.push(new Experience({
-        query   : ex.instruction ?? '',
-        response: ex.output ?? '',
-        quality : ex.qualityScore ?? 0.8,
-      }));
+    // 1) Source des leçons : soit un ReplayBuffer DÉJÀ rempli (ex. le buffer du
+    //    Teacher Shadow → c'est le maillon qui referme la boucle), soit un dataset
+    //    [{instruction,output,qualityScore}] dont on construit un buffer priorisé.
+    let buffer;
+    if (source && typeof source.prioritizedSample === 'function') {
+      buffer = source;                                    // ReplayBuffer fourni tel quel
+    } else {
+      const dataset = Array.isArray(source) ? source : [];
+      buffer = new ReplayBuffer(Math.max(64, dataset.length * 2));
+      for (const ex of dataset) {
+        buffer.push(new Experience({
+          query   : ex.instruction ?? '',
+          response: ex.output ?? '',
+          quality : ex.qualityScore ?? 0.8,
+        }));
+      }
     }
 
     // 2) Boucle : distillation autorégressive sur les tokens du maître via la
