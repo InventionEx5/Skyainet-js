@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "description": "SkyAInet x Nikola T369 - sovereign decentralized AI runtime (pure JS)",
   "imports": {
     "#aes_fips": "./aes_fips.js",
