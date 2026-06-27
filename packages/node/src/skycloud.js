@@ -26,6 +26,8 @@ import { LoraEvo }     from '#lora_evolution';
 import { NodeCommunication, Topic } from '#node_communication';
 import { ThevieRunner } from '#thevie';
 import { ModelRegistry } from '#model_registry';
+import { ReplayBuffer, Experience }        from '#replay_buffer';
+import { ExternalGateway, ShadowRouter }   from '#external_providers';
 import { NodeEconomics }  from '#economics';
 import { SkyWallet }      from '#wallet';
 import { TreasuryManager }from '#treasury';
@@ -432,6 +434,10 @@ class T369InferenceEngine {
   }
 }
 
+// =====================================================
+// AGENT AGENTIQUE — implémentation inline (ThevieAgent absent du projet)
+// Planification → Exécution par étapes → Synthèse
+// =====================================================
 
 // =====================================================
 // API KEY STORE
@@ -449,6 +455,7 @@ class T369InferenceEngine {
 //   rewards:claim    — claimRewards
 //   admin            — accès total (toutes les routes)
 // =====================================================
+
 const ALL_SCOPES = Object.freeze([
   'inference:read', 'inference:write',
   'storage:read',   'storage:write',
@@ -796,7 +803,6 @@ const PERSONAS = Object.freeze({
 // =====================================================
 // SKYCLOUD PRINCIPAL
 // =====================================================
-
 export class SkyCloud {
   // Champs privés
   #id; #state; #isRunning; #wisdomScore; #totalRequests; #evolutionCycles;
@@ -1087,7 +1093,8 @@ export class SkyCloud {
   listApiKeys()          { return this.#apiKeyStore.list(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-enableGateway(port = 8080) {
+
+  enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -1189,8 +1196,7 @@ enableGateway(port = 8080) {
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-
-  sendMessage(from, to, content, apiKey = null) {
+sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1299,7 +1305,9 @@ enableGateway(port = 8080) {
 
 
   // ─── Génération ───────────────────────────────────────────────
-/**
+
+
+  /**
    * Point d'entrée public pour le Chat Manager.
    * Appelé après génération de la réponse IA — injecte la paire
    * (question + réponse) dans le pipeline d'apprentissage.
@@ -1385,6 +1393,12 @@ enableGateway(port = 8080) {
       console.debug(`[Metacognition] ${e.message}`);
     }
 
+    // ── Shadow Consultation (opt-in via enableTeacherShadow) ──────
+    // Si la confiance est faible (tâche incertaine/complexe), on consulte les
+    // maîtres EN ARRIÈRE-PLAN (fire-and-forget) pour produire une leçon de haute
+    // valeur → replay_buffer. NE BLOQUE PAS : l'utilisateur a déjà sa réponse.
+    this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
+
     return {
       text           : result.text,
       tokensGenerated: result.tokensGenerated,
@@ -1400,6 +1414,45 @@ enableGateway(port = 8080) {
   #buildPrompt(userPrompt, ai) {
     const persona = PERSONAS[ai] ?? PERSONAS.t369;
     return `[SYSTEM] ${persona}\n[SAGESSE: ${this.#wisdomScore.toFixed(3)}]\n\n[USER] ${userPrompt}\n\n[ASSISTANT]`;
+  }
+
+  // ── Teacher Shadow (opt-in) : IA externes = PROFESSEURS en arrière-plan ──
+  // SOUVERAINETÉ : rien ne sort tant que ceci n'est pas appelé explicitement.
+  // Câble passerelle externe + replay buffer + shadow router. Les leçons (cas où
+  // le local diverge des maîtres) sont déversées dans le replay_buffer, prêtes
+  // pour distillToWeights / le Dream Cycle.
+  //   keys      : { xai, anthropic, deepseek }
+  //   embed     : (text)=>Float32Array — active le cache sémantique (optionnel)
+  //   transport : transport HTTP injecté (défaut : fetch)
+  //   threshold : complexité mini pour déclencher (1 − confiance), défaut 0.25
+  enableTeacherShadow({ keys = {}, embed = null, transport = undefined,
+                        threshold = 0.25, providers = ['xai', 'anthropic', 'deepseek'],
+                        primaryTeacher = null, bufferCapacity = 2048 } = {}) {
+    this.externalGateway = new ExternalGateway({
+      registry: this.#modelRegistry, keys, embed,
+      ...(transport ? { transport } : {}),
+    });
+    this.replayBuffer = this.replayBuffer ?? new ReplayBuffer(bufferCapacity);
+    this.shadowRouter = new ShadowRouter({
+      gateway : this.externalGateway,
+      registry: this.#modelRegistry,
+      threshold, providers, primaryTeacher,
+      ingest  : (lesson) => this.replayBuffer.push(new Experience({
+        query: lesson.query, response: lesson.response,
+        quality: lesson.quality, importance: lesson.importance,
+      })),
+    });
+    console.info('[SkyCloud] Teacher Shadow activé — IA externes en professeurs (arrière-plan)');
+    return this;
+  }
+
+  getReplayBuffer() { return this.replayBuffer ?? null; }
+  teacherStats() {
+    return {
+      enabled: !!this.shadowRouter,
+      shadow : this.shadowRouter?.stats ?? null,
+      cost   : this.externalGateway?.costReport() ?? null,
+    };
   }
 
   // ─── Leçon + Évolution ────────────────────────────────────────
@@ -1560,8 +1613,7 @@ enableGateway(port = 8080) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-
-  /**
+/**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -1646,6 +1698,33 @@ enableGateway(port = 8080) {
   get communication() { return this.#communication; }
 
   // ─── Orchestration Thevie ─────────────────────────────────────
+
+  async runThevieTask(goal, onStep = null, opts = {}) {
+    if (!this.#thevieRunner) {
+      this.#thevieRunner = new ThevieRunner(this, this.#engine.isReady ? this.#engine : null);
+    }
+    return this.#thevieRunner.run(goal, onStep, opts);
+  }
+
+  /** Retourne le catalogue des outils de l'orchestrateur Thevie. */
+  getThevieToolCatalog() {
+    if (!this.#thevieRunner) {
+      this.#thevieRunner = new ThevieRunner(this);
+    }
+    return this.#thevieRunner.getToolCatalog();
+  }
+
+  /** Retourne l'historique des orchestrations Thevie. */
+  listThevieSessions() {
+    return this.#thevieRunner?.listSessions() ?? [];
+  }
+
+  /** Retourne les stats de l'orchestrateur Thevie. */
+  getThevieStats() {
+    return this.#thevieRunner?.getStats() ?? { sessions: 0, toolCount: 0, engineReady: false };
+  }
+
+  // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
 
   /**
    * Génère un Smart Contract Solidity via LoraÉvo.
@@ -1936,8 +2015,7 @@ enableGateway(port = 8080) {
   async replicateFiles()        { return this.#storage.replicatePending(); }
 
   // ─── Gateway ──────────────────────────────────────────────────
-
-  enableGateway(port = 8080) {
+enableGateway(port = 8080) {
     if (port < 1 || port > 65535) throw new Error('Port invalide (1–65535)');
     this.#gatewayEnabled = true;
     this.#gatewayPort    = port;
@@ -2013,7 +2091,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Wallet & Récompenses ─────────────────────────────────────
-/**
+
+  /**
    * Retourne le solde SKY du wallet interne + les stats de récompenses.
    */
   getRewardsStats() {
@@ -2293,7 +2372,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Abonnements ──────────────────────────────────────────────
-/**
+
+  /**
    * Souscrit à un plan d'abonnement SKY.
    *
    * Logique :
@@ -2445,8 +2525,7 @@ enableGateway(port = 8080) {
   }
 
   // ─── Prélèvement automatique (privé) ──────────────────────────
-
-  /**
+/**
    * Planifie le prélèvement mensuel automatique pour un abonnement.
    * Utilise setInterval avec 30 jours (en production : persister la date
    * dans ZipMemory pour survivre aux redémarrages).
@@ -2571,7 +2650,8 @@ enableGateway(port = 8080) {
   }
 
   // ─── Dream Cycle direct ───────────────────────────────────────
-async runDreamCycle() {
+
+  async runDreamCycle() {
     const result = await this.#dreamCycle.runDreamCycle();
     this.#evolutionCycles++;
     this.#lastDreamCycle = Date.now();
