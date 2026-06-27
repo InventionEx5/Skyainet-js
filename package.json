@@ -141,6 +141,7 @@
     "#domain_classifier": "./domain_classifier.js",
     "#semantic_disagreement": "./semantic_disagreement.js",
     "#space_teacher": "./space_teacher.js",
-    "#society": "./society.js"
+    "#society": "./society.js",
+    "#peer_learning": "./peer_learning.js"
   }
 }
