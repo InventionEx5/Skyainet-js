@@ -137,6 +137,7 @@
     "#transformer_backward": "./transformer_backward.js",
     "#production_backward": "./production_backward.js",
     "#t369_trainer": "./t369_trainer.js",
-    "#weaning": "./weaning.js"
+    "#weaning": "./weaning.js",
+    "#domain_classifier": "./domain_classifier.js"
   }
 }
