@@ -351,7 +351,7 @@ export class ShadowRouter {
    */
   constructor({ gateway, ingest = null, registry = null, threshold = 0.25,
                 providers = ['xai', 'anthropic', 'deepseek'], primaryTeacher = null,
-                complexityFn = null } = {}) {
+                complexityFn = null, weaning = null, domainFn = null, rng = Math.random } = {}) {
     this.gateway = gateway;
     this.ingest = ingest;
     this.registry = registry;
@@ -359,6 +359,9 @@ export class ShadowRouter {
     this.providers = providers;
     this.primaryTeacher = primaryTeacher;
     this.complexityFn = complexityFn;
+    this.weaning = weaning;       // WeaningController : sevrage progressif par compétence
+    this.domainFn = domainFn;     // (prompt)=>domainId : bucket de compétence
+    this.rng = rng;
     this.stats = { evaluated: 0, triggered: 0, skipped: 0, lessons: 0, failures: 0, spendUSD: 0 };
   }
 
@@ -367,7 +370,13 @@ export class ShadowRouter {
     return 1 - (localResult?.confidence ?? 1);   // faible confiance ⇒ forte complexité
   }
   shouldShadow(prompt, localResult) {
-    return !!this.gateway && this.complexity(prompt, localResult) >= this.threshold;
+    if (!this.gateway) return false;
+    const u = this.complexity(prompt, localResult);
+    // Sevrage : si un WeaningController est branché, la décision dépend de la
+    // compétence MESURÉE du domaine (consulter moins là où le local a fait ses
+    // preuves), pas du simple seuil d'incertitude.
+    if (this.weaning && this.domainFn) return this.weaning.decideConsult(this.domainFn(prompt), u, this.rng).consult;
+    return u >= this.threshold;
   }
 
   // Fire-and-forget : NE BLOQUE PAS l'utilisateur. Lance la shadow en tâche de
@@ -415,6 +424,9 @@ export class ShadowRouter {
 
     this.stats.lessons++;
     this.stats.spendUSD = +(this.stats.spendUSD + (consultation.costUSD ?? 0)).toFixed(6);
+    // Sevrage : on vient de mesurer l'écart local↔maîtres pour ce domaine → on
+    // met à jour la compétence (qui pilotera les prochaines décisions de consulter).
+    if (this.weaning && this.domainFn) this.weaning.record(this.domainFn(prompt), studentGap, consultation.costUSD);
     if (this.ingest) this.ingest(lesson);
     return lesson;
   }
