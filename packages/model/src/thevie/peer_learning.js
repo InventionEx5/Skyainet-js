@@ -71,6 +71,25 @@ export function lessonCE(brain, lesson, { tokenizer = byteTokenizer, maxLen = 64
   return trainStep(W, tokens, targets, cfg, rope, 0, transform);
 }
 
+// Entraîne l'ADAPTATEUR LoRA d'un modèle sur une leçon (teacher forcing).
+// Voie « poids vivants » : sur la même base gelée, pluggable et indépendante des
+// poids pleins. Après entraînement, model.generateLearned(prompt) reproduit la
+// réponse. C'est l'autre moitié du DOUBLE SIGNAL : la MÊME leçon entraîne le cœur
+// en poids pleins (trainBrainOnLessons) ET l'adaptateur LoRA (ici).
+export function trainLoraOnLesson(model, lesson, { tokenizer = byteTokenizer, epochs = 40, maxLen = 64 } = {}) {
+  if (!lesson?.query || !lesson?.response) return null;
+  if (!model.loraHead) model.attachHead();
+  const { tokens, targets } = lessonTokens(tokenizer, lesson.query, lesson.response, maxLen);
+  if (tokens.length < 1) return null;
+  let last = 0;
+  for (let e = 0; e < epochs; e++) {
+    for (let i = 0; i < tokens.length; i++) {
+      last = model.trainHead(tokens.slice(0, i + 1), targets[i]);   // prédit targets[i] depuis le préfixe
+    }
+  }
+  return last;
+}
+
 // ACTE DE DIFFUSION : un PAIR enseigne à un apprenant via VRAIE génération.
 // Le pair génère la réponse → leçon → tampon de l'apprenant ; on mesure l'écart
 // (apprenant vs pair) pour la compétence. Aucun appel externe.
