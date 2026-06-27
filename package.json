@@ -138,6 +138,7 @@
     "#production_backward": "./production_backward.js",
     "#t369_trainer": "./t369_trainer.js",
     "#weaning": "./weaning.js",
-    "#domain_classifier": "./domain_classifier.js"
+    "#domain_classifier": "./domain_classifier.js",
+    "#semantic_disagreement": "./semantic_disagreement.js"
   }
 }
