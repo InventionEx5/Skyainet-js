@@ -29,6 +29,7 @@ import { ModelRegistry } from '#model_registry';
 import { ReplayBuffer, Experience }        from '#replay_buffer';
 import { ExternalGateway, ShadowRouter }   from '#external_providers';
 import { DistillationManager }             from '#distillation_manager';
+import { DEFAULT_REDACTOR }                 from '#pii_redaction';
 import { NodeEconomics }  from '#economics';
 import { SkyWallet }      from '#wallet';
 import { TreasuryManager }from '#treasury';
@@ -1196,7 +1197,8 @@ get id()              { return this.#id; }
   enableExternalAI(enabled) { this.#externalAIEnabled = !!enabled; }
 
   // ─── Messages ─────────────────────────────────────────────────
-sendMessage(from, to, content, apiKey = null) {
+
+  sendMessage(from, to, content, apiKey = null) {
     const isInternal = this.#registeredAIs.has(from) || from === 'system' || from === 'user';
     const isExternal = from === 'external';
 
@@ -1399,7 +1401,7 @@ sendMessage(from, to, content, apiKey = null) {
     // valeur → replay_buffer. NE BLOQUE PAS : l'utilisateur a déjà sa réponse.
     this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
 
-    return {
+    turn {
       text           : result.text,
       tokensGenerated: result.tokensGenerated,
       aiUsed         : ai,
@@ -1427,9 +1429,10 @@ sendMessage(from, to, content, apiKey = null) {
   //   threshold : complexité mini pour déclencher (1 − confiance), défaut 0.25
   enableTeacherShadow({ keys = {}, embed = null, transport = undefined,
                         threshold = 0.25, providers = ['xai', 'anthropic', 'deepseek'],
-                        primaryTeacher = null, bufferCapacity = 2048 } = {}) {
+                        primaryTeacher = null, bufferCapacity = 2048, redact = true } = {}) {
     this.externalGateway = new ExternalGateway({
       registry: this.#modelRegistry, keys, embed,
+      redactor: redact ? DEFAULT_REDACTOR : null,   // souveraineté : PII masquée par défaut
       ...(transport ? { transport } : {}),
     });
     this.replayBuffer = this.replayBuffer ?? new ReplayBuffer(bufferCapacity);
@@ -1453,6 +1456,47 @@ sendMessage(from, to, content, apiKey = null) {
       shadow : this.shadowRouter?.stats ?? null,
       cost   : this.externalGateway?.costReport() ?? null,
     };
+  }
+
+  // ── Chemin SYNCHRONE frontier (« Thevie and Friends ») ──────────
+  // Pour les tâches dures où l'on accepte d'attendre et de payer pour une réponse
+  // de qualité frontier. L'utilisateur ATTEND (contrairement au shadow). La PII est
+  // masquée automatiquement par la passerelle avant tout départ.
+  //   mode 'fallback' (défaut) : completeWithFallback(chain) → 1 appel, 1re réussite
+  //   mode 'consult'           : interroge toute la chaîne → réponse primaire +
+  //                              ensemble des avis + score de désaccord
+  async generateWithFrontier(request = {}) {
+    const { prompt, ai = 't369', chain = ['anthropic', 'xai', 'deepseek'], mode = 'fallback',
+            maxTokens = 1024, temperature = 0.7 } = request;
+    if (!prompt?.trim()) throw new Error('Prompt invalide ou vide');
+    if (!this.externalGateway)
+      return { text: '[frontier] indisponible — appelle d\'abord enableTeacherShadow({ keys }).', source: 'unavailable', error: true };
+
+    this.#totalRequests++;
+    const messages = [{ role: 'user', content: prompt }];
+    const opts = { maxTokens, temperature };
+
+    try {
+      if (mode === 'consult') {
+        const c = await this.externalGateway.consult(messages, opts, chain);
+        const answered = c.responses.filter(r => r.text);
+        if (!answered.length) return { text: '[frontier] aucun maître disponible', source: 'frontier', error: true, costUSD: c.costUSD };
+        const primary = chain.map(p => answered.find(r => r.provider === p)).find(Boolean) ?? answered[0];
+        return {
+          text: primary.text, source: 'frontier', provider: primary.provider, aiUsed: ai,
+          costUSD: c.costUSD, disagreement: c.disagreement,
+          masters: answered.map(r => ({ provider: r.provider, text: r.text })),
+          redactions: primary.redactions ?? null, engineReady: true,
+        };
+      }
+      const r = await this.externalGateway.completeWithFallback(chain, messages, opts);
+      return {
+        text: r.text, source: 'frontier', provider: r.provider, aiUsed: ai,
+        costUSD: r.costUSD, redactions: r.redactions ?? null, engineReady: true,
+      };
+    } catch (e) {
+      return { text: `[frontier] échec : ${e.message}`, source: 'frontier', error: true, attempts: e.attempts ?? null };
+    }
   }
 
   // ─── Leçon + Évolution ────────────────────────────────────────
@@ -1645,7 +1689,8 @@ sendMessage(from, to, content, apiKey = null) {
   get isAutoDreamEnabled() { return this.#autoDreamInterval !== null; }
 
   // ─── Redistribution inter-nœuds ───────────────────────────────
-/**
+
+  /**
    * Diffuse une leçon qualifiée à tous les peers abonnés.
    * Anti-boucle UUID intégré — jamais de re-broadcast.
    *
@@ -2079,7 +2124,8 @@ sendMessage(from, to, content, apiKey = null) {
   getPeers()           { return this.peers.map(p => ({ id: p.id, address: p.address, reputation: p.reputation, alive: p.isAlive() })); }
 
   // ─── Gateway — serve site ─────────────────────────────────────
-/**
+
+  /**
    * Sert un site souverain chiffré avec signature Dilithium5.
    * Port de serve_site() dans skycloud.rs.
    * @param {string} siteId
@@ -2251,8 +2297,7 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── i18n ─────────────────────────────────────────────────────
-
-  /**
+/**
    * Retourne le gestionnaire i18n partagé.
    */
   getI18n() {
@@ -2557,7 +2602,8 @@ sendMessage(from, to, content, apiKey = null) {
   }
 
   // ─── Prélèvement automatique (privé) ──────────────────────────
-/**
+
+  /**
    * Planifie le prélèvement mensuel automatique pour un abonnement.
    * Utilise setInterval avec 30 jours (en production : persister la date
    * dans ZipMemory pour survivre aux redémarrages).
@@ -2636,8 +2682,7 @@ sendMessage(from, to, content, apiKey = null) {
   #recordDreamCycleParticipation() { this.#userRewards.recordMessage?.(); }
 
   // ─── Status ───────────────────────────────────────────────────
-
-  getStatus() {
+getStatus() {
     return {
       id               : this.#id,
       state            : this.#state,
