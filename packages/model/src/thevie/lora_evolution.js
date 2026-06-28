@@ -511,7 +511,7 @@ contract {{contractName}} is ReentrancyGuard, Ownable {
         Listing storage l = listings[listingId];
         require(l.seller == msg.sender, "Not seller");
         require(l.active, "Already inactive");
-        l.active = false;
+l.active = false;
         IERC721(l.nftContract).transferFrom(address(this), msg.sender, l.tokenId);
         emit Delisted(listingId);
     }
@@ -646,6 +646,21 @@ const SC_ABI_TEMPLATES = Object.freeze({
   ],
 });
 
+// ─────────────────────────────────────────────────────────────────
+// GOUVERNANCE LoRA — utilitaires
+// ─────────────────────────────────────────────────────────────────
+const LORA_AUTHORITY_TIERS = ['advisory', 'copilot', 'delegated'];
+
+/** Mappe un domaine libre vers une spécialisation reconnue par EvolutionProfile.adapt() */
+function domainToSpecialization(domain) {
+  const d = (domain || '').toLowerCase();
+  if (/(tech|cod|program|dev|logiciel)/.test(d))                 return 'Technique & Programmation';
+  if (/([ée]thi|philo|moral|valeur)/.test(d))                    return 'Éthique & Philosophie';
+  if (/(cr[ée]a|imag|\bart\b|design)/.test(d))                   return 'Créativité & Imagination';
+  if (/(scien|donn[ée]e|data|statis|recherche|analyse)/.test(d)) return 'Science & Données';
+  return 'Guide Polyvalent';
+}
+
 export class LoraEvo {
   // Champs privés
   #signer;
@@ -657,6 +672,8 @@ export class LoraEvo {
   #inferenceEngine;   // T369Inference | null
   #contracts;         // Map<contractId, GeneratedContract> — Smart Contracts générés
   #contractCount;     // compteur pour IDs uniques
+  #loraProposals;     // Map<id, LoraProposal> — propositions d'adaptation LoRA
+  #loraProposalCount; // compteur d'IDs de propositions
 
   constructor() {
     this.modelName              = 'LoraEvo';
@@ -668,6 +685,11 @@ export class LoraEvo {
     this.currentSpecialization  = 'Guide Polyvalent';
     this.lastAdaptation         = Date.now();
 
+    // Gouvernance LoRA
+    this.authority      = 'advisory';   // niveau d'autonomie : advisory | copilot | delegated
+    this.earnedRewards  = 0;            // récompenses d'évolution réclamables (SKY)
+    this.claimedRewards = 0;            // total déjà réclamé
+
     this.#signer        = new Dilithium5Signer();
     this.#loraAdapter   = null;
     this.#trainingCount = 0;
@@ -677,6 +699,8 @@ export class LoraEvo {
     this.#inferenceEngine = null;
     this.#contracts     = new Map();
     this.#contractCount = 0;
+    this.#loraProposals     = new Map();
+    this.#loraProposalCount = 0;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -694,7 +718,8 @@ export class LoraEvo {
   // ═══════════════════════════════════════════════════════════════
   // GÉNÉRATION AVEC APPRENTISSAGE EN TEMPS RÉEL
   // ═══════════════════════════════════════════════════════════════
-async generate(prompt, maxTokens = 256) {
+
+  async generate(prompt, maxTokens = 256) {
     if (!this.#inferenceEngine) {
       throw new Error("LoraEvo n'est pas connectée au moteur d'inférence");
     }
@@ -1107,7 +1132,8 @@ async generate(prompt, maxTokens = 256) {
   }
 
   // ─── Helpers privés ───────────────────────────────────────────
-/** Extrait les paramètres structurés de la description + options. */
+
+  /** Extrait les paramètres structurés de la description + options. */
   #extractContractParams(description, options, type) {
     const desc = description.toLowerCase();
     return {
@@ -1216,8 +1242,7 @@ async generate(prompt, maxTokens = 256) {
   // ═══════════════════════════════════════════════════════════════
   // API PUBLIQUE
   // ═══════════════════════════════════════════════════════════════
-
-  getStatus() {
+getStatus() {
     return (
       `LoraEvo | Évolution: ${this.evolutionScore.toFixed(3)}` +
       ` | Interactions: ${this.totalInteractions}` +
@@ -1281,6 +1306,122 @@ async generate(prompt, maxTokens = 256) {
     const lessons = [...this.longTermKnowledge, ...this.shortTermMemory]
       .filter(l => typeof l === 'string' && l.length >= 8);
     return this.train({ lessons, ...opts });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // GOUVERNANCE LoRA — autorité, propositions d'adaptation, récompenses
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Définit le niveau d'autonomie de LoraÉvo : 'advisory' < 'copilot' < 'delegated'.
+   * 'delegated' exige une sagesse ≥ 0.85, sinon rétrograde automatiquement en 'copilot'.
+   * @returns {{ authority:string, autonomy:number, downgraded:boolean }}
+   */
+  setLoraAuthority(level) {
+    if (!LORA_AUTHORITY_TIERS.includes(level)) {
+      throw new Error(`[LoraEvo] Niveau d'autorité invalide : ${level}`);
+    }
+    let downgraded = false;
+    if (level === 'delegated' && this.evolutionProfile.wisdom < 0.85) {
+      level = 'copilot';
+      downgraded = true;
+    }
+    this.authority = level;
+    const autonomy = LORA_AUTHORITY_TIERS.indexOf(level) / (LORA_AUTHORITY_TIERS.length - 1);
+    console.info(`[LoraEvo] Autorité → ${level}${downgraded ? ' (rétrogradée : sagesse < 0.85)' : ''}`);
+    return { authority: level, autonomy, downgraded };
+  }
+
+  /**
+   * Propose une adaptation LoRA vers un domaine. Le statut dépend de l'autorité :
+   * 'delegated' → appliquée immédiatement ; 'copilot' → pré-validée ; 'advisory' → en attente.
+   * @returns {{ proposalId:number, title:string, domain:string, status:string, applied:boolean }}
+   */
+  loraPropose(title, domain) {
+    if (!title?.trim())  throw new Error('[LoraEvo] Titre de proposition requis');
+    if (!domain?.trim()) throw new Error('[LoraEvo] Domaine de proposition requis');
+
+    const id = ++this.#loraProposalCount;
+    const proposal = {
+      id, title: title.trim(), domain: domain.trim(),
+      status: 'pending', createdAt: Date.now(), appliedAt: null,
+    };
+
+    // L'autorité courante détermine si la proposition s'applique seule.
+    if (this.authority === 'delegated')    this.#applyLoraProposal(proposal);
+    else if (this.authority === 'copilot') proposal.status = 'screened';
+
+    this.#loraProposals.set(id, proposal);
+    console.info(`[LoraEvo] Proposition #${id} « ${proposal.title} » → ${proposal.status} (domaine: ${proposal.domain})`);
+    return {
+      proposalId: id, title: proposal.title, domain: proposal.domain,
+      status: proposal.status, applied: proposal.status === 'applied',
+    };
+  }
+
+  /**
+   * Applique une proposition LoRA acceptée (manuellement ou via le DAO).
+   * @returns {{ proposalId:number, status:string, reward:number, specialization:string }}
+   */
+  applyLoraProposal(proposalId) {
+    const proposal = this.#loraProposals.get(Number(proposalId));
+    if (!proposal)                     throw new Error(`[LoraEvo] Proposition introuvable : ${proposalId}`);
+    if (proposal.status === 'applied') throw new Error(`[LoraEvo] Proposition déjà appliquée : ${proposalId}`);
+    return this.#applyLoraProposal(proposal);
+  }
+
+  #applyLoraProposal(proposal) {
+    const spec = domainToSpecialization(proposal.domain);
+    this.evolutionProfile.adapt(spec);
+    this.currentSpecialization = spec;
+    this.lastAdaptation        = Date.now();
+    proposal.status            = 'applied';
+    proposal.appliedAt         = Date.now();
+
+    // Récompense d'évolution proportionnelle au score courant.
+    const reward = Math.round(80 + 120 * this.evolutionScore);
+    this.earnedRewards += reward;
+    this.evolutionScore = Math.min(0.99, this.evolutionScore + 0.002);
+
+    console.info(`[LoraEvo] Proposition #${proposal.id} appliquée → ${spec} | +${reward} SKY (earned: ${this.earnedRewards})`);
+    return { proposalId: proposal.id, status: proposal.status, reward, specialization: spec };
+  }
+
+  /**
+   * Réclame les récompenses d'évolution accumulées (vers le TreasuryVault).
+   * @param {number} [amount] — montant réclamé ; par défaut la totalité disponible.
+   * @returns {{ claimed:number, remaining:number, totalClaimed:number }}
+   */
+  loraClaim(amount = null) {
+    const available = this.earnedRewards;
+    if (available <= 0) return { claimed: 0, remaining: 0, totalClaimed: this.claimedRewards };
+
+    const requested = amount == null ? available : Math.max(0, Math.floor(Number(amount) || 0));
+    const claimed   = Math.min(requested, available);
+
+    this.earnedRewards  -= claimed;
+    this.claimedRewards += claimed;
+    console.info(`[LoraEvo] Réclamation : ${claimed} SKY (restant: ${this.earnedRewards}, cumulé: ${this.claimedRewards})`);
+    return { claimed, remaining: this.earnedRewards, totalClaimed: this.claimedRewards };
+  }
+
+  /** Crédite une récompense d'évolution (ex. contribution adoptée par le réseau). */
+  accrueEvolutionReward(amount) {
+    this.earnedRewards += Math.max(0, Math.floor(Number(amount) || 0));
+    return this.earnedRewards;
+  }
+
+  /** Instantané de la gouvernance LoRA pour l'UI. */
+  getLoraGovernance() {
+    return {
+      authority      : this.authority,
+      autonomy       : LORA_AUTHORITY_TIERS.indexOf(this.authority) / (LORA_AUTHORITY_TIERS.length - 1),
+      earnedRewards  : this.earnedRewards,
+      claimedRewards : this.claimedRewards,
+      specialization : this.currentSpecialization,
+      wisdom         : +this.evolutionProfile.wisdom.toFixed(3),
+      proposals      : [...this.#loraProposals.values()].map(p => ({ ...p })),
+    };
   }
 }
 
