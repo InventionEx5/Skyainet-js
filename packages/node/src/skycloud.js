@@ -438,6 +438,7 @@ class T369InferenceEngine {
     };
   }
 }
+
 // =====================================================
 // API KEY STORE
 //
@@ -1397,7 +1398,7 @@ get id()              { return this.#id; }
     // Si la confiance est faible (tâche incertaine/complexe), on consulte les
     // maîtres EN ARRIÈRE-PLAN (fire-and-forget) pour produire une leçon de haute
     // valeur → replay_buffer. NE BLOQUE PAS : l'utilisateur a déjà sa réponse.
-this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
+    this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
 
     return {
       text           : result.text,
@@ -1421,7 +1422,7 @@ this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
   // Câble passerelle externe + replay buffer + shadow router. Les leçons (cas où
   // le local diverge des maîtres) sont déversées dans le replay_buffer, prêtes
   // pour distillToWeights / le Dream Cycle.
-  //   keys      : { xai, anthropic, deepseek }
+  //   key : { xai, anthropic, deepseek }
   //   embed     : (text)=>Float32Array — active le cache sémantique (optionnel)
   //   transport : transport HTTP injecté (défaut : fetch)
   //   threshold : complexité mini pour déclencher (1 − confiance), défaut 0.25
@@ -1833,7 +1834,8 @@ this.shadowRouter?.maybeShadow(prompt, { text: result.text, confidence });
   get communication() { return this.#communication; }
 
   // ─── Orchestration Thevie ─────────────────────────────────────
-async runThevieTask(goal, onStep = null, opts = {}) {
+
+  async runThevieTask(goal, onStep = null, opts = {}) {
     if (!this.#thevieRunner) {
       this.#thevieRunner = new ThevieRunner(this, this.#engine.isReady ? this.#engine : null);
     }
@@ -1859,8 +1861,7 @@ async runThevieTask(goal, onStep = null, opts = {}) {
   }
 
   // ─── Smart Contracts (LoraÉvo) ────────────────────────────────
-
-  /**
+/**
    * Génère un Smart Contract Solidity via LoraÉvo.
    * Comme Thevie crée des nœuds, LoraÉvo crée des Smart Contracts.
    *
@@ -2848,6 +2849,9 @@ getStatus() {
       // Rewards & Wallet
       claimRewards              : n.claimRewards.bind(n),
       getRewardsStats           : n.getRewardsStats.bind(n),
+      // Alias snake_case (marketplace.html, skyainet.html) — la casse camelCase seule cassait l'appel REST
+      claim_rewards             : n.claimRewards.bind(n),
+      get_rewards_stats         : n.getRewardsStats.bind(n),
       creditWallet              : amount => n.creditWallet(amount),
       get_wallet_balance        : ()     => ({ walletBalance: n.walletBalance }),
       // Abonnements SKY
@@ -2856,6 +2860,14 @@ getStatus() {
       getActiveSubscriptions    : ()                   => n.getActiveSubscriptions(),
       getSubscription           : context              => n.getSubscription(context),
       getSubscriptionPlans      : ()                   => n.getSubscriptionPlans(),
+      // Alias snake_case (skycloud.html) — la casse camelCase seule cassait l'appel REST
+      subscribe_to_plan         : (context, planIndex) => n.subscribeToPlan(context, planIndex),
+      cancel_subscription       : (context)           => n.cancelSubscription(context),
+      get_active_subscriptions  : ()                   => n.getActiveSubscriptions(),
+      get_subscription_plans    : ()                   => n.getSubscriptionPlans(),
+      // Méthodes existantes désormais exposées au frontend
+      triggerRebalance          : ()                   => n.#treasury?.triggerRebalance() ?? { ok: false, reason: 'treasury non initialisé' },  // governance.html
+      clearCache                : ()                   => { n.#engine.resetCache(); return { ok: true }; },                                       // settings.html
       // Learn / Evolution
       injectLesson              : n.injectLesson.bind(n),
       injectChatLesson          : n.injectChatLesson.bind(n),
