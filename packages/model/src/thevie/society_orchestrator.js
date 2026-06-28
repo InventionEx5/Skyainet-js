@@ -29,6 +29,8 @@ const IMPORTANCE_FLOOR   = 0.05;
 const MASTERY_CE         = 0.35;   // CE sous laquelle une leçon est « maîtrisée » (compétence ~0.70)
 const CHAT_MIN_QUALITY   = 0.30;   // score minimal pour qu'un échange devienne leçon
 const CORRECTION_BOOST   = 1.5;    // une correction de l'utilisateur est de grande valeur → re-consultée +
+const TRUST_THRESHOLD    = 0.70;   // au-dessus (et hors correction) : réponse IA fiable → entraînement direct ;
+                                   // en dessous (ou correction) : leçon à VÉRIFIER (ancrage externe avant entraînement)
 
 // Score qualité heuristique d'un échange chat (léger ; le vrai monorepo en a un plus riche).
 function _scoreChat(prompt, response) {
@@ -78,8 +80,8 @@ export class SocietyOrchestrator {
       maxRounds, acceptScore, ingest: (lesson) => this.learn(lesson) });
     this.shadow = new InternalShadow({ society, externalTeach, classifier, embed: this.embed, tokenizer,
       anchorEvery, trainEvery, trainOpts: fullWeightOpts });
-    this.stats = { asked: 0, taught: 0, learned: 0, chatIngested: 0, chatRejected: 0,
-                   piiRedacted: 0, consolidations: 0, diffusionCycles: 0 };
+    this.stats = { asked: 0, taught: 0, learned: 0, chatIngested: 0, chatRejected: 0, chatToVerify: 0,
+                   piiRedacted: 0, anchored: 0, consolidations: 0, diffusionCycles: 0 };
   }
 
   _domain(query, domain) { return domain ?? (this.classifier ? this.classifier(query) : 'general'); }
@@ -87,8 +89,12 @@ export class SocietyOrchestrator {
   _toExperience(lesson) {
     const exp = new Experience({ query: lesson.query, response: lesson.response,
       quality: lesson.quality ?? 0.8, importance: lesson.importance ?? null });
-    exp.domain = lesson.domain ?? 'general';
-    exp.source = lesson.source ?? 'lesson';
+    exp.domain      = lesson.domain ?? 'general';
+    exp.source      = lesson.source ?? 'lesson';
+    exp.verified    = lesson.verified ?? true;        // leçons internes (teach/learn/peer) = déjà vérifiées
+    exp.needsAnchor = lesson.needsAnchor ?? false;
+    exp.correction  = lesson.correction ?? false;
+    exp.anchorContext = lesson.anchorContext ?? null; // litige d'une correction → contexte pour le critique externe
     return exp;
   }
 
@@ -131,10 +137,11 @@ export class SocietyOrchestrator {
   }
 
   // 3. ADMISSION CHAT : une conversation utilisateur↔IA → leçon filtrée → tampon de rejeu.
-  //    Intake léger non bloquant ; l'entraînement réel se fait en consolidation.
-  //    NB : la cible est la réponse de l'IA → garde-fous (qualité, boost-correction, et,
-  //    pour les échanges à forte valeur, préférer teach() qui ancre sur la critique externe).
-  ingestChat(userPrompt, aiResponse, { ai = null, domain = 'general', isCorrection = null, quality = null } = {}) {
+  //    Intake léger non bloquant. La cible est la réponse de l'IA → on CLASSE la confiance :
+  //    réponse de haute qualité et non-corrective ⇒ VÉRIFIÉE (entraînement direct, gratuit) ;
+  //    sinon (correction, ou qualité moyenne) ⇒ À VÉRIFIER — la consolidation la ré-ancrera
+  //    via la critique externe avant tout entraînement (jamais d'auto-renforcement non vérifié).
+  ingestChat(userPrompt, aiResponse, { ai = null, domain = 'general', isCorrection = null, quality = null, previousTurn = null } = {}) {
     const redP = DEFAULT_REDACTOR.redact(userPrompt ?? '');
     const redA = DEFAULT_REDACTOR.redact(aiResponse ?? '');
     const cleanPrompt = redP.text, cleanResponse = redA.text;
@@ -145,10 +152,27 @@ export class SocietyOrchestrator {
 
     const correction = isCorrection ?? _looksLikeCorrection(cleanPrompt);
     const importance  = Math.min(1, (1 - score * 0.5) * (correction ? CORRECTION_BOOST : 1));   // dur/correction → re-consulté +
-    const lesson = { query: cleanPrompt, response: cleanResponse, quality: score, importance, domain, source: 'chat', correction };
+
+    // RAFFINEMENT CORRECTION : si l'utilisateur corrige ET qu'on a le tour précédent,
+    // la VRAIE leçon est (question d'origine → réponse corrigée). On reconstruit la
+    // requête sur la question d'origine et on garde le LITIGE en contexte d'ancrage,
+    // pour que le critique externe re-dérive la bonne réponse en connaissance de cause.
+    let query = cleanPrompt, response = cleanResponse, anchorContext = null;
+    if (correction && previousTurn?.query) {
+      query = DEFAULT_REDACTOR.redact(previousTurn.query).text;
+      const origAnswer = DEFAULT_REDACTOR.redact(previousTurn.response ?? '').text;
+      response = cleanPrompt;   // placeholder (la correction) — sera remplacé par l'ancrage externe
+      anchorContext = `Question: ${query}\nRéponse initiale (contestée par l'utilisateur): ${origAnswer}\n` +
+                      `Correction de l'utilisateur: ${cleanPrompt}\nDonne la réponse correcte et vérifiée.`;
+    }
+
+    const trusted = !correction && response.trim().length > 0 && score >= TRUST_THRESHOLD;   // réponse IA fiable ?
+    const lesson = { query, response, quality: score, importance, domain, source: 'chat',
+                     correction, verified: trusted, needsAnchor: !trusted, anchorContext };
 
     this.buffer.push(this._toExperience(lesson));
     this.stats.chatIngested++;
+    if (!trusted) this.stats.chatToVerify++;
     if (redP.count + redA.count > 0) this.stats.piiRedacted++;
     return { accepted: true, lesson, redactedPII: redP.count + redA.count };
   }
@@ -157,14 +181,28 @@ export class SocietyOrchestrator {
   //    Le cœur ré-étudie les leçons importantes/dures ; la priorité décroît une fois
   //    maîtrisée (répétition espacée → anti-sur-apprentissage) ; et chaque leçon est
   //    REDISTRIBUÉE aux cœurs faibles du domaine (les 3 cerveaux apprennent).
-  consolidate({ batchSize = 8, redistribute = true, peerOpts = null } = {}) {
-    if (this.buffer.size === 0) return { consolidated: 0, mastered: 0, redistributed: 0, bufferSize: 0 };
+  //    GARDE-FOU : une leçon « à vérifier » (sortie IA non fiable) est d'abord RÉ-ANCRÉE
+  //    via le panel mixte (critique externe) ; sans ancrage possible, elle n'entraîne RIEN.
+  async consolidate({ batchSize = 8, redistribute = true, peerOpts = null } = {}) {
+    if (this.buffer.size === 0) return { consolidated: 0, mastered: 0, redistributed: 0, anchored: 0, skippedUnverified: 0, bufferSize: 0 };
     const entries = this.buffer.prioritizedSample(batchSize);
     const pOpts = peerOpts ?? { epochs: Math.max(40, Math.round((this.fullWeightOpts.epochs ?? 120) * 0.6)), lr: this.fullWeightOpts.lr ?? 0.1 };
-    let mastered = 0, redistributed = 0;
+    let mastered = 0, redistributed = 0, anchored = 0, skipped = 0;
 
     for (const { exp } of entries) {
       const domain = exp.domain ?? 'general';
+
+      // VÉRIFICATION : jamais d'entraînement sur une sortie IA non vérifiée sans ancrage externe.
+      if (exp.needsAnchor && !exp.verified) {
+        const res = await this.panel.teach(exp.query, domain, { ingest: () => {}, context: exp.anchorContext ?? '' });   // critique EXTERNE (avec litige si correction)
+        if (res?.lesson?.response) {
+          exp.response = res.lesson.response;            // la réponse ancrée remplace la sortie IA brute
+          exp.verified = true; exp.needsAnchor = false; anchored++;
+        } else {
+          skipped++; continue;                           // pas d'ancrage → on n'entraîne PAS sur du non vérifié
+        }
+      }
+
       const lesson = { query: exp.query, response: exp.response, domain };
 
       // RE-CONSULTATION : le cœur propriétaire ré-étudie la leçon (poids pleins + LoRA).
@@ -186,8 +224,8 @@ export class SocietyOrchestrator {
         }
       }
     }
-    this.stats.consolidations++;
-    return { consolidated: entries.length, mastered, redistributed, bufferSize: this.buffer.size };
+    this.stats.consolidations++; this.stats.anchored += anchored;
+    return { consolidated: entries.length, mastered, redistributed, anchored, skippedUnverified: skipped, bufferSize: this.buffer.size };
   }
 
   // 5. ÉCHANGE DE FOND : diffusion entre pairs (boucle shadow interne).
