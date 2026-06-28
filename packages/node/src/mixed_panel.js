@@ -58,8 +58,9 @@ export class MixedPanel {
   }
 
   // Une délibération : assigne le panel → trilogue (proposer/synth locaux, critique
-  //   externe) → critique heuristique → leçon → tampon.
-  async teach(query, domain, { ingest } = {}) {
+  //   externe) → critique heuristique → leçon → tampon. `context` (optionnel) est
+  //   transmis au trilogue : sert p.ex. à donner le LITIGE d'une correction au critique.
+  async teach(query, domain, { ingest, context = '' } = {}) {
     const panel = assignPanel(this.society, domain);
     const generate = makeMixedRoleGenerate({
       society: this.society, proposerId: panel.proposerId, synthesizerId: panel.synthesizerId,
@@ -68,7 +69,7 @@ export class MixedPanel {
     const space = new SpaceAI({ generate, maxRounds: this.maxRounds,
       names: { proposer: panel.proposerId, critic: `External:${this.criticProvider}`, synthesizer: panel.synthesizerId } });
 
-    const tri = await space.trilogue(query);
+    const tri = await space.trilogue(query, { context });
     this.stats.externalCritiques += tri.rounds;            // un appel critique externe par tour
     const crit = this.critic.critique(query, tri.answer);
     this.stats.taught++; this.stats.rounds += tri.rounds;
