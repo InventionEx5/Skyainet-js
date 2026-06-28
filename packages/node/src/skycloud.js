@@ -39,6 +39,8 @@ import { TreasuryManager }from '#treasury';
 import { UserProfile, VerificationLevel } from '#profile';
 import { i18n as skyI18n, I18nManager }   from '#i18n';
 import { NodeManager }                     from '#node_manager';
+import { Dao }                             from '#dao';
+import { AlignmentKernel }                 from '#alignment_kernel';
 import { ComputeMarketplace }              from '#marketplace';
 import { GpuCpuMarketplaceService }        from '#gpu_cpu';
 
@@ -848,6 +850,8 @@ export class SkyCloud {
   #nodeManager;      // NodeManager — flotte multi-nœuds
   #marketplace;      // ComputeMarketplace — location nœuds
   #gpuMarket;        // GpuCpuMarketplaceService — GPU/CPU market
+  #dao;              // Dao — gouvernance (propositions + votes)
+  #alignment;        // AlignmentKernel — évaluation éthique des actions
 
   constructor(modelConfig = DEFAULT_MODEL_CONFIG) {
     this.#id              = `sky-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -896,6 +900,8 @@ export class SkyCloud {
     this.#nodeManager    = new NodeManager();
     this.#marketplace    = new ComputeMarketplace();
     this.#gpuMarket      = new GpuCpuMarketplaceService();
+    this.#dao            = new Dao();
+    this.#alignment      = new AlignmentKernel();
     this.#evolutionManager = null;
 
     this.peers = [];
@@ -904,7 +910,8 @@ export class SkyCloud {
   }
 
   // ─── Accesseurs publics ───────────────────────────────────────
-get id()              { return this.#id; }
+
+  get id()              { return this.#id; }
   get state()           { return this.#state; }
   get isRunning()       { return this.#isRunning; }
   get wisdomScore()     { return this.#wisdomScore; }
@@ -1422,7 +1429,7 @@ get id()              { return this.#id; }
   // Câble passerelle externe + replay buffer + shadow router. Les leçons (cas où
   // le local diverge des maîtres) sont déversées dans le replay_buffer, prêtes
   // pour distillToWeights / le Dream Cycle.
-  //   key : { xai, anthropic, deepseek }
+  //   keys      : { xai, anthropic, deepseek }
   //   embed     : (text)=>Float32Array — active le cache sémantique (optionnel)
   //   transport : transport HTTP injecté (défaut : fetch)
   //   threshold : complexité mini pour déclencher (1 − confiance), défaut 0.25
@@ -1467,7 +1474,7 @@ get id()              { return this.#id; }
   }
 
   weaningStats() { return this.weaningController?.globalStats() ?? null; }
-  domainStats() { return this.domainClassifier?.stats() ?? null; }
+  domainStats() {return this.domainClassifier?.stats() ?? null; }
 
   // ── AI SPACE comme professeur : trilogue (proposer/critic/synthesizer) →
   //    critique → leçon → MÊME tampon de rejeu que la distillation. Les 3 IA
@@ -2227,8 +2234,7 @@ get id()              { return this.#id; }
   }
 
   // ─── Wallet & Récompenses ─────────────────────────────────────
-
-  /**
+/**
    * Retourne le solde SKY du wallet interne + les stats de récompenses.
    */
   getRewardsStats() {
@@ -2305,7 +2311,8 @@ get id()              { return this.#id; }
   }
 
   // ─── Profil utilisateur ───────────────────────────────────────
-/**
+
+  /**
    * Retourne le résumé complet du profil pour la popup Profil de skyainet.html.
    */
   getUserProfile() {
@@ -2868,6 +2875,28 @@ getStatus() {
       // Méthodes existantes désormais exposées au frontend
       triggerRebalance          : ()                   => n.#treasury?.triggerRebalance() ?? { ok: false, reason: 'treasury non initialisé' },  // governance.html
       clearCache                : ()                   => { n.#engine.resetCache(); return { ok: true }; },                                       // settings.html
+      // ── Gouvernance (governance.html) — DAO réel + alignement éthique ─────
+      createProposal            : (title, category) => {
+        const id = n.#dao.createProposal({ title, description: title, proposer: 'local-node', category });
+        return { ok: true, proposalId: id };
+      },
+      castConvictionVote        : (proposalId, inFavor, days = 0) => {
+        // Modèle de conviction : plus l'engagement (jours) est long, plus le poids du vote est élevé (sous-linéaire).
+        const power = 1 + Math.sqrt(Math.max(0, Number(days) || 0));
+        n.#dao.vote(Number(proposalId), 'local-node', !!inFavor, power);
+        return { ok: true, proposalId: Number(proposalId), power: Math.floor(power) };
+      },
+      get_proposals             : () => n.#dao.getActiveProposals().map(p => p.toJSON()),
+      dao_stats                 : () => n.#dao.stats(),
+      evaluateAction            : (action) => n.#alignment.evaluateAction(action),
+      generateDraft             : async (intent) => {
+        const r = await n.generateWithAI({
+          prompt   : `Rédige une proposition de gouvernance claire et structurée pour: ${intent}`,
+          ai       : 'thevie',
+          maxTokens: 384,
+        });
+        return { ok: true, draft: r?.text ?? '' };
+      },
       // Learn / Evolution
       injectLesson              : n.injectLesson.bind(n),
       injectChatLesson          : n.injectChatLesson.bind(n),
