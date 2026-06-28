@@ -21,8 +21,8 @@ import {
   DecoyCircuitManager,
   RedTeamClassifier, defaultRedTeamClassifier,
   MarkovSteganography,
-}                          from '../../secure/src/secure.js';
-import { ZipMemory }       from '../../memory/src/zip_memory.js';
+}                          from '#secure';
+import { ZipMemory }       from '#zip_memory';
 
 // ─────────────────────────────────────────────────────────────────
 // HELPERS
@@ -501,6 +501,7 @@ export class SecureMessagingService {
       // Identité
       sc_get_identity   : ()                       => s.getIdentity(),
       sc_rotate_did     : ()                       => s.rotateDid(),
+      rotateDid         : ()                       => s.rotateDid(),   // alias attendu par settings.html
       sc_did_history    : ()                       => s.getDidHistory(),
       // Contacts
       sc_add_contact    : (name, did, favorite)    => s.addContact(name, did, { favorite }),
