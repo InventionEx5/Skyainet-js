@@ -148,6 +148,7 @@
     "#society_orchestrator": "./society_orchestrator.js",
     "#trading_desk": "./trading_desk.js",
     "#trading_mandate": "./trading_mandate.js",
+    "#eval_harness": "./eval_harness.js",
     "#uniswap_v4": "./uniswap_v4.js"
   }
 }
