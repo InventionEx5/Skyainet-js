@@ -11,9 +11,16 @@
 // qui rend romanDiffuse/romanUndiffuse exactement réciproques. Les caractères
 // distinctifs (7 poids romains, 3 phases, S-box, dominants par bloc,
 // sentinel inter-blocs, alphabet 256, modes Gematria) sont conservés.
+//
+// DIFFUSION PLEINE LARGEUR : le transform par octet d'origine n'avait aucune
+// diffusion inter-octets (avalanche ~0,9 % — chaque octet de sortie ne
+// dépendait que de son octet d'entrée). Le bloc est désormais un réseau SPN à
+// ROUNDS rounds {SubBytes → diffusion avant/arrière pleine largeur →
+// AddRoundKey}, avec pré-blanchiment par keystream : tout octet dépend de tous
+// les autres du bloc (avalanche ~50 %), sans SHA supplémentaire ni BigInt.
 // =====================================================
 
-import { createHash } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 
 // ─── Helpers Uint32 (zéro BigInt, JIT V8) ────────────────────────────────────
 function rotL32(x, n) { n &= 31; return ((x << n) | (x >>> (32 - n))) >>> 0; }
@@ -45,7 +52,13 @@ const C3H = 0xA3B195A8, C3L = 0xD7F4B3C2;
 const C4H = 0xC4CEB9FE, C4L = 0x1A85EC53;
 const C5H = 0x6C62272E, C5L = 0x07BB0142;
 
+// Nombre de rounds SPN par défaut (confusion + diffusion pleine largeur).
+// 6 : avalanche saturée (dès R=3) + marge cryptanalytique, coût ~nul (SHA-borné).
+// Surchargeable par instance via l'option { rounds } du constructeur.
+const ROUNDS = 6;
+
 function sha256(parts) { const h = createHash('sha256'); for (const p of parts) h.update(p); return h.digest(); }
+const MAC_LABEL = Buffer.from('RomanT369-MAC');   // étiquette de dérivation de la clé MAC (séparation des clés)
 
 // ─── Rotations 8-bit ─────────────────────────────────────────────────────────
 function rotU8L(b, n) { n &= 7; return ((b << n) | (b >>> (8 - n))) & 0xff; }
@@ -82,9 +95,9 @@ export const GematriaMode = Object.freeze({
 
 export class RomanT369 {
   #key; #nonce; #modulus; #permutation; #hyperLookup; #hyperLookupInverse;
-  #romanSbox; #romanSboxInv; #romanWeights; #mode; #domainKey; #chaos; #sentinel;
+  #romanSbox; #romanSboxInv; #romanWeights; #mode; #domainKey; #chaos; #sentinel; #rounds;
 
-  constructor(key, nonce, mode = GematriaMode.Hyper256) {
+  constructor(key, nonce, mode = GematriaMode.Hyper256, opts = {}) {
     if (key.length   !== 32) throw new RangeError('key must be 32 bytes');
     if (nonce.length !== 12) throw new RangeError('nonce must be 12 bytes');
 
@@ -95,6 +108,7 @@ export class RomanT369 {
                        : mode === GematriaMode.Extended ? 128 : 256;
     this.#romanWeights = new Uint8Array([1, 5, 10, 50, 100, 200, 250]);
     this.#sentinel     = new Uint8Array(3);
+    this.#rounds       = Math.max(1, ((opts && opts.rounds) | 0) || ROUNDS);
 
     this.#permutation      = this.#genPermutation();
     this.#domainKey        = this.#deriveDomainKey();
@@ -274,31 +288,90 @@ export class RomanT369 {
     return out;
   }
 
+  // ── Chiffrement AUTHENTIFIÉ (encrypt-then-MAC, HMAC-SHA-256) ──────────────────
+  // Intégrité + anti-malléabilité : après chiffrement, un tag HMAC-SHA-256 couvre
+  // nonce ‖ chiffré. La clé MAC est dérivée SÉPARÉMENT de la clé de chiffrement
+  // (séparation des clés). Sortie : chiffré ‖ tag (32 o). Le déchiffrement VÉRIFIE
+  // le tag en temps constant AVANT de déchiffrer — un seul octet altéré lève une
+  // exception et ne déchiffre rien.
+  #macKey() { return sha256([this.#key, this.#nonce, MAC_LABEL]); }   // 32 o, distincte de la clé
+  encryptAuthenticated(plaintext) {
+    const ct  = this.encrypt(plaintext);
+    const tag = createHmac('sha256', this.#macKey()).update(this.#nonce).update(ct).digest();
+    const out = new Uint8Array(ct.length + 32);
+    out.set(ct, 0); out.set(tag, ct.length);
+    return out;
+  }
+  decryptAuthenticated(data) {
+    if (data.length < 32) throw new Error("[RomanT369] données trop courtes (tag d'authentification manquant)");
+    const ct       = data.subarray(0, data.length - 32);
+    const tag      = Buffer.from(data.subarray(data.length - 32));
+    const expected = createHmac('sha256', this.#macKey()).update(this.#nonce).update(ct).digest();
+    if (!timingSafeEqual(tag, expected)) throw new Error("[RomanT369] tag d'authentification invalide — intégrité compromise");
+    return this.decrypt(ct);
+  }
+
+  // ── Diffusion inter-octets (linéaire, pleine largeur, strictement inversible) ──
+  // Passe AVANT : chaque octet absorbe l'accumulateur des octets déjà émis.
+  // Passe ARRIÈRE : symétrique en sens inverse. Ensemble, tout octet dépend de
+  // TOUS les autres du bloc en une passe. L'accumulateur ne dépend que d'octets
+  // de SORTIE → le déchiffrement recompose la même suite d'accumulateurs.
+  #diffuseFwd(s, n, init) {
+    let a = init & 0xff;
+    for (let i = 0; i < n; i++) { s[i] = (s[i] + a) & 0xff; a = (rotU8L((a ^ s[i]) & 0xff, 3) + Math.imul(s[i] | 1, 0xB5)) & 0xff; }
+  }
+  #undiffuseFwd(s, n, init) {
+    let a = init & 0xff;
+    for (let i = 0; i < n; i++) { const c = s[i]; s[i] = (c - a + 256) & 0xff; a = (rotU8L((a ^ c) & 0xff, 3) + Math.imul(c | 1, 0xB5)) & 0xff; }
+  }
+  #diffuseBwd(s, n, init) {
+    let a = init & 0xff;
+    for (let i = n - 1; i >= 0; i--) { s[i] = (s[i] + a) & 0xff; a = (rotU8R((a ^ s[i]) & 0xff, 3) + Math.imul(s[i] | 1, 0x3D)) & 0xff; }
+  }
+  #undiffuseBwd(s, n, init) {
+    let a = init & 0xff;
+    for (let i = n - 1; i >= 0; i--) { const c = s[i]; s[i] = (c - a + 256) & 0xff; a = (rotU8R((a ^ c) & 0xff, 3) + Math.imul(c | 1, 0x3D)) & 0xff; }
+  }
+  // ── Bloc : réseau SPN à ROUNDS rounds {SubBytes → Diffusion pleine largeur →
+  // AddRoundKey}. Confusion = S-box (+ romanDiffuse en entrée, caractère
+  // distinctif). Diffusion = passes avant/arrière. Pré-blanchiment par keystream.
+  // Tout octet de sortie dépend de tous les octets d'entrée du bloc (avalanche ≈ 50 %).
   #encryptChunk(chunk, out, offset, doms) {
-    const HL = this.#hyperLookup, SB = this.#romanSbox, P = this.#permutation, mod = this.#modulus;
-    for (let i = 0, n = chunk.length; i < n; i++) {
-      let val = HL ? HL[chunk[i]] : (chunk[i] + P[chunk[i]]) % mod;
-      val = SB[val];
-      val = this.#romanDiffuse(val, i);
-      const dom = doms[i];
-      val = rotU8R((val ^ dom) & 0xff, 3);
-      val = (val + Math.imul(dom, 29)) & 0xff;
-      out[offset + i] = val;
+    const HL = this.#hyperLookup, SB = this.#romanSbox, P = this.#permutation, mod = this.#modulus, DK = this.#domainKey, R = this.#rounds;
+    const n = chunk.length, s = out.subarray(offset, offset + n);
+    for (let i = 0; i < n; i++) {                        // entrée : HL → S-box → romanDiffuse → blanchiment
+      const val = HL ? HL[chunk[i]] : (chunk[i] + P[chunk[i]]) % mod;
+      s[i] = (this.#romanDiffuse(SB[val], i) ^ doms[i]) & 0xff;
+    }
+    for (let r = 0; r < R; r++) {
+      for (let i = 0; i < n; i++) s[i] = SB[s[i]];       // SubBytes (confusion)
+      if (n > 1) {                                        // Diffusion pleine largeur
+        this.#diffuseFwd(s, n, (doms[0]     ^ DK[r & 63]        ^ ((r * 0x5B) & 0xff)) & 0xff);
+        this.#diffuseBwd(s, n, (doms[n - 1] ^ DK[(r + 32) & 63] ^ ((r * 0x3D) & 0xff)) & 0xff);
+      }
+      const rk = (r * 0x9D) & 0xff;                       // AddRoundKey (sous-clé inline, zéro appel/octet)
+      for (let i = 0; i < n; i++) s[i] = (s[i] ^ doms[i] ^ DK[(i * 3 + r * 29 + 7) & 63] ^ rk) & 0xff;
     }
   }
 
   #decryptChunk(chunk, out, offset, doms) {
-    const INV = this.#hyperLookupInverse, SBI = this.#romanSboxInv, P = this.#permutation, mod = this.#modulus;
-    for (let i = 0, n = chunk.length; i < n; i++) {
-      let val = chunk[i];
-      const dom = doms[i];
-      val = (val - Math.imul(dom, 29) + 0x100000000) & 0xff;
-      val = rotU8L(val, 3) ^ dom;     // inverse de rotU8R(val^dom,3)
-      val = val & 0xff;
-      val = this.#romanUndiffuse(val, i);
+    const INV = this.#hyperLookupInverse, SBI = this.#romanSboxInv, P = this.#permutation, mod = this.#modulus, DK = this.#domainKey, R = this.#rounds;
+    const n = chunk.length, s = out.subarray(offset, offset + n);
+    for (let i = 0; i < n; i++) s[i] = chunk[i];
+    for (let r = R - 1; r >= 0; r--) {              // rounds inverses (ordre inverse des opérations)
+      const rk = (r * 0x9D) & 0xff;
+      for (let i = 0; i < n; i++) s[i] = (s[i] ^ doms[i] ^ DK[(i * 3 + r * 29 + 7) & 63] ^ rk) & 0xff;   // undo AddRoundKey
+      if (n > 1) {                                        // undo Diffusion (arrière puis avant)
+        this.#undiffuseBwd(s, n, (doms[n - 1] ^ DK[(r + 32) & 63] ^ ((r * 0x3D) & 0xff)) & 0xff);
+        this.#undiffuseFwd(s, n, (doms[0]     ^ DK[r & 63]        ^ ((r * 0x5B) & 0xff)) & 0xff);
+      }
+      for (let i = 0; i < n; i++) s[i] = SBI[s[i]];       // undo SubBytes
+    }
+    for (let i = 0; i < n; i++) {                         // undo entrée : blanchiment → romanDiffuse → S-box → HL
+      let val = this.#romanUndiffuse((s[i] ^ doms[i]) & 0xff, i);
       val = SBI[val];
-      if (INV) out[offset + i] = INV[val];
-      else { const k = P[val]; out[offset + i] = (val + mod - k) % mod; }
+      if (INV) s[i] = INV[val];
+      else { const k = P[val]; s[i] = (val + mod - k) % mod; }
     }
   }
 
