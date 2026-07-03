@@ -139,13 +139,15 @@ export class MandateEngine extends EventEmitter {
     for (const pos of m.positions) { const mk = this.#mark(pos.pair); if (mk != null) e += pos.margin + this.#uPnl(pos, mk); }
     return e;
   }
-  #open(m, pair, side, mark) {
-    const margin = Math.min(m.capital * (m.perTradePct / 100), m.cash);
+  #open(m, pair, side, mark, pctOverride = null, levOverride = null) {
+    const pct = pctOverride ?? m.perTradePct;
+    const margin = Math.min(m.capital * (pct / 100), m.cash);
     if (!(margin > 1e-9) || !(mark > 0)) return { ok: false, reason: 'Cash insuffisant pour ouvrir' };
-    const notional = margin * m.maxLeverage;
+    const lev = clamp(Number(levOverride ?? m.maxLeverage) || m.maxLeverage, 1, m.maxLeverage);
+    const notional = margin * lev;
     const pos = {
       id: 'pos_' + (++this.#posSeq).toString(36), pair, side,
-      size: notional / mark, entry: mark, leverage: m.maxLeverage, margin, openedAt: Date.now(),
+      size: notional / mark, entry: mark, leverage: lev, margin, openedAt: Date.now(),
     };
     m.cash -= margin;
     m.positions.push(pos);
@@ -169,12 +171,13 @@ export class MandateEngine extends EventEmitter {
     return addSize;
   }
   // Ouvre une position, ou ajoute à une position de même paire/côté (moyenne).
-  #openOrAdd(m, pair, side, mark) {
-    const margin = Math.min(m.capital * (m.perTradePct / 100), m.cash);
+  #openOrAdd(m, pair, side, mark, pctOverride = null, levOverride = null) {
+    const pct = pctOverride ?? m.perTradePct;
+    const margin = Math.min(m.capital * (pct / 100), m.cash);
     if (!(margin > 1e-9) || !(mark > 0)) return { ok: false, reason: 'Cash insuffisant' };
     const existing = m.positions.find(x => x.pair === pair && x.side === side);
     if (existing) { const addSize = this.#addToPosition(m, existing, margin, mark); return { ok: true, pos: existing, addSize, added: true }; }
-    const r = this.#open(m, pair, side, mark);
+    const r = this.#open(m, pair, side, mark, pctOverride, levOverride);
     return r.ok ? { ok: true, pos: r.pos, addSize: r.pos.size, added: false } : r;
   }
   // Clôture PARTIELLE d'une position (réalise le PnL proportionnel, rend la marge au prorata).
@@ -233,7 +236,7 @@ export class MandateEngine extends EventEmitter {
     const strategy = ['ai', 'dca', 'grid'].includes(cfg.strategy) ? cfg.strategy : 'ai';
     let usePairs = pairs;
     let strategyParams = {};
-    const stratState = { lots: 0, rungs: 0, lastLevel: null };
+    const stratState = { lots: 0, rungs: 0, lastLevel: null, pace: 1, lotScale: 1, freeze: false, effPct: null, frame: null };
     if (strategy === 'dca') {
       const sp = cfg.strategyParams || {};
       usePairs = [pairs[0]];                              // DCA opère sur une seule paire
@@ -248,9 +251,11 @@ export class MandateEngine extends EventEmitter {
       const lower = Number(sp.lower), upper = Number(sp.upper);
       if (!(lower > 0) || !(upper > lower)) throw new MandateError('Grille : bornes invalides (0 < lower < upper)', 'E_GRID');
       const grids = clamp(parseInt(sp.grids ?? 10, 10), 2, 200);
-      strategyParams = { lower, upper, grids, step: (upper - lower) / grids };
+      strategyParams = { lower, upper, grids, step: (upper - lower) / grids, spanInit: upper - lower };
     }
 
+    const maxLeverage = clamp(Number(cfg.maxLeverage ?? 1), 1, MAX_LEVERAGE_CAP);
+    const perTradePct = clamp(Number(cfg.perTradePct ?? 25), 1, 100);
     const m = {
       id          : 'mdt_' + (++this.#seq).toString(36) + Math.floor(this.#rng() * 1e4).toString(36),
       capital,
@@ -261,10 +266,23 @@ export class MandateEngine extends EventEmitter {
       strategy,
       strategyParams,
       stratState,
-      maxLeverage : clamp(Number(cfg.maxLeverage ?? 1), 1, MAX_LEVERAGE_CAP),
+      maxLeverage,
       allowShort  : !!cfg.allowShort,
-      perTradePct : clamp(Number(cfg.perTradePct ?? 25), 1, 100),
+      perTradePct,
       onInterrupt : cfg.onInterrupt === 'hold' ? 'hold' : 'flatten',
+      // ── Pilote de mandat (option (a) : par défaut sur les 3 stratégies) ──
+      // L'IA locale règle en continu les molettes du squelette algorithmique,
+      // dans les bornes du CONTRAT ci-dessous (immuable après création).
+      pilot          : cfg.pilot !== false,
+      pilotEveryTicks: clamp(parseInt(cfg.pilotEveryTicks ?? 6, 10), 2, 200),
+      contract       : {
+        maxPerTradePct : Math.max(perTradePct, Math.min(perTradePct * 2, 50)),  // plafond du lot pilotable (≥ base)
+        paceMin: 0.25, paceMax: 4,
+        lotScaleMin: 0.25, lotScaleMax: 2,
+        gridShiftMaxPct: 5,                       // dérive max de fenêtre par décision pilote
+        gridSpanScaleMin: 0.5, gridSpanScaleMax: 2, // largeur × plage initiale
+      },
+      pilotState     : { lastTick: -1e9, failures: 0, degraded: false, lastNote: null, lastFrame: null, advice: null, adviceTick: null, event: null, lastMark: null },
       status      : MANDATE_STATUS.RUNNING,
       cash        : capital,
       realized    : 0,
@@ -281,7 +299,7 @@ export class MandateEngine extends EventEmitter {
     const mode = m.maxLeverage > 1 ? `margin ×${m.maxLeverage}` : 'spot';
     const stratLabel = strategy === 'grid' ? `grid [${strategyParams.lower}-${strategyParams.upper}]×${strategyParams.grids}`
                     : strategy === 'dca' ? `DCA/${strategyParams.everyTicks}t` : `IA ${m.ai}`;
-    this.#logAct(m, '*', 'create', `Mandat créé — capital ${capital}, ${m.pairs.length} paire(s), ${stratLabel}, ${mode}${m.allowShort ? ' + shorts' : ''}`, capital);
+    this.#logAct(m, '*', 'create', `Mandat créé — capital ${capital}, ${m.pairs.length} paire(s), ${stratLabel}, ${mode}${m.allowShort ? ' + shorts' : ''}${m.pilot ? ' · piloté par IA' : ' · algorithmique seul'}`, capital);
     this.emit('mandate', { type: 'create', id: m.id });
     return this.#view(m);
   }
@@ -338,6 +356,141 @@ export class MandateEngine extends EventEmitter {
     return { side, conf: +Number(conf).toFixed(2), advisors, advBias, aiUsed: !!text, rationale: text || null };
   }
 
+  // ─── PILOTE DE MANDAT ────────────────────────────────────────────────────
+  // Une fois l'ordre placé, l'IA locale PILOTE la stratégie en continu : le
+  // squelette déterministe (DCA/Grid/exécuteur AI) reste l'exécutant exact ;
+  // l'IA règle ses molettes via une trame JSON stricte, validée et ÉCRÊTÉE
+  // contre le contrat du mandat. Les IA externes (modèles frontière) sont
+  // consultées aux checkpoints — et à la demande via consultMandate(), même
+  // mandat ouvert — leur lecture de l'actualité nourrit la décision locale.
+  // IA muette ou JSON invalide → repli algorithmique pur : le mandat ne
+  // meurt jamais d'une hallucination.
+  #frameSchema(m) {
+    const c = m.contract;
+    if (m.strategy === 'dca')
+      return `{"pace":nombre ${c.paceMin}-${c.paceMax} (1=cadence configurée, 2=deux fois plus vite),"lotScale":nombre ${c.lotScaleMin}-${c.lotScaleMax} (taille des lots),"freeze":true|false (geler les achats),"note":"raison en 1 phrase"}`;
+    if (m.strategy === 'grid')
+      return `{"shiftPct":nombre entre -${c.gridShiftMaxPct} et ${c.gridShiftMaxPct} (déplacer la fenêtre en %),"spanScale":nombre ${c.gridSpanScaleMin}-${c.gridSpanScaleMax} (largeur en × de la plage initiale),"gridsDelta":entier entre -20 et 20 (densité),"freeze":true|false,"note":"raison en 1 phrase"}`;
+    return `{"side":"long"|"short"|"flat","exposure":nombre 0-100 (% du capital en marge déployée),"leverage":entier 1-${m.maxLeverage},"note":"raison en 1 phrase"}`;
+  }
+  async #pilot(m) {
+    const ps = m.pilotState;
+    const symbol = m.pairs[Math.max(0, m.ticks - 1) % m.pairs.length];
+    const p = this.#pairInfo(symbol);
+    if (!p) { ps.lastTick = m.ticks; ps.event = null; return; }
+    const s = this.#snap(p);
+
+    // Conseil des IA externes : à chaque checkpoint si configurées ; sinon
+    // réutilise un conseil récent demandé à la volée (consultMandate).
+    let adv = [];
+    if (m.advisors.length && typeof this.#desk.consultAdvisors === 'function') {
+      try { const c = await this.#desk.consultAdvisors(symbol, m.advisors); adv = c.advisors || []; ps.advice = adv; ps.adviceTick = m.ticks; }
+      catch (_) { if (ps.advice) adv = ps.advice; }
+    } else if (ps.advice && ps.adviceTick != null && (m.ticks - ps.adviceTick) <= 2 * m.pilotEveryTicks) adv = ps.advice;
+if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.markPrice; return; }   // pas d'IA branchée → algorithmique pur
+
+    const eq = this.#equity(m);
+    const gain = ((eq - m.startEquity) / m.startEquity) * 100;
+    const dd = m.peakEquity > 0 ? ((m.peakEquity - eq) / m.peakEquity) * 100 : 0;
+    const st = m.stratState, g = m.strategyParams;
+    const stratCtx = m.strategy === 'dca'
+      ? `Squelette DCA ${g.side} : lot base ${m.perTradePct}% toutes les ${g.everyTicks} unités (pace ${st.pace}, lotScale ${st.lotScale}${st.freeze ? ', GELÉ' : ''}), ${st.lots} lot(s)${g.maxLots ? `/${g.maxLots}` : ''} pris.`
+      : m.strategy === 'grid'
+      ? `Squelette Grille [${roundPx(g.lower)}–${roundPx(g.upper)}] × ${g.grids}${st.freeze ? ' (achats GELÉS)' : ''}, ${st.rungs} palier(s) en inventaire, niveau ${st.lastLevel ?? '—'}${(p.markPrice < g.lower || p.markPrice > g.upper) ? ' — PRIX HORS FENÊTRE' : ''}.`
+      : `Exécuteur AI : trame courante ${st.frame ? JSON.stringify(st.frame) : 'aucune'}, ${m.positions.length} position(s) ouverte(s).`;
+    const advLines = adv.length
+      ? `Avis des conseillers externes (modèles frontière, actualité incluse) : ${adv.map(a => `${a.advisor}→${a.lean}${a.note ? ` (« ${String(a.note).slice(0, 90)} »)` : ''}`).join(' | ')}. `
+      : '';
+    const prompt =
+      `Tu es ${m.ai}, PILOTE du mandat (stratégie ${m.strategy}). Le squelette algorithmique exécute ; toi tu règles ses molettes dans les bornes du contrat. ` +
+      `Marché ${symbol} : prix ${roundPx(p.markPrice)}, RSI ${s.rsi}, momentum ${s.momPct}%. ` +
+      `Mandat : equity ${roundPx(eq)} (${gain.toFixed(2)}%), drawdown ${dd.toFixed(2)}%, cash ${roundPx(m.cash)}, tick ${m.ticks}/${m.objectives.horizonTicks}, objectif +${m.objectives.takeProfitPct}% / perte max -${m.objectives.maxLossPct}%. ` +
+      stratCtx + ' ' + (ps.event ? `Événement déclencheur : ${ps.event}. ` : '') + advLines +
+      `Réponds UNIQUEMENT avec un objet JSON de la forme ${this.#frameSchema(m)} — aucune prose hors du JSON.`;
+
+    let frame = null;
+    try {
+      const r = await this.#generate({ prompt, ai: m.ai, maxTokens: 200 });
+      const text = (typeof r === 'string') ? r : (r && r.text) ? r.text : '';
+      frame = this.#parseFrame(text);
+    } catch (_) { frame = null; }
+
+    ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.markPrice;
+    if (!frame) {
+      ps.failures++;
+      if (ps.failures >= 3 && !ps.degraded) { ps.degraded = true; this.#logAct(m, symbol, 'pilot', 'Pilote dégradé (3 réponses invalides) — squelette algorithmique pur jusqu\u2019à rétablissement'); }
+      else if (!ps.degraded) this.#logAct(m, symbol, 'pilot', `Réponse pilote invalide (${ps.failures}/3) — réglages conservés`);
+      return;
+    }
+    const applied = this.#applyFrame(m, frame);
+    ps.failures = 0; ps.degraded = false;
+    ps.lastFrame = applied;
+    ps.lastNote = typeof frame.note === 'string' ? frame.note.slice(0, 220) : null;
+    this.#logAct(m, symbol, 'pilot', `Pilote → ${JSON.stringify(applied)}${ps.lastNote ? ` — ${ps.lastNote}` : ''}`, eq);
+  }
+  #parseFrame(text) {
+    if (!text || typeof text !== 'string') return null;
+    const mt = text.match(/\{[\s\S]*\}/);
+    if (!mt) return null;
+    try { const o = JSON.parse(mt[0]); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null; }
+    catch (_) { return null; }
+  }
+  /** Valide + écrête la trame contre le contrat, applique aux molettes. */
+  #applyFrame(m, f) {
+    const c = m.contract, st = m.stratState;
+    const num = (v, d) => { const n = Number(v); return isFinite(n) ? n : d; };
+    if (m.strategy === 'dca') {
+      st.pace     = clamp(num(f.pace, st.pace ?? 1), c.paceMin, c.paceMax);
+      st.lotScale = clamp(num(f.lotScale, st.lotScale ?? 1), c.lotScaleMin, c.lotScaleMax);
+      st.freeze   = !!f.freeze;
+      st.effPct   = clamp(m.perTradePct * st.lotScale, 0.5, c.maxPerTradePct);
+      return { pace: +st.pace.toFixed(2), lotScale: +st.lotScale.toFixed(2), effPct: +st.effPct.toFixed(2), freeze: st.freeze };
+    }
+    if (m.strategy === 'grid') {
+      const g = m.strategyParams;
+      const shift      = clamp(num(f.shiftPct, 0), -c.gridShiftMaxPct, c.gridShiftMaxPct);
+      const spanScale  = clamp(num(f.spanScale, (g.upper - g.lower) / g.spanInit), c.gridSpanScaleMin, c.gridSpanScaleMax);
+      const gridsDelta = clamp(Math.trunc(num(f.gridsDelta, 0)), -20, 20);
+      const center = ((g.lower + g.upper) / 2) * (1 + shift / 100);
+      const span   = g.spanInit * spanScale;
+      const lower  = center - span / 2, upper = center + span / 2;
+      if (lower > 0 && upper > lower) {
+        const reframed = Math.abs(shift) > 1e-9 || Math.abs((upper - lower) - (g.upper - g.lower)) > 1e-9 || gridsDelta !== 0;
+        g.lower = lower; g.upper = upper;
+        g.grids = clamp(g.grids + gridsDelta, 2, 200);
+        g.step  = (g.upper - g.lower) / g.grids;
+        // Ré-armement au prochain tick — l'INVENTAIRE acheté (paliers + position
+        // à entrée moyennée) est PRÉSERVÉ tel quel : seuls les niveaux vides bougent.
+        if (reframed) st.lastLevel = null;
+      }
+      st.freeze = !!f.freeze;
+      return { window: [+g.lower.toFixed(6), +g.upper.toFixed(6)], grids: g.grids, shiftPct: +shift.toFixed(2), freeze: st.freeze };
+    }
+    // stratégie 'ai'
+    let side = ['long', 'short', 'flat'].includes(f.side) ? f.side : (st.frame ? st.frame.side : 'flat');
+    if (side === 'short' && !m.allowShort) side = 'flat';
+    const exposure = clamp(num(f.exposure, st.frame ? st.frame.exposure : 0), 0, 100);
+    const leverage = clamp(Math.trunc(num(f.leverage, st.frame ? st.frame.leverage : m.maxLeverage)) || 1, 1, m.maxLeverage);
+    st.frame = { side, exposure: +exposure.toFixed(1), leverage };
+    return { ...st.frame };
+  }
+  /** Conseil externe À LA DEMANDE sur un mandat OUVERT : les modèles frontière
+   *  livrent leur lecture (actualité incluse) ; l'avis est journalisé, mémorisé,
+   *  et déclenche une décision du pilote local dès le tick suivant. */
+  async consultMandate(id) {
+    const m = this.#get(id);
+    const symbol = m.pairs[0];
+    if (!m.advisors.length) return { pair: symbol, advisors: [], note: 'Aucun conseiller externe configuré sur ce mandat' };
+    const c = await this.#desk.consultAdvisors(symbol, m.advisors);
+    m.pilotState.advice = c.advisors || [];
+    m.pilotState.adviceTick = m.ticks;
+    m.pilotState.event = 'advice';
+    const sum = (c.advisors || []).map(a => `${a.advisor}:${a.lean}`).join(' · ');
+    this.#logAct(m, symbol, 'advice', `Conseil externe demandé — ${sum || '—'}`);
+    this.emit('mandate', { type: 'advice', id });
+    return { ...c, appliedNextTick: !!(m.pilot && m.status === MANDATE_STATUS.RUNNING) };
+  }
+
   // ─── Tick ────────────────────────────────────────────────────────────────
   async runTick(id) {
     const m = this.#get(id);
@@ -347,6 +500,18 @@ export class MandateEngine extends EventEmitter {
     // Portage + liquidations (sur toutes les positions, les prix ayant bougé).
     this.#applyFunding(m);
     this.#checkLiquidations(m);
+
+    // Pilote IA : décide aux checkpoints (K ticks) et sur événements
+    // (grid-edge, sharp-move, advice) — AVANT l'exécution du squelette.
+    if (m.pilot) {
+      const ps = m.pilotState;
+      const mk0 = this.#mark(m.pairs[0]);
+      if (mk0 != null && ps.lastMark != null && !ps.event
+          && Math.abs(mk0 - ps.lastMark) / ps.lastMark >= 0.025) ps.event = 'sharp-move';
+      if (ps.event || (m.ticks - ps.lastTick >= m.pilotEveryTicks)) {
+        try { await this.#pilot(m); } catch (e) { this.#logAct(m, '*', 'error', 'pilote: ' + e.message); }
+      }
+    }
 
     try {
       if (m.strategy === 'grid') this.#tickGrid(m);
@@ -360,13 +525,17 @@ export class MandateEngine extends EventEmitter {
     return this.#view(m);
   }
 
-  // ── Sous-stratégie : IA (comportement historique) ──
+  // ── Sous-stratégie : IA — exécuteur de la trame pilote (+ repli historique) ──
   async #tickAI(m) {
     const symbol = m.pairs[(m.ticks - 1) % m.pairs.length];
     const p = this.#pairInfo(symbol);
     if (!p) { this.#logAct(m, symbol, 'skip', 'Paire indisponible'); return; }
     const mark = p.markPrice;
 
+    // Pilote actif : converger vers la trame {side, exposure, leverage}.
+    if (m.pilot && m.stratState.frame && !m.pilotState.degraded) { this.#execFrame(m, symbol, mark, m.stratState.frame); return; }
+
+    // Repli historique : décision directe BUY/SELL/HOLD (pilote absent ou dégradé).
     const dec = await this.#decide(m, symbol);
     const held = m.positions.find(x => x.pair === symbol);
     let action = 'hold', detail = dec.rationale || `Biais ${dec.side} (${Math.round(dec.conf * 100)}%)`;
@@ -391,6 +560,39 @@ export class MandateEngine extends EventEmitter {
     }
     this.#logAct(m, symbol, action, detail, this.#equity(m));
   }
+  // Convergence vers la trame pilote — UN pas par tick (anti sur-trading).
+  #execFrame(m, symbol, mark, f) {const held = m.positions.find(x => x.pair === symbol);
+    const deployed = m.positions.reduce((a, x) => a + x.margin, 0);
+    const target = m.capital * (f.exposure / 100);
+    const expoNow = (deployed / m.capital) * 100;
+
+    if (f.side === 'flat' || f.exposure <= 0) {
+      if (held) { const pnl = this.#closePos(m, held, mark); this.#logAct(m, symbol, 'close', `Pilote : mise à plat — clôture ${held.side.toUpperCase()} @ ${roundPx(mark)} (PnL ${roundPx(pnl)})`, this.#equity(m)); }
+      else this.#logAct(m, symbol, 'hold', 'Pilote : exposition cible 0 — à plat', this.#equity(m));
+      return;
+    }
+    if (held && held.side !== f.side) {
+      const pnl = this.#closePos(m, held, mark);
+      this.#logAct(m, symbol, 'close', `Pilote : bascule ${held.side}→${f.side} — clôture @ ${roundPx(mark)} (PnL ${roundPx(pnl)})`, this.#equity(m));
+      return;                                            // reconstruction dans le nouveau sens aux ticks suivants
+    }
+    const stepPct = m.stratState.effPct ?? m.perTradePct;
+    if (deployed + 1e-9 < target) {
+      const gapPct = ((target - deployed) / m.capital) * 100;
+      if (gapPct < stepPct * 0.2) { this.#logAct(m, symbol, 'hold', `Pilote : expo ${expoNow.toFixed(0)}% ≈ cible ${f.exposure}% (${f.side})`, this.#equity(m)); return; }
+      const r = this.#openOrAdd(m, symbol, f.side, mark, Math.min(stepPct, gapPct), f.leverage);
+      if (r.ok) this.#logAct(m, symbol, f.side, `Pilote : ${r.added ? 'renforce' : 'ouvre'} ${f.side.toUpperCase()} ${roundPx(r.addSize)} @ ${roundPx(mark)} ×${r.pos.leverage} (expo ${expoNow.toFixed(0)}%→${f.exposure}%)`, this.#equity(m));
+      else this.#logAct(m, symbol, 'hold', r.reason, this.#equity(m));
+      return;
+    }
+    if (held && deployed > target * 1.15) {
+      const excess = deployed - target;
+      const pnl = this.#reducePosition(m, held, held.size * Math.min(1, excess / held.margin), mark);
+      this.#logAct(m, symbol, 'close', `Pilote : réduit vers ${f.exposure}% d'exposition (PnL ${roundPx(pnl)})`, this.#equity(m));
+      return;
+    }
+    this.#logAct(m, symbol, 'hold', `Pilote : expo ${expoNow.toFixed(0)}% / cible ${f.exposure}% (${f.side}) — maintien`, this.#equity(m));
+  }
 
   // ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
   #tickDCA(m) {
@@ -400,10 +602,12 @@ export class MandateEngine extends EventEmitter {
     const mark = p.markPrice;
     const sp = m.strategyParams, st = m.stratState;
     const side = sp.side === 'short' ? 'short' : 'long';
-    const due = ((m.ticks - 1) % sp.everyTicks) === 0;
+    if (st.freeze) { this.#logAct(m, symbol, 'hold', 'DCA — achats gelés par le pilote', this.#equity(m)); return; }
+    const effEvery = Math.max(1, Math.round(sp.everyTicks / (st.pace || 1)));   // cadence pilotée
+    const due = ((m.ticks - 1) % effEvery) === 0;
     if (!due) { this.#logAct(m, symbol, 'hold', 'DCA — en attente du prochain lot', this.#equity(m)); return; }
     if (sp.maxLots > 0 && st.lots >= sp.maxLots) { this.#logAct(m, symbol, 'hold', `DCA — ${st.lots}/${sp.maxLots} lots atteints`, this.#equity(m)); return; }
-    const r = this.#openOrAdd(m, symbol, side, mark);
+    const r = this.#openOrAdd(m, symbol, side, mark, st.effPct ?? null);        // taille de lot pilotée (écrêtée au contrat)
     if (r.ok) { st.lots++; this.#logAct(m, symbol, side, `DCA lot #${st.lots} ${r.added ? 'ajouté' : 'ouvert'} ${roundPx(r.addSize)} @ ${roundPx(mark)}`, this.#equity(m)); }
     else this.#logAct(m, symbol, 'hold', r.reason, this.#equity(m));
   }
@@ -415,14 +619,19 @@ export class MandateEngine extends EventEmitter {
     if (!p) { this.#logAct(m, symbol, 'skip', 'Paire indisponible'); return; }
     const mark = p.markPrice;
     const g = m.strategyParams, st = m.stratState;
-    if (mark < g.lower || mark > g.upper) { this.#logAct(m, symbol, 'hold', `Hors grille (${roundPx(mark)} hors [${g.lower}, ${g.upper}])`, this.#equity(m)); return; }
+    if (mark < g.lower || mark > g.upper) {
+      if (m.pilot && !m.pilotState.event) m.pilotState.event = 'grid-edge';   // le pilote pourra re-cadrer la fenêtre
+      this.#logAct(m, symbol, 'hold', `Hors grille (${roundPx(mark)} hors [${roundPx(g.lower)}, ${roundPx(g.upper)}])`, this.#equity(m));
+      return;
+    }
     const level = Math.max(0, Math.min(g.grids - 1, Math.floor((mark - g.lower) / g.step)));
     if (st.lastLevel === null) { st.lastLevel = level; this.#logAct(m, symbol, 'hold', `Grille armée au niveau ${level}/${g.grids}`, this.#equity(m)); return; }
 
     if (level < st.lastLevel) {                        // prix en baisse → acheter les paliers franchis
+      if (st.freeze) { st.lastLevel = level; this.#logAct(m, symbol, 'hold', `Grille gelée par le pilote — pas d'achat (niveau ${level})`, this.#equity(m)); return; }
       const steps = st.lastLevel - level;
       let bought = 0;
-      for (let i = 0; i < steps; i++) { const r = this.#openOrAdd(m, symbol, 'long', mark); if (r.ok) bought++; else break; }
+      for (let i = 0; i < steps; i++) { const r = this.#openOrAdd(m, symbol, 'long', mark, st.effPct ?? null); if (r.ok) bought++; else break; }
       st.rungs = (st.rungs || 0) + bought;
       st.lastLevel = level;
       this.#logAct(m, symbol, 'long', `Grille : achat ${bought} palier(s) @ ${roundPx(mark)} (niveau ${level})`, this.#equity(m));
@@ -553,7 +762,17 @@ export class MandateEngine extends EventEmitter {
       objectives: m.objectives, onInterrupt: m.onInterrupt, perTradePct: m.perTradePct,
       maxLeverage: m.maxLeverage, allowShort: m.allowShort,
       strategy: m.strategy, strategyParams: m.strategyParams,
-      stratState: { lots: m.stratState.lots, rungs: m.stratState.rungs, level: m.stratState.lastLevel },
+      stratState: { lots: m.stratState.lots, rungs: m.stratState.rungs, level: m.stratState.lastLevel,
+                    pace: m.stratState.pace, lotScale: m.stratState.lotScale, freeze: m.stratState.freeze,
+                    effPct: m.stratState.effPct, frame: m.stratState.frame },
+      pilot: {
+        enabled : !!m.pilot, everyTicks: m.pilotEveryTicks,
+        lastTick: m.pilotState.lastTick > 0 ? m.pilotState.lastTick : null,
+        note    : m.pilotState.lastNote, frame: m.pilotState.lastFrame,
+        degraded: m.pilotState.degraded, failures: m.pilotState.failures,
+        advice  : (m.pilotState.advice || []).map(a => ({ advisor: a.advisor, lean: a.lean, note: a.note ? String(a.note).slice(0, 160) : null })),
+        adviceTick: m.pilotState.adviceTick,
+      },
       ticks: m.ticks,
       positions: m.positions.map(p => {
         const mk = this.#mark(p.pair) || 0;
