@@ -262,9 +262,11 @@ export class TradingDesk extends EventEmitter {
     const notes = [];
     for (const advisor of list) {
       const prompt =
-        `En tant que conseiller ${advisor}, analyse ${symbol} (prix ${roundPx(p.markPrice)}, ` +
-        `RSI ${s.rsi}, momentum ${s.momPct}%). Donne un avis bref (1 phrase) et un biais buy/sell/neutre.`;
-      const text = await this.#ask(prompt, advisor, 140);
+        `Tu es ${advisor}, modèle frontière consulté comme conseiller de marché externe. ` +
+        `Appuie-toi sur l'actualité et toute information récente à ta disposition (news, macro, sentiment, on-chain) concernant ${symbol}. ` +
+        `Contexte local : prix ${roundPx(p.markPrice)}, RSI ${s.rsi}, momentum ${s.momPct}%. ` +
+        `Donne un avis bref (1-2 phrases) et un biais buy/sell/neutre.`;
+      const text = await this.#ask(prompt, advisor, 180);
       const lean = this.#lean(text);
       notes.push({
         advisor,
