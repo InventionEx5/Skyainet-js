@@ -387,7 +387,8 @@ export class MandateEngine extends EventEmitter {
       try { const c = await this.#desk.consultAdvisors(symbol, m.advisors); adv = c.advisors || []; ps.advice = adv; ps.adviceTick = m.ticks; }
       catch (_) { if (ps.advice) adv = ps.advice; }
     } else if (ps.advice && ps.adviceTick != null && (m.ticks - ps.adviceTick) <= 2 * m.pilotEveryTicks) adv = ps.advice;
-if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.markPrice; return; }   // pas d'IA branchée → algorithmique pur
+
+    if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.markPrice; return; }   // pas d'IA branchée → algorithmique pur
 
     const eq = this.#equity(m);
     const gain = ((eq - m.startEquity) / m.startEquity) * 100;
@@ -427,6 +428,8 @@ if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.m
     ps.lastFrame = applied;
     ps.lastNote = typeof frame.note === 'string' ? frame.note.slice(0, 220) : null;
     this.#logAct(m, symbol, 'pilot', `Pilote → ${JSON.stringify(applied)}${ps.lastNote ? ` — ${ps.lastNote}` : ''}`, eq);
+    // Robinet Data Factory : échantillon vérifiable cockpit→trame→résultat (fire-and-forget).
+    this.emit('sample', { id: m.id, tick: m.ticks, strategy: m.strategy, prompt, frame: applied, note: ps.lastNote, gain, equity: +eq.toFixed(2) });
   }
   #parseFrame(text) {
     if (!text || typeof text !== 'string') return null;
@@ -561,7 +564,8 @@ if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.m
     this.#logAct(m, symbol, action, detail, this.#equity(m));
   }
   // Convergence vers la trame pilote — UN pas par tick (anti sur-trading).
-  #execFrame(m, symbol, mark, f) {const held = m.positions.find(x => x.pair === symbol);
+  #execFrame(m, symbol, mark, f) {
+    const held = m.positions.find(x => x.pair === symbol);
     const deployed = m.positions.reduce((a, x) => a + x.margin, 0);
     const target = m.capital * (f.exposure / 100);
     const expoNow = (deployed / m.capital) * 100;
@@ -596,7 +600,7 @@ if (!this.#generate) { ps.lastTick = m.ticks; ps.event = null; ps.lastMark = p.m
 
   // ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
   #tickDCA(m) {
-    const symbol = m.pairs[0];
+const symbol = m.pairs[0];
     const p = this.#pairInfo(symbol);
     if (!p) { this.#logAct(m, symbol, 'skip', 'Paire indisponible'); return; }
     const mark = p.markPrice;
