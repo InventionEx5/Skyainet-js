@@ -1,4 +1,4 @@
-// packages/model/src/eval_harness.js
+// packages/model/src/thevie/eval_harness.js
 // =====================================================
 // Harnais d'évals interne — mesure un backend de génération sur les tâches
 // VÉRIFIABLES du programme, en pilotant le VRAI code de production comme
