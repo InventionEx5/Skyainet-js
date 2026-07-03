@@ -1,4 +1,4 @@
-// packages/model/src/living_reserve.js
+// packages/model/src/thevie/living_reserve.js
 // =====================================================
 // Réserve Vivante — registre des Modules Vivants (adaptateurs LoRA/GGUF).
 // Un Module Vivant = un adaptateur adressé par contenu + un manifeste
@@ -179,6 +179,52 @@ export class LivingReserve {
   }
 }
 
+// ─── Pipeline T369 — boucle de feedback de bout en bout ──────────────────────
+// Le « chirurgien/régulateur » T369 en action. Chaîne : évaluer (harnais) →
+// enregistrer le score → décider la promotion (gâchée par le score). Testable en
+// mock : `generate` représente l'inférence du module candidat (base + adaptateur).
+export async function t369FeedbackCycle(reserve, id, generate, opts = {}) {
+  const { runEvals } = await import('#eval_harness');
+  const report = await runEvals(generate, { print: opts.print ?? false });   // 1) mesurer
+  reserve.recordEval(id, report);                                            // 2) enregistrer (score + santé)
+  const decision = reserve.promote(id, { margin: opts.margin ?? 2 });        // 3) décider
+  return { id, overall: report.overall, score: reserve.get(id).score, promoted: decision.promoted, decision };
+}
+
+// ─── Data Factory — robinet du daemon de trading vers un JSONL d'entraînement ──
+// Capte les échantillons cockpit→trame→résultat émis par MandateEngine ('sample'),
+// ne garde que le SIGNAL VÉRIFIÉ (récompense réelle : gain > 0 par défaut), et les
+// met au format `messages` attendu par train_adapter.py. Brancher via .tap(engine),
+// lire via .jsonl, écrire via .flushToFile().
+export class DataFactory {
+  #buffer = []; #seen = 0; #kept = 0; #verify;
+  constructor({ verify } = {}) {
+    this.#verify = typeof verify === 'function' ? verify : (s) => (s.gain ?? 0) > 0;
+  }
+  tap(engine) { engine.on('sample', (s) => this.ingest(s)); return this; }
+  ingest(sample) {
+    this.#seen++;
+    if (!sample || !sample.prompt || !sample.frame) return false;
+    if (!this.#verify(sample)) return false;                                 // filtre : récompense vérifiée
+    this.#buffer.push(JSON.stringify({
+      messages: [
+        { role: 'user',      content: sample.prompt },
+        { role: 'assistant', content: JSON.stringify(sample.frame) },
+      ],
+    }));
+    this.#kept++; return true;
+  }
+  get jsonl() { return this.#buffer.join('\n'); }
+  stats() { return { seen: this.#seen, kept: this.#kept, buffered: this.#buffer.length }; }
+  clear() { const n = this.#buffer.length; this.#buffer = []; return n; }
+  async flushToFile(path) {
+    const { writeFile } = await import('fs/promises');
+    const body = this.#buffer.length ? this.#buffer.join('\n') + '\n' : '';
+    await writeFile(path, body, 'utf8');
+    const n = this.#buffer.length; this.#buffer = []; return { path, written: n };
+  }
+}
+
 export default LivingReserve;
 
 // Démo/validation autonome : `node living_reserve.js`
@@ -222,4 +268,45 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   console.log('\nstats finales :', JSON.stringify(R.stats()));
   console.log('✓ Réserve Vivante — toutes les vérifs passent');
+}
+
+// Démo (b) pipeline T369 de bout en bout + (c) Data Factory : `node living_reserve.js`
+if (import.meta.url === `file://${process.argv[1]}`) {
+  (async () => {
+    const A = (c, l) => { console.log((c ? '✓' : '✗ ÉCHEC'), l); if (!c) process.exit(1); };
+    const superset = JSON.stringify({ pace:1.5, lotScale:1.2, shiftPct:2, spanScale:1, gridsDelta:0, side:'long', exposure:40, leverage:2, action:'buy', confidence:0.7, note:'ok' });
+    const proposal = JSON.stringify({ title:'Réduire le quorum', description:'Passer le quorum à 200.', category:'governance', durationDays:7 });
+    const goodGen = async ({ prompt }) => /proposition|gouvernance|category/i.test(prompt) ? proposal : superset;
+    const weakGen = async () => 'le marché me semble haussier';
+
+    // ── (b) Pipeline T369 : runEvals → recordEval → promote ──
+    const R2 = new LivingReserve();
+    R2.register({ id: 'cand_good', domain: 'ai', owner: 'thevie',  sizeBytes: 40e6 });
+    R2.register({ id: 'cand_weak', domain: 'ai', owner: 'loraevo', sizeBytes: 40e6 });
+    const cg = await t369FeedbackCycle(R2, 'cand_good', goodGen);
+    A(cg.promoted === true, 'pipeline T369 : bon module évalué → enregistré → PROMU');
+    const cw = await t369FeedbackCycle(R2, 'cand_weak', weakGen);
+    A(cw.promoted === false, 'pipeline T369 : module faible → score bas → promotion refusée');
+    A(R2.active('ai').id === 'cand_good', 'pipeline T369 : le meilleur module reste actif (boucle bouclée)');
+    console.log(`   (bon: score ${cg.score.toFixed(1)} · faible: score ${cw.score.toFixed(1)})`);
+
+    // ── (c) Data Factory : robinet du daemon → JSONL vérifié ──
+    const { TradingDesk }   = await import('#trading_desk');
+    const { MandateEngine } = await import('#trading_mandate');
+    const OBJ = { horizonTicks:1000, takeProfitPct:100000, maxLossPct:99, maxDrawdownPct:99 };
+    const desk = new TradingDesk();
+    const eng  = new MandateEngine({ desk, generate: async () => superset });
+    const factory = new DataFactory().tap(eng);
+    desk.setMarkPrice('ETH/USDC', 3200);
+    const mdt = eng.createMandate({ capital:1000, pairs:['ETH/USDC'], strategy:'dca', strategyParams:{everyTicks:2}, perTradePct:10, pilotEveryTicks:2, objectives:OBJ });
+    for (const px of [3200,3300,3400,3500,3600,3700]) { desk.setMarkPrice('ETH/USDC', px); await eng.runTick(mdt.id); }
+    const st = factory.stats();
+    A(st.seen > 0, 'data factory : échantillons captés du daemon (cockpit→trame→résultat)');
+    A(st.kept > 0, 'data factory : signal vérifié (gain>0) retenu, reste filtré');
+    const first = JSON.parse(factory.jsonl.split('\n')[0]);
+    A(first.messages && first.messages[0].role === 'user' && first.messages[1].role === 'assistant', 'data factory : format JSONL {messages:[user,assistant]}');
+    A(first.messages[0].content.includes('PILOTE'), 'data factory : le prompt cockpit est présent (entraînable)');
+    console.log(`   (data factory: ${st.seen} captés, ${st.kept} retenus → ${factory.jsonl.split('\n').length} lignes JSONL)`);
+    console.log('✓ Pipeline T369 + Data Factory — toutes les vérifs passent');
+  })();
 }
