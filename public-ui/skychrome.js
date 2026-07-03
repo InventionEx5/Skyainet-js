@@ -1,3 +1,4 @@
+// public-ui/skychrome.js
 "use strict";
 /* =====================================================
    skychrome.js — Chrome partagé SkyAInet
