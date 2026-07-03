@@ -147,6 +147,7 @@
     "#mixed_panel": "./mixed_panel.js",
     "#society_orchestrator": "./society_orchestrator.js",
     "#trading_desk": "./trading_desk.js",
-    "#trading_mandate": "./trading_mandate.js"
+    "#trading_mandate": "./trading_mandate.js",
+    "#uniswap_v4": "./uniswap_v4.js"
   }
 }
