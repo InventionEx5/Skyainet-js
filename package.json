@@ -149,6 +149,7 @@
     "#trading_desk": "./trading_desk.js",
     "#trading_mandate": "./trading_mandate.js",
     "#eval_harness": "./eval_harness.js",
+    "#living_reserve": "./living_reserve.js",
     "#uniswap_v4": "./uniswap_v4.js"
   }
 }
