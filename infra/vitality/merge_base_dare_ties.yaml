@@ -1,0 +1,45 @@
+# infra/vitality/merge_base_dare_ties.yaml
+#
+# Base rÃ©sidente Â« sur mesure Â» de SkyAInet â€” fusion DARE-TIES.
+# Fond une ou plusieurs spÃ©cialisations (deltas) dans Qwen3-8B avec peu
+# d'interfÃ©rence : chaque delta est sparsifiÃ© (density), puis fusionnÃ© par
+# consensus de signe (TIES), aprÃ¨s abandon alÃ©atoire d'une part des deltas (DARE).
+#
+# PRÃ‰REQUIS : au moins un ingrÃ©dient spÃ©cialisÃ© Ã€ TOI, obtenu via train_adapter.py
+#   puis fusionnÃ© en checkpoint plein (mode Â« merge Â»). DeepSeek n'est JAMAIS
+#   fusionnÃ© ici â€” architecture MoE 671 Md incompatible : il entre par distillation
+#   DANS cet adaptateur (cf. train_adapter.py).
+#
+# RÃˆGLE DE COMPATIBILITÃ‰ : tous les ingrÃ©dients doivent partir de Qwen3-8B
+#   (mÃªme tokenizer, mÃªme architecture texte), en bf16/fp16. Exclure les variantes
+#   -GGUF / -FP8 (dÃ©jÃ  quantisÃ©es) et Qwen3-VL-8B (architecture vision-langage).
+#
+# LANCER (CPU, aucun GPU requis pour la fusion elle-mÃªme) :
+#   mergekit-yaml infra/vitality/merge_base_dare_ties.yaml ./v0-out --lazy-unpickle
+# PUIS convertir en GGUF + quantiser (section AVAL de train_adapter.py).
+#
+# MOLETTES â€” Ã  rÃ©gler contre le harnais d'Ã©vals interne, jamais Ã  l'aveugle :
+#   weight  = dose de chaque spÃ©cialisation.
+#   density = fraction de deltas conservÃ©s (bas = moins d'interfÃ©rence,
+#             haut = plus de spÃ©cialisation).
+
+base_model: Qwen/Qwen3-8B
+merge_method: dare_ties
+dtype: bfloat16
+tokenizer_source: base
+parameters:
+  int8_mask: true
+  normalize: true
+models:
+  # SpÃ©cialisation distillÃ©e de DeepSeek (adaptateur â†’ checkpoint plein).
+  # Remplace ce chemin par la sortie de : train_adapter.py merge ...
+  - model: ./skyai-deepseek-distill-merged
+    parameters:
+      weight: 0.55
+      density: 0.55
+  # (Optionnel) Fine-tune tiers Qwen3-8B utile Ã  ton domaine (code, mathâ€¦),
+  # VÃ‰RIFIÃ‰ mÃªme tokenizer/architecture. Sinon, laisse ce bloc commentÃ©.
+  # - model: <org/fine-tune-Qwen3-8B>
+  #   parameters:
+  #     weight: 0.30
+  #     density: 0.50
