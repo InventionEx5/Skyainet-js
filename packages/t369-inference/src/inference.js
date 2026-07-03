@@ -134,7 +134,7 @@ export class T369Inference {
 // =====================================================
 
 export const BackendKind = Object.freeze({
-  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh', Embedded: 'embedded',
+  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh', Embedded: 'embedded', LlamaCpp: 'llama-cpp',
 });
 
 export class InferenceBackend {
@@ -262,6 +262,65 @@ export class EmbeddedEngineBackend extends InferenceBackend {
   async dispose()              { await this.engine.stop(); }
 }
 
+// Backend node-llama-cpp (souverain, EN-PROCESSUS) : charge un GGUF directement
+// dans le processus Node — pas de serveur natif séparé. Donne le contrôle DIRECT
+// des grammaires GBNF depuis JS (sortie structurée GARANTIE : trames du Pilote,
+// éditions de code, configs du cipher…). Import PARESSEUX : node-llama-cpp n'est
+// chargé qu'à l'init, donc l'absence du paquet ne casse PAS le démarrage.
+// Alternative sans nouveau code : llama-server derrière RemoteHTTPBackend (GPU,
+// streaming, isolation) — voir ce backend plus haut.
+export class LlamaCppBackend extends InferenceBackend {
+  constructor(opts = {}) {
+    super(BackendKind.LlamaCpp);
+    this.modelPath   = opts.modelPath || null;   // chemin d'un .gguf (base ou fusion mergekit)
+    this.contextSize = opts.contextSize ?? 4096;
+    this.gpuLayers   = opts.gpuLayers;            // undefined = auto ; 0 = CPU pur
+    this._llama = null; this._model = null; this._grammars = new Map();
+  }
+  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true, grammar: true, kind: 'llama-cpp' }; }
+  async init() {
+    if (this._model) { this.ready = true; return this; }
+    if (!this.modelPath) throw new Error('[LlamaCppBackend] modelPath (.gguf) requis');
+    const { getLlama } = await import('node-llama-cpp');   // paresseux : pas d'effet au chargement du module
+    this._llama = await getLlama();
+    this._model = await this._llama.loadModel({
+      modelPath: this.modelPath,
+      ...(this.gpuLayers !== undefined ? { gpuLayers: this.gpuLayers } : {}),
+    });
+    this.ready = true; return this;
+  }
+  // Compile (et met en cache) une grammaire GBNF — rend une sortie non conforme
+  // structurellement impossible.
+  async _grammarFor(gbnf) {
+    if (!gbnf) return undefined;
+    if (this._grammars.has(gbnf)) return this._grammars.get(gbnf);
+    const g = await this._llama.createGrammar({ grammar: gbnf });
+    this._grammars.set(gbnf, g);
+    return g;
+  }
+  // opts : { maxNewTokens|maxTokens, temperature, topP, topK, grammar (chaîne GBNF) }
+  async generate(prompt, opts = {}) {
+    if (!this._model) await this.init();
+    const { LlamaCompletion } = await import('node-llama-cpp');
+    const grammar = await this._grammarFor(opts.grammar);
+    const context = await this._model.createContext({ contextSize: this.contextSize });
+    try {
+      const completion = new LlamaCompletion({ contextSequence: context.getSequence() });
+      const text = await completion.generateCompletion(prompt, {
+        maxTokens  : opts.maxNewTokens ?? opts.maxTokens ?? 256,
+        temperature: opts.temperature ?? 0.7,
+        topP       : opts.topP,
+        topK       : opts.topK,
+        grammar,
+      });
+      return { text, tokensGenerated: null, source: 'llama-cpp', backend: 'llama-cpp' };
+    } finally {
+      await context.dispose();   // chaque appel indépendant : pas de fuite d'état KV
+    }
+  }
+  async dispose() { await this._model?.dispose?.(); this._model = null; this.ready = false; }
+}
+
 export class InferenceCore {
   constructor(opts = {}) {
     this.backends = new Map();
@@ -273,6 +332,7 @@ export class InferenceCore {
     if (opts.endpoint)   this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
     if (opts.meshRouter) this.register(BackendKind.Mesh, new MeshBackend(opts.meshRouter, opts.mesh || {}));
     if (opts.engine || opts.embeddedEngine) this.register(BackendKind.Embedded, new EmbeddedEngineBackend(opts.engine ? { engine: opts.engine } : (opts.embeddedEngine || {})));
+    if (opts.llamaModelPath) this.register(BackendKind.LlamaCpp, new LlamaCppBackend({ modelPath: opts.llamaModelPath, ...(opts.llama || {}) }));
   }
   register(kind, backend) { this.backends.set(kind, backend); return this; }
   get backend() { return this.backends.get(this.kind); }
@@ -280,7 +340,7 @@ export class InferenceCore {
 
   // Sélection auto selon les capacités disponibles : natif > webgpu > local-js > wasm
   async autoSelect() {
-    const order = [BackendKind.Native, BackendKind.WebGPU, BackendKind.LocalJS, BackendKind.Wasm];
+    const order = [BackendKind.LlamaCpp, BackendKind.Native, BackendKind.WebGPU, BackendKind.LocalJS, BackendKind.Wasm];
     for (const k of order) {
       const b = this.backends.get(k);
       if (b) { try { await b.init(); this.kind = k; return k; } catch (_) { /* indispo -> suivant */ } }
