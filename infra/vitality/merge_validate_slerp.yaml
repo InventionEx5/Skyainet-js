@@ -1,0 +1,35 @@
+# infra/vitality/merge_validate_slerp.yaml
+#
+# Recette de VALIDATION du pipeline (Phase 0) â€” interpolation sphÃ©rique (SLERP)
+# de deux checkpoints Qwen3-8B compatibles. But : Ã©prouver toute la chaÃ®ne
+# merge â†’ GGUF â†’ node-llama-cpp sur matÃ©riel modeste, AVANT d'avoir une
+# spÃ©cialisation Ã  toi. Ne produit pas une base Â« meilleure Â» : juste un
+# artefact valide pour rÃ´der le pipeline (jetable).
+#
+# ASTUCE si tu n'as pas encore de second fine-tune sous la main : pour tester
+#   UNIQUEMENT la mÃ©canique du pipeline, tu peux mettre Qwen/Qwen3-8B et
+#   Qwen/Qwen3-8B-Base comme deux sources. Le rÃ©sultat n'est pas un bon modÃ¨le
+#   (la base dilue l'instruct), mais la chaÃ®ne se valide de bout en bout.
+#
+# N = num_hidden_layers de Qwen3-8B : lis-le dans le config.json du modÃ¨le,
+#   ne le devine pas.
+#
+# LANCER :
+#   mergekit-yaml infra/vitality/merge_validate_slerp.yaml ./slerp-out --lazy-unpickle
+
+merge_method: slerp
+base_model: Qwen/Qwen3-8B
+dtype: bfloat16
+slices:
+  - sources:
+      - model: Qwen/Qwen3-8B
+        layer_range: [0, N]
+      - model: "<org/fine-tune-Qwen3-8B>"   # 2e checkpoint Qwen3-8B compatible
+        layer_range: [0, N]
+parameters:
+  t:
+    - filter: self_attn
+      value: [0, 0.5, 0.3, 0.7, 1]
+    - filter: mlp
+      value: [1, 0.5, 0.7, 0.3, 0]
+    - value: 0.5
