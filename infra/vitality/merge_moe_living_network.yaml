@@ -1,0 +1,31 @@
+# infra/vitality/merge_moe_living_network.yaml
+#
+# Â« Dynamic Sparse Living Network Â» â€” assemble plusieurs experts Qwen3-8B
+# (tes spÃ©cialisations) sous un routeur.
+#
+# FEUILLE DE ROUTE, PAS PHASE 0 : un MoE de 2 experts 8B â‰ˆ 13-14 Md de
+#   paramÃ¨tres, 4 experts â‰ˆ 24 Md+. Ã‡a ne tourne PAS sur 16 Go â€” objet de la
+#   v2 matÃ©rielle. La recette est prÃªte pour ce moment-lÃ .
+#
+# gate_mode:
+#   hidden      = routeur bÃ¢ti depuis l'Ã©tat cachÃ© des prompts (meilleur).
+#   cheap_embed = variante plus lÃ©gÃ¨re (depuis les embeddings).
+#
+# Chaque expert doit partir de Qwen3-8B (mÃªme rÃ¨gle de compatibilitÃ© que les
+#   autres recettes). Les positive_prompts orientent le routage vers l'expert.
+#
+# LANCER (quand la VRAM suit) :
+#   mergekit-moe infra/vitality/merge_moe_living_network.yaml ./moe-out
+
+base_model: Qwen/Qwen3-8B
+gate_mode: hidden
+dtype: bfloat16
+experts:
+  - source_model: ./skyai-trading-spec
+    positive_prompts:
+      - "analyse ce marchÃ©"
+      - "ajuste la stratÃ©gie du mandat"
+  - source_model: ./skyai-code-spec
+    positive_prompts:
+      - "corrige ce module"
+      - "Ã©cris un test unitaire"
