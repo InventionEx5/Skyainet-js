@@ -39,6 +39,21 @@ export function deriveIntents({ evalReport = null, reserve = null, domains = ['d
   return intents.sort((a, b) => b.weight - a.weight).slice(0, max);
 }
 
+// Remplit le seedUrl (et seeds[]) des intentions depuis une recherche web.
+// `search` : async (query, max) => [{ title, snippet, url? }]  (ex. WebSearch.search).
+// Une intention sans résultat exploitable reste sans seed → explore l'ignore.
+export async function seedIntents(intents, search, { perIntent = 1 } = {}) {
+  if (typeof search !== 'function') throw new Error('[Surf] search requis : async (query, max) => [{ url? }]');
+  for (const intent of intents) {
+    try {
+      const results = await search(intent.topic, perIntent);
+      const urls = (Array.isArray(results) ? results : []).map((r) => r && r.url).filter(Boolean);
+      if (urls.length) { intent.seedUrl = urls[0]; intent.seeds = urls; }
+    } catch (_) { /* pas de seed pour cette intention */ }
+  }
+  return intents;
+}
+
 // ─── (2) Superviseur T369 : valide + attribue un BUDGET (limite, refuse rarement) ─
 export class SurfSupervisor {
   constructor({ classify = null, budgets = {} } = {}) {
@@ -127,12 +142,20 @@ export async function surfDistill({ pages, triad = {}, verify = null, minVitalit
 }
 
 // ─── Orchestration complète (une passe) : lacune → budget → surf → distill ───
-export async function runSurf({ intent, supervisor, session, triad, verify, minVitality }) {
+export async function runSurf({ intent, supervisor, session, triad, verify, minVitality, search = null }) {
+  // Seed à la volée depuis une recherche web si l'intention n'en a pas.
+  if (!intent.seedUrl && typeof search === 'function') {
+    try {
+      const results = await search(intent.topic, 1);
+      const url = (Array.isArray(results) ? results : []).map((r) => r && r.url).filter(Boolean)[0];
+      if (url) intent.seedUrl = url;
+    } catch (_) { /* pas de seed */ }
+  }
   const auth = supervisor.authorize(intent);
   if (!auth.ok) return { ok: false, reason: auth.reason, risk: auth.risk };
   const crawl = await session.explore(intent, auth.budget);
   const distilled = await surfDistill({ pages: crawl.kept, triad, verify, minVitality });
-  return { ok: true, risk: auth.risk, budget: auth.budget, crawl, distilled };
+  return { ok: true, risk: auth.risk, budget: auth.budget, seedUrl: intent.seedUrl, crawl, distilled };
 }
 
 function hashText(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
@@ -150,7 +173,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     A(intents.some(i => i.source === 'reserve-gap' && i.topic.includes('grid')), 'curiosité : domaine sans module actif (grid) → couverture manquante');
 
     // (2) Superviseur T369 : budget selon le risque, refuse le bloqué
-    const sup = new SurfSupervisor({ classify: (i) => i.topic.includes('gov') ? SurfRisk.Medium : SurfRisk.Low });
+    const sup = new SurfSupervisor({ classify: (i) => i.topic.includes('gouv') ? SurfRisk.Medium : SurfRisk.Low });
     const a1 = sup.authorize({ topic: 'gouvernance on-chain' });
     A(a1.ok && a1.budget.maxPages === 7, 'superviseur : risque moyen → budget limité (12→7 pages), pas refusé');
     const supBlock = new SurfSupervisor({ classify: () => SurfRisk.Blocked });
@@ -184,6 +207,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const full = await runSurf({ intent: { topic: 'gouvernance', seedUrl: 'seed' }, supervisor: sup, session: new SurfSession({ fetcher: mockFetcher }), triad, minVitality: 0.6 });
     A(full.ok && full.distilled.kept >= 1, 'orchestration : lacune → budget → surf → distill (une passe complète)');
     console.log(`   (surf: budget ${a1.budget.maxPages}p, ${crawl.kept.length} gardées, ${distilled.kept} distillées → JSONL)`);
+    // (5b) Seeds depuis une recherche web (web_search.js) → seedUrl rempli
+    const mockSearch = async (topic) => [{ title: 't', snippet: 's', url: 'https://ex.org/' + encodeURIComponent(topic.slice(0, 8)) }];
+    const seeded = await seedIntents(deriveIntents({ evalReport, reserve }), mockSearch);
+    A(seeded[0].seedUrl && seeded[0].seedUrl.startsWith('https://ex.org/'), 'seeds : deriveIntents → seedUrl rempli depuis une recherche web');
+
+    // runSurf auto-seed : intention sans seedUrl + search → seed à la volée → crawl → distill
+    const seedFetcher = async (url) => ({ url, text: 'X'.repeat(400) + ' contenu utile', links: [], allowed: true });
+    const autoTriad = { extract: async (p) => 'extrait de ' + p.url, score: async () => 0.9 };
+    const autoRun = await runSurf({ intent: { topic: 'gouvernance décentralisée' }, supervisor: sup, session: new SurfSession({ fetcher: seedFetcher }), triad: autoTriad, minVitality: 0.6, search: mockSearch });
+    A(autoRun.ok && autoRun.seedUrl && autoRun.distilled.kept === 1, 'runSurf : intention sans seed → recherche → seed → crawl → distill');
+    console.log(`   (seed: "${seeded[0].topic.slice(0, 22)}" → ${seeded[0].seedUrl})`);
+
     console.log('✓ Vitality Surf — recherche supervisée/budgétée/compliant, toutes les vérifs passent');
   })();
 }
