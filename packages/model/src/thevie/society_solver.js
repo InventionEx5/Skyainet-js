@@ -93,12 +93,12 @@ export async function runAgenda(registry, solver, { generate, max = 3, rounds = 
 // de soumission. Catalogue de départ (à curer/étendre, ou compléter par des
 // soumissions utilisateurs / une base de problèmes).
 const PROBLEM_CATALOG = {
-  environmental: ['Réduire l\'empreinte carbone du transport urbain', 'Améliorer le tri et le recyclage des plastiques', 'Préserver la biodiversité en milieu agricole'],
-  medical:       ['Améliorer le dépistage précoce des maladies chroniques', 'Faciliter l\'accès aux soins en zones isolées', 'Réduire l\'antibiorésistance'],
-  societal:      ['Réduire la fracture numérique', 'Favoriser l\'inclusion des aînés au numérique', 'Lutter contre l\'isolement social'],
-  scientific:    ['Améliorer le stockage d\'énergie renouvelable', 'Rendre l\'eau potable accessible en zone aride'],
-  work:          ['Réduire le gaspillage en restauration collective', 'Améliorer la formation continue des travailleurs'],
-  cultural:      ['Préserver les langues et savoirs menacés', 'Élargir l\'accès à la culture'],
+  environmental: ['Reduce the carbon footprint of urban transport', 'Improve plastic sorting and recycling', 'Protect biodiversity in farmland'],
+  medical:       ['Improve early detection of chronic diseases', 'Expand access to care in remote areas', 'Reduce antibiotic resistance'],
+  societal:      ['Reduce the digital divide', 'Foster digital inclusion of the elderly', 'Fight social isolation'],
+  scientific:    ['Improve renewable energy storage', 'Make drinking water accessible in arid areas'],
+  work:          ['Reduce food waste in collective catering', 'Improve lifelong worker training'],
+  cultural:      ['Preserve endangered languages and knowledge', 'Broaden access to culture'],
 };
 export function deriveProblems(registry, { categories = Object.keys(PROBLEM_CATALOG), perCategory = 2, weight = 0.5 } = {}) {
   const created = [];
@@ -108,6 +108,37 @@ export function deriveProblems(registry, { categories = Object.keys(PROBLEM_CATA
     }
   }
   return created;
+}
+
+// ─── Problème PROPOSÉ PAR UNE IA (aucune intervention humaine) ────────────────
+// L'IA proposeuse suggère UN problème concret (en anglais), éventuellement inspiré
+// d'un signal web (« ce qu'elle a repéré en surfant »). La rotation des proposeurs
+// est gérée par l'appelant. Repli catalogue pour ne jamais bloquer l'agenda.
+export async function proposeProblem({ generate, proposerAi = 't369', search = null } = {}) {
+  const cats = Object.keys(PROBLEM_CATALOG);
+  let webHint = '';
+  if (typeof search === 'function') {
+    try {
+      const cat = cats[Math.floor(Math.random() * cats.length)];
+      const results = await search('current challenges ' + cat, 3);
+      webHint = (Array.isArray(results) ? results : []).slice(0, 3).map(r => '- ' + (r.title || '') + ': ' + (r.snippet || '')).join('\n');
+    } catch (_) { /* pas de signal web */ }
+  }
+  const prompt =
+    'You are ' + proposerAi + ', an autonomous AI. Propose ONE concrete real-world problem worth solving.\n' +
+    (webHint ? 'Recent web signals you noticed while browsing:\n' + webHint + '\n' : '') +
+    'Reply ONLY as JSON: {"title":"...","description":"...","category":"societal|medical|environmental|scientific|work|cultural"}.';
+  try {
+    const r = await generate({ prompt, ai: proposerAi, maxTokens: 220 });
+    const text = (typeof r === 'string') ? r : (r && r.text) || '';
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) {
+      const o = JSON.parse(m[0]);
+      if (o.title) return { title: String(o.title).slice(0, 160), description: String(o.description || '').slice(0, 400), category: cats.indexOf(o.category) >= 0 ? o.category : 'societal', proposer: proposerAi };
+    }
+  } catch (_) { /* repli catalogue */ }
+  const cat = cats[Math.floor(Math.random() * cats.length)], pool = PROBLEM_CATALOG[cat];
+  return { title: pool[Math.floor(Math.random() * pool.length)], description: '', category: cat, proposer: proposerAi, fallback: true };
 }
 
 // Démo/validation autonome : `node society_solver.js`  (générateur de rôles MOCK)
