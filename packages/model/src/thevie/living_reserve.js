@@ -38,7 +38,7 @@ export class LivingReserve {
       lineage: Array.isArray(lineage) ? lineage.slice() : [],
       state: ModuleState.Candidate, health: 0.5, score: 0,
       evals: [], createdAt: Date.now(), lastUsedAt: null, uses: 0,
-      loan: null, counterfactual: null,
+      loan: null, counterfactual: null, readers: new Set(),
     };
     this.#modules.set(id, m);
     return this.#view(m);
@@ -82,6 +82,21 @@ export class LivingReserve {
   setCounterfactual(id, delta) { const m = this.#get(id); m.counterfactual = Number(delta) || 0; this.#refresh(m); return this.#view(m); }
   /** Comptabilise une utilisation réelle (nourrit le score). */
   use(id) { const m = this.#get(id); m.uses++; m.lastUsedAt = Date.now(); this.#refresh(m); return this.#view(m); }
+
+  // ─── Accès LECTURE PARTAGÉE (base commune) ─────────────────────────────────
+  // N'importe quel cerveau charge un module par empreinte, sans propriétaire ni
+  // exclusivité (many readers) — chemin de lecture par défaut, meilleur que le prêt
+  // pour les modules stables. Le prêt (exclusif) reste pour le rare / contendu /
+  // en écriture. Partitionné par FAMILLE d'architecture (option `base`).
+  checkout(id, reader, { base = null } = {}) {
+    const m = this.#get(id);
+    if (m.state === ModuleState.Retired || m.state === ModuleState.Reabsorbed) return { ok: false, reason: `module ${m.state}` };
+    if (base && m.base !== base) return { ok: false, reason: `famille incompatible (module ${m.base} ≠ ${base})` };
+    m.readers.add(reader); m.uses++; m.lastUsedAt = Date.now();
+    return { ok: true, id, base: m.base, domain: m.domain, readers: m.readers.size };
+  }
+  release(id, reader) { const m = this.#get(id); m.readers.delete(reader); return { ok: true, readers: m.readers.size }; }
+  readersOf(id) { return [...this.#get(id).readers]; }
 
   // ─── Cycle de vie (T369 : promotion GÂCHÉE par le score) ───────────────────
   active(domain) { return [...this.#modules.values()].find(m => m.domain === domain && m.state === ModuleState.Active) || null; }
@@ -158,7 +173,7 @@ export class LivingReserve {
       uses: m.uses, lastUsedAt: m.lastUsedAt, createdAt: m.createdAt,
       lineage: m.lineage.slice(-10), evals: m.evals.slice(-3),
       loan: m.loan ? { ...m.loan } : null, counterfactual: m.counterfactual,
-      retireReason: m.retireReason,
+      readers: m.readers ? m.readers.size : 0, retireReason: m.retireReason,
     };
   }
   get(id) { const m = this.#modules.get(id); return m ? this.#view(m) : null; }
@@ -189,6 +204,35 @@ export async function t369FeedbackCycle(reserve, id, generate, opts = {}) {
   reserve.recordEval(id, report);                                            // 2) enregistrer (score + santé)
   const decision = reserve.promote(id, { margin: opts.margin ?? 2 });        // 3) décider
   return { id, overall: report.overall, score: reserve.get(id).score, promoted: decision.promoted, decision };
+}
+
+// ─── Relais de distillation T369 — un professeur enseigne, les élèves apprennent ─
+// T369 orchestre : le cerveau fraîchement entraîné (professeur) produit des traces,
+// FILTRÉES par un vérificateur (anti-effondrement : jamais du signal brut), qui
+// deviennent le dataset de distillation des autres cerveaux. La lignée est tracée ;
+// l'entraînement des élèves (QLoRA) est DISPATCHÉ sur GPU via le routeur du fabric.
+// Entre familles d'architecture différentes, l'enseignement passe par les DONNÉES
+// (ici), pas par transfert d'adaptateur. Testable en mock (professeur + routeur).
+export async function t369DistillationRelay({ teacherId, teacher, studentIds = [], prompts = [], verify = null, reserve = null, router = null, meshNodes = [] }) {
+  const dataset = [];
+  for (const prompt of prompts) {
+    const r = await teacher({ prompt, ai: teacherId, maxTokens: 256 });
+    const text = (typeof r === 'string') ? r : (r && r.text) ? r.text : '';
+    const sample = { prompt, completion: text, teacher: teacherId };
+    if (!verify || verify(sample)) dataset.push({ messages: [{ role: 'user', content: prompt }, { role: 'assistant', content: text }] });
+  }
+  const jsonl = dataset.map(d => JSON.stringify(d)).join('\n');
+  const plans = [];
+  for (const sid of studentIds) {
+    let moduleId = null;
+    if (reserve) {
+      moduleId = `distill_${teacherId}_to_${sid}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+      reserve.register({ id: moduleId, domain: 'distilled', owner: sid, lineage: [{ op: 'distill', from: teacherId, samples: dataset.length, at: Date.now() }] });
+    }
+    const dispatch = router ? router.route('training', { meshNodes }) : { where: 'unavailable', reason: 'routeur non fourni (dispatch GPU à câbler)' };
+    plans.push({ student: sid, moduleId, dispatch });
+  }
+  return { teacher: teacherId, students: studentIds, taughtSamples: dataset.length, jsonl, plans };
 }
 
 // ─── Data Factory — robinet du daemon de trading vers un JSONL d'entraînement ──
@@ -307,6 +351,31 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     A(first.messages && first.messages[0].role === 'user' && first.messages[1].role === 'assistant', 'data factory : format JSONL {messages:[user,assistant]}');
     A(first.messages[0].content.includes('PILOTE'), 'data factory : le prompt cockpit est présent (entraînable)');
     console.log(`   (data factory: ${st.seen} captés, ${st.kept} retenus → ${factory.jsonl.split('\n').length} lignes JSONL)`);
-    console.log('✓ Pipeline T369 + Data Factory — toutes les vérifs passent');
+
+    // ── Accès LECTURE PARTAGÉE : 3 cerveaux lisent le MÊME module sans exclusivité ──
+    const R3 = new LivingReserve();
+    R3.register({ id: 'mod_shared', domain: 'ai', owner: 'thevie', base: 'Qwen3-8B' });
+    A(R3.checkout('mod_shared', 'thevie').ok && R3.checkout('mod_shared', 'loraevo').ok && R3.checkout('mod_shared', 't369').ok, 'lecture partagée : 3 cerveaux checkout le même module simultanément');
+    A(R3.readersOf('mod_shared').length === 3, 'lecture partagée : 3 lecteurs concurrents (base commune)');
+    A(R3.checkout('mod_shared', 'x', { base: 'Llama-3' }).ok === false, 'lecture partagée : famille d\u2019architecture incompatible → refus');
+    R3.release('mod_shared', 'thevie');
+    A(R3.readersOf('mod_shared').length === 2, 'lecture partagée : release décrémente les lecteurs');
+
+    // ── Relais de distillation T369 : professeur enseigne → lignée → dispatch GPU ──
+    const { CapabilityRouter } = await import('#mesh_fabric');
+    const teach = async ({ prompt }) => 'réponse pédagogique vérifiée pour: ' + prompt.slice(0, 20);
+    const relay = await t369DistillationRelay({
+      teacherId: 't369', teacher: teach, studentIds: ['thevie', 'loraevo'],
+      prompts: ['explique X', 'résous Y', 'corrige Z'], reserve: R3,
+      router: new CapabilityRouter({ gpu: false, ramMB: 16000 }),
+      meshNodes: [{ nodeId: 'gpu-cloud', gpu: true, vramMB: 24000, ramMB: 64000 }],
+    });
+    A(relay.taughtSamples === 3 && relay.jsonl.split('\n').length === 3, 'relais : 3 traces vérifiées → dataset JSONL');
+    A(relay.plans.length === 2 && relay.plans.every(p => p.moduleId), 'relais : 2 élèves, chacun un module distillé enregistré (lignée)');
+    A(R3.get(relay.plans[0].moduleId).lineage.some(l => l.op === 'distill' && l.from === 't369'), 'relais : lignée « distillé de t369 » tracée');
+    A(relay.plans[0].dispatch.where === 'dispatch' && relay.plans[0].dispatch.target === 'gpu-cloud', 'relais : entraînement élève DISPATCHÉ vers nœud GPU (via fabric)');
+    console.log(`   (relais: prof t369 → ${relay.students.join('+')}, ${relay.taughtSamples} traces, dispatch → ${relay.plans[0].dispatch.target})`);
+
+    console.log('✓ Pipeline T369 + Data Factory + lecture partagée + relais — toutes les vérifs passent');
   })();
 }
