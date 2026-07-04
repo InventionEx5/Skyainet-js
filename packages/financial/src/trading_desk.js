@@ -74,12 +74,14 @@ export class TradingDesk extends EventEmitter {
   #orders;       // Map<id, order>
   #history;      // Array<order>  (clos/annulés, plus récent en tête)
   #generate;     // async ({prompt, ai, maxTokens}) => string
+  #search;       // async (query, max) => [{title,snippet,url}] — contexte de marché web (optionnel)
   #seq;          // compteur d'ordres
   #rng;          // PRNG
 
-  constructor({ generate = null, pairs = null, seed = 0x7369 } = {}) {
+  constructor({ generate = null, search = null, pairs = null, seed = 0x7369 } = {}) {
     super();
     this.#generate = typeof generate === 'function' ? generate : null;
+    this.#search   = typeof search   === 'function' ? search   : null;
     this.#orders   = new Map();
     this.#history  = [];
     this.#seq      = 0;
@@ -256,17 +258,40 @@ export class TradingDesk extends EventEmitter {
 
   // ─── Consultation des conseillers externes ───────────────────────────────
   /** Chaque IA conseillère rend une note brève + un penchant. */
+  // ─── Contexte de marché FRAIS : chiffres locaux + activité web ───────────────
+  // Pour les conseillers/Oracles. Réactif, à la demande : le web coûte / a des
+  // limites → à réserver aux CONSULTATIONS, pas au pilote haute fréquence (qui
+  // garde son contexte technique local rapide). Dégradation gracieuse sans search.
+  async marketContext(symbol, { maxNews = 3 } = {}) {
+    const p = this.#pair(symbol), s = this.#snapshot(p);
+    const dayPct = p.dayOpen ? +(((p.markPrice - p.dayOpen) / p.dayOpen) * 100).toFixed(2) : 0;
+    const local = `prix ${roundPx(p.markPrice)} (${dayPct >= 0 ? '+' : ''}${dayPct}% 24h), RSI ${s.rsi}, momentum ${s.momPct}%`;
+    let web = '';
+    if (this.#search) {
+      try {
+        const results = await this.#search(`${p.base} ${p.quote} price news today`, maxNews);
+        web = (Array.isArray(results) ? results : [])
+          .filter(r => r && (r.title || r.snippet))
+          .map(r => `• ${(r.title ?? '').trim()}: ${(r.snippet ?? '').trim()}`)
+          .join('\n');
+      } catch (_) { /* web indisponible → contexte local seul */ }
+    }
+    return { symbol, price: p.markPrice, dayChangePct: dayPct, rsi: s.rsi, momPct: s.momPct, trend: s.trend, local, web };
+  }
+
   async consultAdvisors(symbol, advisors = []) {
     const p = this.#pair(symbol), s = this.#snapshot(p);
+    const ctx = await this.marketContext(symbol);   // chiffres + activité web FRAIS (injectés, pas « rappelés »)
     const list = Array.isArray(advisors) ? advisors.filter(Boolean) : [];
     const notes = [];
     for (const advisor of list) {
       const prompt =
-        `Tu es ${advisor}, modèle frontière consulté comme conseiller de marché externe. ` +
-        `Appuie-toi sur l'actualité et toute information récente à ta disposition (news, macro, sentiment, on-chain) concernant ${symbol}. ` +
-        `Contexte local : prix ${roundPx(p.markPrice)}, RSI ${s.rsi}, momentum ${s.momPct}%. ` +
-        `Donne un avis bref (1-2 phrases) et un biais buy/sell/neutre.`;
-      const text = await this.#ask(prompt, advisor, 180);
+        `Tu es ${advisor}, consulté comme conseiller de marché externe sur ${symbol}.\n` +
+        `CONTEXTE DE MARCHÉ ACTUEL (fonde-toi dessus) :\n` +
+        `- Chiffres : ${ctx.local}\n` +
+        (ctx.web ? `- Activité récente (web) :\n${ctx.web}\n` : '- Activité récente : (web indisponible)\n') +
+        `Donne un avis bref (1-2 phrases) et un biais buy/sell/neutre, fondé sur ce contexte.`;
+      const text = await this.#ask(prompt, advisor, 200);
       const lean = this.#lean(text);
       notes.push({
         advisor,
@@ -275,7 +300,7 @@ export class TradingDesk extends EventEmitter {
         aiUsed: !!text,
       });
     }
-    return { pair: symbol, advisors: notes };
+    return { pair: symbol, advisors: notes, marketContext: ctx };
   }
 
   // ─── AUTO : une IA locale décide (après consultation externe) ─────────────
