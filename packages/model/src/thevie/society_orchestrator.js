@@ -24,6 +24,7 @@ import { InternalShadow } from '#internal_shadow';
 import { ReplayBuffer, Experience } from '#replay_buffer';
 import { DEFAULT_REDACTOR } from '#pii_redaction';
 import { trainBrainOnLessons, trainLoraOnLesson, lessonCE, byteTokenizer } from '#peer_learning';
+import { assertTeachable } from '#external_providers';
 
 const IMPORTANCE_FLOOR   = 0.05;
 const MASTERY_CE         = 0.35;   // CE sous laquelle une leçon est « maîtrisée » (compétence ~0.70)
@@ -57,16 +58,17 @@ export class SocietyOrchestrator {
    * @param {object}   [o.tokenizer]
    * @param {ReplayBuffer} [o.buffer]    — tampon de rejeu priorisé (créé si absent)
    * @param {number}   [o.bufferCapacity=512]
-   * @param {string}   [o.criticProvider='anthropic']
+   * @param {string}   [o.criticProvider='deepseek']
    * @param {object}   [o.fullWeightOpts]
    * @param {number}   [o.loraEpochs=40]
    */
   constructor({ society, gateway, classifier = null, embed = null, tokenizer = byteTokenizer,
-                buffer = null, bufferCapacity = 512, criticProvider = 'anthropic',
+                buffer = null, bufferCapacity = 512, criticProvider = 'deepseek',
                 fullWeightOpts = { epochs: 120, lr: 0.1 }, loraEpochs = 40,
                 anchorEvery = 15, trainEvery = 2, maxRounds = 2, acceptScore = 0.5 } = {}) {
     if (!society) throw new Error('[SocietyOrchestrator] society requise');
     if (!gateway) throw new Error('[SocietyOrchestrator] gateway requis');
+    assertTeachable(criticProvider);   // PARE-FEU : critique enseignant = DeepSeek/local, jamais Claude/Grok (ce chemin entraîne)
     this.society = society; this.gateway = gateway; this.classifier = classifier;
     this.embed = embed ?? gateway.embed ?? null; this.tokenizer = tokenizer;
     this.buffer = buffer ?? new ReplayBuffer(bufferCapacity);   // ← tampon de rejeu priorisé
