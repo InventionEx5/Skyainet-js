@@ -1,24 +1,21 @@
 // packages/node/src/web_search.js
 // =====================================================
-// WebSearch — Recherche Web pour Thevie (Learn + Web)
-// Backend de la commande `web_search` consommée par thevie.html.
-// Pluggable : connecteur HTTP (SearxNG / Brave / DuckDuckGo) avec
-// dégradation gracieuse hors-ligne.
+// WebSearch — Recherche Web pour Thevie (Learn + Web) + source de seeds Vitality Surf.
+// CHAÎNE DE PROVIDERS via APIs OFFICIELLES (aucun scraping des pages de résultats) :
+//   Google Custom Search → Brave Search API → DuckDuckGo Instant Answer,
+// avec repli local hors-ligne. Le premier provider qui répond gagne.
+// Clés via l'environnement : GOOGLE_API_KEY + GOOGLE_CSE_ID, BRAVE_API_KEY,
+// SEARXNG_URL (optionnel). DuckDuckGo ne nécessite pas de clé (mais est LIMITÉ
+// aux réponses instantanées / sujets connexes — dernier recours).
 // SkyAInet × Thevie × Nikola T369
 // =====================================================
 
 "use strict";
 
-// ─────────────────────────────────────────────────────────────────
-// CONSTANTES
-// ─────────────────────────────────────────────────────────────────
-
 const DEFAULT_TIMEOUT_MS = 6000;
-const MAX_RESULTS_CAP     = 10;
+const MAX_RESULTS_CAP    = 10;
 
-// Base de connaissances locale — sert de secours pertinent hors-ligne
-// pour les requêtes liées à l'écosystème SkyAInet. Chaque entrée associe
-// des mots-clés à un résultat structuré {title, snippet}.
+// Base de connaissances locale — secours pertinent hors-ligne pour l'écosystème SkyAInet.
 const LOCAL_KNOWLEDGE = [
   {
     keys: ['node', 'validator', 'validateur', 'nœud', 'noeud', 'pouw', 'consensus', 'stake'],
@@ -57,185 +54,163 @@ const LOCAL_KNOWLEDGE = [
   },
 ];
 
-// ─────────────────────────────────────────────────────────────────
-// WEBSEARCH
-// ─────────────────────────────────────────────────────────────────
-
 /**
- * Service de recherche web pour Thevie.
- *
- * Stratégie en cascade :
- *   1. Si un provider HTTP est configuré ET joignable → résultats réels.
- *   2. Sinon → base de connaissances locale SkyAInet (si la requête matche).
- *   3. Sinon → tableau vide (le frontend bascule sur simulatedWebContext()).
- *
+ * Service de recherche web pour Thevie — chaîne de providers officiels.
  * @example
- *   const ws = new WebSearch({ provider: 'searxng', endpoint: 'http://localhost:8888' });
- *   const results = await ws.search('SkyAInet validator', 3);
- *   // → [{ title, snippet, url }]
+ *   const ws = new WebSearch();                               // auto depuis l'env
+ *   const ws2 = new WebSearch({ providers: [{ name:'brave', apiKey:'…' }] });
+ *   const results = await ws.search('SkyAInet validator', 3); // → [{title,snippet,url}]
  */
 export class WebSearch {
-  #provider;
-  #endpoint;
-  #apiKey;
+  #providers;      // chaîne ordonnée : [{ name, endpoint?, apiKey?, cx? }]
   #timeout;
   #useLocalFallback;
   #totalSearches = 0;
   #lastError = null;
+  #lastProvider = null;
 
-  /**
-   * @param {object} [opts]
-   * @param {string|null} [opts.provider]  'searxng' | 'brave' | null (désactivé)
-   * @param {string|null} [opts.endpoint]  URL de base du provider
-   * @param {string|null} [opts.apiKey]    Clé API si requise (Brave, etc.)
-   * @param {number}      [opts.timeout]   Timeout réseau en ms
-   * @param {boolean}     [opts.useLocalFallback] Activer la base locale (def: true)
-   */
   constructor(opts = {}) {
-    this.#provider         = opts.provider ?? null;
-    this.#endpoint         = opts.endpoint ?? null;
-    this.#apiKey           = opts.apiKey   ?? null;
-    this.#timeout          = opts.timeout  ?? DEFAULT_TIMEOUT_MS;
+    this.#timeout          = opts.timeout ?? DEFAULT_TIMEOUT_MS;
     this.#useLocalFallback = opts.useLocalFallback !== false;
+    this.#providers        = WebSearch.#buildChain(opts);
+  }
+
+  // Chaîne : opts.providers explicite, sinon rétro-compat opts.provider unique,
+  // sinon chaîne auto depuis l'environnement.
+  static #buildChain(opts) {
+    if (Array.isArray(opts.providers) && opts.providers.length) {
+      return opts.providers.map(p => (typeof p === 'string' ? { name: p } : { ...p }));
+    }
+    if (opts.provider) return [{ name: opts.provider, endpoint: opts.endpoint ?? null, apiKey: opts.apiKey ?? null, cx: opts.cx ?? null }];
+    return WebSearch.envChain();
+  }
+
+  // Chaîne par défaut depuis l'environnement (préférence Google → Brave → DDG ;
+  // SearxNG si fourni ; DuckDuckGo toujours présent en dernier recours).
+  static envChain() {
+    const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+    const chain = [];
+    if (env.GOOGLE_API_KEY && env.GOOGLE_CSE_ID) chain.push({ name: 'google', apiKey: env.GOOGLE_API_KEY, cx: env.GOOGLE_CSE_ID });
+    if (env.BRAVE_API_KEY)                       chain.push({ name: 'brave',  apiKey: env.BRAVE_API_KEY });
+    if (env.SEARXNG_URL)                         chain.push({ name: 'searxng', endpoint: env.SEARXNG_URL });
+    chain.push({ name: 'duckduckgo' });
+    return chain;
   }
 
   /**
-   * Recherche principale — contrat consommé par thevie.html.
-   * @param {string} query
-   * @param {number} [maxResults=3]
-   * @returns {Promise<Array<{title:string, snippet:string, url?:string}>>}
+   * Recherche principale — contrat consommé par thevie.html et Vitality Surf.
+   * @returns {Promise<Array<{title:string, snippet:string, url:string}>>}
    */
   async search(query, maxResults = 3) {
     const q = String(query ?? '').trim();
     if (!q) return [];
-
     const limit = Math.max(1, Math.min(Number(maxResults) || 3, MAX_RESULTS_CAP));
     this.#totalSearches++;
 
-    // 1. Provider HTTP réel
-    if (this.#provider && this.#endpoint) {
+    // Chaîne : le premier provider qui renvoie des résultats gagne.
+    for (const p of this.#providers) {
       try {
-        const live = await this.#searchProvider(q, limit);
-        if (live.length) return live.slice(0, limit);
-      } catch (e) {
-        this.#lastError = e.message;
-        // On poursuit vers le fallback local
-      }
+        const live = await this.#searchOne(p, q, limit);
+        if (live.length) { this.#lastProvider = p.name; return live.slice(0, limit); }
+      } catch (e) { this.#lastError = `${p.name}: ${e.message}`; /* provider suivant */ }
     }
 
-    // 2. Base de connaissances locale
-    if (this.#useLocalFallback) {
-      const local = this.#searchLocal(q, limit);
-      if (local.length) return local;
-    }
-
-    // 3. Aucun résultat → le frontend utilisera simulatedWebContext()
+    // Repli local (écosystème SkyAInet), sinon vide (le frontend simule).
+    if (this.#useLocalFallback) { const local = this.#searchLocal(q, limit); if (local.length) return local; }
     return [];
   }
 
-  // ─── Provider HTTP ──────────────────────────────────────────────
-
-  async #searchProvider(query, limit) {
-    switch (this.#provider) {
-      case 'searxng': return this.#searchSearxng(query, limit);
-      case 'brave':   return this.#searchBrave(query, limit);
-      default:        return [];
+  #searchOne(p, query, limit) {
+    switch (p.name) {
+      case 'google':     return this.#searchGoogle(p, query, limit);
+      case 'brave':      return this.#searchBrave(p, query, limit);
+      case 'searxng':    return this.#searchSearxng(p, query, limit);
+      case 'duckduckgo':
+      case 'ddg':        return this.#searchDuckDuckGo(p, query, limit);
+      default:           return Promise.resolve([]);
     }
   }
 
-  /**
-   * SearxNG — métamoteur auto-hébergeable, format JSON.
-   * GET {endpoint}/search?q=...&format=json
-   */
-  async #searchSearxng(query, limit) {
-    const url = `${this.#endpoint.replace(/\/$/, '')}/search` +
-                `?q=${encodeURIComponent(query)}&format=json`;
+  // Google Custom Search JSON API — clé + cx (moteur de recherche personnalisé). Web complet.
+  async #searchGoogle(p, query, limit) {
+    if (!p.apiKey || !p.cx) throw new Error('clé + cx requis');
+    const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(p.apiKey)}` +
+                `&cx=${encodeURIComponent(p.cx)}&q=${encodeURIComponent(query)}&num=${Math.min(limit, 10)}`;
+    const data = await this.#fetchJson(url);
+    const items = Array.isArray(data?.items) ? data.items : [];
+    return items.map(r => ({ title: r.title ?? '(sans titre)', snippet: r.snippet ?? '', url: r.link ?? '' }));
+  }
+
+  // Brave Search API — header X-Subscription-Token. Web complet.
+  async #searchBrave(p, query, limit) {
+    if (!p.apiKey) throw new Error('clé requise');
+    const base = (p.endpoint || 'https://api.search.brave.com/res/v1/web/search').replace(/\/$/, '');
+    const url  = `${base}?q=${encodeURIComponent(query)}&count=${limit}`;
+    const data = await this.#fetchJson(url, { headers: { 'X-Subscription-Token': p.apiKey } });
+    const items = data?.web?.results ?? [];
+    return items.map(r => ({ title: r.title ?? '(sans titre)', snippet: r.description ?? '', url: r.url ?? '' }));
+  }
+
+  // SearxNG — métamoteur auto-hébergé, GET /search?q=...&format=json.
+  async #searchSearxng(p, query, limit) {
+    if (!p.endpoint) throw new Error('endpoint requis');
+    const url = `${p.endpoint.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}&format=json`;
     const data = await this.#fetchJson(url);
     const items = Array.isArray(data?.results) ? data.results : [];
-    return items.slice(0, limit).map(r => ({
-      title  : r.title   ?? '(sans titre)',
-      snippet: r.content ?? r.snippet ?? '',
-      url    : r.url     ?? '',
-    }));
+    return items.map(r => ({ title: r.title ?? '(sans titre)', snippet: r.content ?? r.snippet ?? '', url: r.url ?? '' }));
   }
 
-  /**
-   * Brave Search API — nécessite une clé (header X-Subscription-Token).
-   * GET https://api.search.brave.com/res/v1/web/search?q=...
-   */
-  async #searchBrave(query, limit) {
-    const base = this.#endpoint?.replace(/\/$/, '') ||
-                 'https://api.search.brave.com/res/v1/web/search';
-    const url  = `${base}?q=${encodeURIComponent(query)}&count=${limit}`;
-    const data = await this.#fetchJson(url, {
-      headers: this.#apiKey ? { 'X-Subscription-Token': this.#apiKey } : {},
-    });
-    const items = data?.web?.results ?? [];
-    return items.slice(0, limit).map(r => ({
-      title  : r.title       ?? '(sans titre)',
-      snippet: r.description  ?? '',
-      url    : r.url          ?? '',
-    }));
+  // DuckDuckGo Instant Answer API (sans clé) — LIMITÉ : réponses instantanées /
+  // sujets connexes, PAS de résultats web généraux. Dernier recours honnête.
+  async #searchDuckDuckGo(p, query, limit) {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+    const data = await this.#fetchJson(url);
+    const out = [];
+    if (data?.AbstractText) out.push({ title: data.Heading || query, snippet: data.AbstractText, url: data.AbstractURL || '' });
+    for (const t of (Array.isArray(data?.RelatedTopics) ? data.RelatedTopics : [])) {
+      if (out.length >= limit) break;
+      if (t && t.Text && t.FirstURL) out.push({ title: (t.Text.split(' - ')[0] || t.Text).slice(0, 80), snippet: t.Text, url: t.FirstURL });
+    }
+    return out;
   }
-
-  // ─── Fetch avec timeout ─────────────────────────────────────────
 
   async #fetchJson(url, opts = {}) {
-    if (typeof fetch !== 'function') {
-      throw new Error('fetch indisponible dans cet environnement');
-    }
+    if (typeof fetch !== 'function') throw new Error('fetch indisponible dans cet environnement');
     const ctrl  = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.#timeout);
     try {
-      const res = await fetch(url, {
-        signal : ctrl.signal,
-        headers: { 'Accept': 'application/json', ...(opts.headers ?? {}) },
-      });
+      const res = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...(opts.headers ?? {}) } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
-    } finally {
-      clearTimeout(timer);
-    }
+    } finally { clearTimeout(timer); }
   }
-
-  // ─── Base de connaissances locale ───────────────────────────────
 
   #searchLocal(query, limit) {
     const lower = query.toLowerCase();
     const scored = [];
     for (const entry of LOCAL_KNOWLEDGE) {
       let score = 0;
-      for (const k of entry.keys) {
-        if (lower.includes(k)) score++;
-      }
+      for (const k of entry.keys) if (lower.includes(k)) score++;
       if (score > 0) scored.push({ score, entry });
     }
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, limit).map(({ entry }) => ({
-      title  : entry.title,
-      snippet: entry.snippet,
-      url    : 'local://skyainet-knowledge',
-    }));
+    return scored.slice(0, limit).map(({ entry }) => ({ title: entry.title, snippet: entry.snippet, url: 'local://skyainet-knowledge' }));
   }
-
-  // ─── Diagnostics ────────────────────────────────────────────────
 
   getStats() {
     return {
-      provider      : this.#provider ?? 'none',
-      endpoint      : this.#endpoint ?? null,
+      providers     : this.#providers.map(p => p.name),
+      lastProvider  : this.#lastProvider,
       totalSearches : this.#totalSearches,
       localFallback : this.#useLocalFallback,
       lastError     : this.#lastError,
     };
   }
 
-  /** Active/reconfigure un provider à chaud. */
-  configure({ provider, endpoint, apiKey, timeout } = {}) {
-    if (provider !== undefined) this.#provider = provider;
-    if (endpoint !== undefined) this.#endpoint = endpoint;
-    if (apiKey   !== undefined) this.#apiKey   = apiKey;
-    if (timeout  !== undefined) this.#timeout  = timeout;
+  /** Reconfigure la chaîne à chaud. */
+  configure({ providers, provider, endpoint, apiKey, cx, timeout } = {}) {
+    if (timeout !== undefined) this.#timeout = timeout;
+    if (providers !== undefined || provider !== undefined) this.#providers = WebSearch.#buildChain({ providers, provider, endpoint, apiKey, cx });
     return this;
   }
 }
