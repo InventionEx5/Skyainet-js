@@ -726,7 +726,7 @@ app.post('/api/hosting/sites/:siteId/publish', requireScope('storage:write'), as
 // POST /api/hosting/sites/:siteId/rollback — rollback à une version
 app.post('/api/hosting/sites/:siteId/rollback', requireScope('storage:write'), async (req, res) => {
   const { version } = req.body;
-  try {
+try {
     const result = await state.node.rollbackSite(req.params.siteId, version ?? null);
     res.json({ success: true, ...result });
   } catch (e) {
@@ -1154,7 +1154,11 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 
   app.all('/api/cmd/:name', cmdAuth, async (req, res) => {
     const name = req.params.name;
-    const fn   = handlers[name];
+    let   fn   = handlers[name];
+    if (!fn) {                                          // dispatch tolérant : snake_case → camelCase
+      const camel = name.replace(/_([a-z])/g, function (_m, c) { return c.toUpperCase(); });
+      fn = handlers[camel];
+    }
 
     if (!fn) {
       return apiError(res, 404, 'UNKNOWN_CMD', `Unknown command: ${name}`);
