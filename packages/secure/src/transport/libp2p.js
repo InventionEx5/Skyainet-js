@@ -8,16 +8,16 @@
 
 import { EventEmitter }                     from 'events';
 import { randomBytes }                      from 'crypto';
-import { HybridTransport, HybridMode }      from '../crypto/hybrid.js';
-import { KemT369 }                          from '../crypto/kem_t369.js';
+import { HybridTransport, HybridMode }      from '#hybrid';
+import { KemT369 }                          from '#kem_t369';
 import {
   HybridTransportTrait,
   TransportLayer,
   CryptoSuite,
   TransportMessage,
   TransportError,
-}                                           from './trait.js';
-import { Contact }                          from '../../secure/src/roots/pool.js';
+}                                           from '#trait';
+import { Contact }                          from '#pool';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -219,7 +219,7 @@ export class Libp2pTransportReal extends HybridTransportTrait {
 
   // ─── Accesseurs ───────────────────────────────────────────────
 
-  localAddr()           { return null; }   // à implémenter avec vrai libp2p
+  localAddr()           { return this.#peerId ? `/ip4/127.0.0.1/tcp/4001/p2p/${this.#peerId}` : null; }
   layer()               { return TransportLayer.Core; }
   cryptoMode()          { return CryptoSuite.HybridFlash; }
   supportsFlashGematria() { return true; }
