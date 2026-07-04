@@ -29,17 +29,36 @@ export const PROVIDER_CONFIG = Object.freeze({
   xai: {
     schema: 'openai', baseUrl: 'https://api.x.ai/v1', path: '/chat/completions',
     envKey: 'XAI_API_KEY', registryName: 'grok-4', defaultModel: 'grok-4', costPer1k: 0.005,
+    teachable: false,   // API fermée concurrente → inférence/rapport OK, JAMAIS l'entraînement (CGU)
   },
   deepseek: {
     schema: 'openai', baseUrl: 'https://api.deepseek.com/v1', path: '/chat/completions',
     envKey: 'DEEPSEEK_API_KEY', registryName: 'deepseek-v4', defaultModel: 'deepseek-v4', costPer1k: 0.0014,
+    teachable: true,    // poids ouverts → autorisé à enseigner/distiller vers les IA locales
   },
   anthropic: {
     schema: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', path: '/messages',
     envKey: 'ANTHROPIC_API_KEY', registryName: 'claude-sonnet-4-6', defaultModel: 'claude-sonnet-4-6',
     costPer1k: 0.003, anthropicVersion: '2023-06-01',
+    teachable: false,   // API fermée concurrente → inférence/rapport OK, JAMAIS l'entraînement (CGU)
   },
 });
+
+// ─── PARE-FEU D'ENSEIGNEMENT ─────────────────────────────────────
+// Qui peut alimenter l'ENTRAÎNEMENT des IA locales : poids ouverts (DeepSeek) +
+// cœurs locaux uniquement. Claude/Grok/OpenAI = inférence & rapports OK, mais
+// entraînement INTERDIT (leurs CGU interdisent d'entraîner des modèles
+// concurrents). Distinction : collaboration à l'inférence (autorisée) vs
+// absorption dans les poids (interdite).
+const OPEN_TEACHERS = new Set(['deepseek', 'local', 'thevie', 'loraevo', 't369']);
+export function canTeach(provider) {
+  const p = String(provider ?? '').toLowerCase();
+  if (OPEN_TEACHERS.has(p)) return true;
+  return PROVIDER_CONFIG[p]?.teachable === true;
+}
+export function assertTeachable(provider) {
+  if (!canTeach(provider)) throw new Error(`[PARE-FEU] "${provider ?? '(vide)'}" ne peut PAS enseigner aux IA locales (entraînement interdit — CGU). Enseignables : DeepSeek, local.`);
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Adaptateurs de schéma : construction du corps, en-têtes, parsing.
@@ -405,7 +424,9 @@ export class ShadowRouter {
     const answered = consultation.responses.filter(r => r.text);
     if (!answered.length) throw new Error('aucun maître n\'a répondu');
 
-    const teacher = this._pickTeacher(answered);
+    const teachable = answered.filter(r => canTeach(r.provider));
+    if (!teachable.length) { this.stats.skipped++; return null; }   // PARE-FEU : aucun maître ENSEIGNABLE (Claude/Grok exclus de l'entraînement ; DeepSeek OK)
+    const teacher = this._pickTeacher(teachable);
     const localText = localResult?.text ?? '';
     const studentGap = this.gateway.scoreDisagreement([localText, teacher.text]);  // 0..1 (sémantique si embed)
     const masterConsensus = 1 - consultation.disagreement;                        // 0..1
