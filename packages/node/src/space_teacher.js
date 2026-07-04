@@ -14,12 +14,14 @@
 
 import { SpaceAI } from '#space_ai';
 import { Critic } from '#critic';
+import { assertTeachable } from '#external_providers';
 import { disagreement as semanticScore } from '#semantic_disagreement';
 
 // Construit generate(prompt, {role, temperature, maxTokens}) qui route chaque
 // RÔLE vers un fournisseur via gateway.complete (appel REST réel, PII + cache +
 // coûts inclus puisque ça passe par le gateway).
-export function makeRoleGenerate(gateway, { roleProviders = { proposer: 'xai', critic: 'anthropic', synthesizer: 'deepseek' } } = {}) {
+export function makeRoleGenerate(gateway, { roleProviders = { proposer: 'deepseek', critic: 'deepseek', synthesizer: 'deepseek' } } = {}) {
+  for (const p of Object.values(roleProviders)) assertTeachable(p);   // PARE-FEU : rôles enseignants = enseignables (DeepSeek/local), pas Claude/Grok
   return async (prompt, { role = 'proposer', temperature, maxTokens } = {}) => {
     const provider = roleProviders[role] ?? roleProviders.proposer ?? 'xai';
     const r = await gateway.complete(provider, [{ role: 'user', content: prompt }], { temperature, maxTokens });
@@ -32,11 +34,12 @@ export function makeRoleGenerate(gateway, { roleProviders = { proposer: 'xai', c
 // IA EXTERNE via le gateway (l'ancre anti-chambre-d'écho, obligatoire). Les
 // identités locales (proposerId/synthesizerId) sont choisies par assignPanel().
 export function makeMixedRoleGenerate({ society, proposerId, synthesizerId, gateway,
-                                        criticProvider = 'anthropic', tokenizer = null } = {}) {
+                                        criticProvider = 'deepseek', tokenizer = null } = {}) {
   if (!society) throw new Error('[makeMixedRoleGenerate] society requise');
   if (!gateway) throw new Error('[makeMixedRoleGenerate] gateway requis (critique externe)');
   return async (prompt, { role = 'proposer', temperature, maxTokens } = {}) => {
-    if (role === 'critic') {                                   // ancre externe obligatoire
+    if (role === 'critic') {                                   // ancre externe obligatoire (ENSEIGNABLE)
+      assertTeachable(criticProvider);                         // PARE-FEU : critique enseignant = DeepSeek/local, pas Claude/Grok
       const r = await gateway.complete(criticProvider, [{ role: 'user', content: prompt }], { temperature, maxTokens });
       return (r?.text ?? '').toString();
     }
