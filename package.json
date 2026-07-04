@@ -151,6 +151,7 @@
     "#eval_harness": "./eval_harness.js",
     "#living_reserve": "./living_reserve.js",
     "#mesh_fabric": "./mesh_fabric.js",
+    "#vitality_surf": "./vitality_surf.js",
     "#uniswap_v4": "./uniswap_v4.js"
   }
 }
