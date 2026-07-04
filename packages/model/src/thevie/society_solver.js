@@ -88,6 +88,28 @@ export async function runAgenda(registry, solver, { generate, max = 3, rounds = 
   return reports;
 }
 
+// ─── Agenda AUTONOME : amorce le registre depuis un catalogue par catégorie ──
+// « Auto-dériver les problèmes » : le système a de quoi travailler sans attendre
+// de soumission. Catalogue de départ (à curer/étendre, ou compléter par des
+// soumissions utilisateurs / une base de problèmes).
+const PROBLEM_CATALOG = {
+  environmental: ['Réduire l\'empreinte carbone du transport urbain', 'Améliorer le tri et le recyclage des plastiques', 'Préserver la biodiversité en milieu agricole'],
+  medical:       ['Améliorer le dépistage précoce des maladies chroniques', 'Faciliter l\'accès aux soins en zones isolées', 'Réduire l\'antibiorésistance'],
+  societal:      ['Réduire la fracture numérique', 'Favoriser l\'inclusion des aînés au numérique', 'Lutter contre l\'isolement social'],
+  scientific:    ['Améliorer le stockage d\'énergie renouvelable', 'Rendre l\'eau potable accessible en zone aride'],
+  work:          ['Réduire le gaspillage en restauration collective', 'Améliorer la formation continue des travailleurs'],
+  cultural:      ['Préserver les langues et savoirs menacés', 'Élargir l\'accès à la culture'],
+};
+export function deriveProblems(registry, { categories = Object.keys(PROBLEM_CATALOG), perCategory = 2, weight = 0.5 } = {}) {
+  const created = [];
+  for (const cat of categories) {
+    for (const title of (PROBLEM_CATALOG[cat] || []).slice(0, perCategory)) {
+      created.push(registry.submit({ title, domain: cat, category: cat, weight, source: 'derived' }));
+    }
+  }
+  return created;
+}
+
 // Démo/validation autonome : `node society_solver.js`  (générateur de rôles MOCK)
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
@@ -121,6 +143,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const reports = await runAgenda(reg2, solver, { generate, max: 5 });
     A(reports.length === 2 && reports.every(r => r.accepted), 'agenda auto : 2 problèmes résolus → 2 comptes rendus');
     A(reg2.stats().solved === 2 && reg2.stats().open === 0, 'agenda auto : registre à jour (2 résolus, 0 ouvert)');
+    const reg3 = new ProblemRegistry();
+    const derived = deriveProblems(reg3, { categories: ['environmental', 'medical'], perCategory: 2 });
+    A(derived.length === 4 && reg3.stats().open === 4, 'deriveProblems : agenda auto-amorcé (2 environnement + 2 médical)');
+    A(reg3.list({ category: 'medical' }).length === 2, 'deriveProblems : problèmes catégorisés');
     console.log(`   (rapport: "${report.title.slice(0, 28)}" → solution ${report.solution.length} car., ${report.participants.length} IA)`);
     console.log('✓ Society Solver — problème → trilogue → compte rendu (côté rapport, hors entraînement), vérifs OK');
   })();
