@@ -74,6 +74,22 @@ export class MandateError extends Error {
   constructor(message, code = 'E_MANDATE') { super(message); this.name = 'MandateError'; this.code = code; }
 }
 
+// ─── Grammaire GBNF de la trame du Pilote (par stratégie) ────────────────────
+// Contraint le modèle local (node-llama-cpp) à n'émettre qu'un objet JSON
+// structurellement valide → #parseFrame réussit toujours (le levier « sortie
+// garantie »). Sans backend GBNF (mock / moteur JS), la chaîne est ignorée.
+const GBNF_SHARED = String.raw`
+num  ::= "-"? [0-9]+ ("." [0-9]+)?
+bool ::= "true" | "false"
+str  ::= "\"" ([^"\\] | "\\" .)* "\""
+ws   ::= [ \t\n]*`;
+export function frameGrammar(strategy) {
+  if (strategy === 'grid') return String.raw`root ::= "{" ws "\"shiftPct\":" ws num ws "," ws "\"spanScale\":" ws num ws "," ws "\"gridsDelta\":" ws num ws ("," ws "\"note\":" ws str ws)? "}"` + GBNF_SHARED;
+  if (strategy === 'ai')   return String.raw`root ::= "{" ws "\"side\":" ws side ws "," ws "\"exposure\":" ws num ws "," ws "\"leverage\":" ws num ws ("," ws "\"note\":" ws str ws)? "}"
+side ::= "\"long\"" | "\"short\"" | "\"flat\""` + GBNF_SHARED;
+  return String.raw`root ::= "{" ws "\"pace\":" ws num ws "," ws "\"lotScale\":" ws num ws "," ws "\"freeze\":" ws bool ws ("," ws "\"note\":" ws str ws)? "}"` + GBNF_SHARED;
+}
+
 export class MandateEngine extends EventEmitter {
   #desk;        // TradingDesk — oracle de prix (getPairs) + conseil (consultAdvisors)
   #generate;    // async ({prompt, ai, maxTokens}) => string
@@ -411,7 +427,7 @@ export class MandateEngine extends EventEmitter {
 
     let frame = null;
     try {
-      const r = await this.#generate({ prompt, ai: m.ai, maxTokens: 200 });
+      const r = await this.#generate({ prompt, ai: m.ai, maxTokens: 200, grammar: frameGrammar(m.strategy) });
       const text = (typeof r === 'string') ? r : (r && r.text) ? r.text : '';
       frame = this.#parseFrame(text);
     } catch (_) { frame = null; }
@@ -597,10 +613,9 @@ export class MandateEngine extends EventEmitter {
     }
     this.#logAct(m, symbol, 'hold', `Pilote : expo ${expoNow.toFixed(0)}% / cible ${f.exposure}% (${f.side}) — maintien`, this.#equity(m));
   }
-
-  // ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
+// ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
   #tickDCA(m) {
-const symbol = m.pairs[0];
+    const symbol = m.pairs[0];
     const p = this.#pairInfo(symbol);
     if (!p) { this.#logAct(m, symbol, 'skip', 'Paire indisponible'); return; }
     const mark = p.markPrice;
@@ -714,8 +729,7 @@ const symbol = m.pairs[0];
     this.emit('mandate', { type: 'remove', id });
     return { removed: true, id };
   }
-
-  // ─── Daemon serveur ──────────────────────────────────────────────────────
+// ─── Daemon serveur ──────────────────────────────────────────────────────
   async #daemonTick() {
     if (this.#daemonBusy) return;
     this.#daemonBusy = true;
