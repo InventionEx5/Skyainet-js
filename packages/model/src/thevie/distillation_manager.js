@@ -220,10 +220,12 @@ export class DistillationManager {
    * @param {Function} teacherGenerate — async (prompt, {maxTokens}) => text|{text}
    * @returns {Promise<TrainingExample[]>}
    */
-  async generateFromTeacher(topics, teacherGenerate) {
+  async generateFromTeacher(topics, teacherGenerate, { provider = null } = {}) {
     if (typeof teacherGenerate !== 'function') {
       throw new Error('teacherGenerate (async fn) requis');
     }
+    const { assertTeachable } = await import('#external_providers');
+    assertTeachable(provider);   // PARE-FEU : DeepSeek/local OK ; Claude/Grok interdits d'entraînement (CGU)
     const dataset = [];
     for (const topic of topics) {
       const prompt = `Génère une réponse détaillée, précise et pédagogique sur : ${topic}.\nSois clair, structuré et bienveillant.`;
