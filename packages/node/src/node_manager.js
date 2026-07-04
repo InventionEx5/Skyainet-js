@@ -37,6 +37,7 @@ import { AccountType }        from '#rewards';
 import { ValidatorNode }      from '#validator';
 import { Sentinel }           from '#auto_healing';
 import { MigrationManager }   from '#migration_manager';
+import { Personality }        from '#personality';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -453,7 +454,6 @@ export class NodeManager {
 
     // ─── Validator Stake ──────────────────────────────────────
 
-    
     /**
      * Ajoute du stake SKY à un nœud Validator.
      * Débite le wallet de l'utilisateur.
@@ -634,8 +634,12 @@ export class NodeManager {
         const from = this.#get(fromNodeId);
         const to   = this.#get(toNodeId);
 
-        // MigrationManager prépare le package (sans Personality ici — stub)
-        const mm = new MigrationManager({ enabled: true });
+        // Prépare un TravelPackage chiffré : personnalité dérivée de l'alias du
+        // nœud + stats détenues par le NodeManager (personnalité/mémoire complètes
+        // nécessiteraient un stockage par nœud — transfert des attributs dans executeMigration).
+        const mm            = new MigrationManager({ enabled: true });
+        const personality   = new Personality(from.alias || 'Default');
+        const travelPackage = mm.prepareTravel(personality, { stake: from.stakeAmount, reputation: from.reputationScore }, null);
 
         const plan = {
             planId    : `mig-${randomUUID().slice(-8)}`,
@@ -646,6 +650,7 @@ export class NodeManager {
             fromAlias : from.alias,
             toAlias   : to.alias,
             stakeAmount: from.stakeAmount,
+            package    : travelPackage ? { prepared: true, encrypted: String(travelPackage).startsWith('ROMAN|'), sizeBytes: String(travelPackage).length } : null,
             createdAt : Date.now(),
             status    : 'planned',
         };
@@ -688,7 +693,7 @@ export class NodeManager {
     /**
      * Passe un nœud en mode Maintenance.
      */
-    setMaintenance(nodeId) {
+setMaintenance(nodeId) {
         const node = this.#get(nodeId);
         node.state = NodeState.Maintenance;
         return node.toJSON();
@@ -802,7 +807,8 @@ export class NodeManager {
     }
 
     // ─── Santé ────────────────────────────────────────────────
-*
+
+    /**
      * Retourne un rapport de santé condensé du nœud.
      * @param {string} nodeId
      */
@@ -894,7 +900,7 @@ export class NodeManager {
      * @param {number} offerOpts.availableHours — durée de disponibilité
      * @param {string} [offerOpts.description]
      */
-    setForRent(nodeId, offerOpts = {}) {
+setForRent(nodeId, offerOpts = {}) {
         const node = this.#get(nodeId);
         if (node.isRentedOut) throw NodeManagerError.alreadyRented(nodeId);
         if (!node.isActive)   throw new NodeManagerError(`Node ${nodeId} must be Active to rent`, 'INVALID_STATE');
@@ -1138,6 +1144,7 @@ export class ThevieStakingPool {
 // ═══════════════════════════════════════════════════════════════
 // THEVIE GENESIS NODE — nœud permanent, jamais supprimable
 // ═══════════════════════════════════════════════════════════════
+
 export class ThevieGenesisNode {
     static GENESIS_ID    = 'thevie-genesis-validator-00000001';
     static STAKE_AMOUNT  = 50_000;   // SKY — alimenté depuis wallet Genesis plus tard
@@ -1210,9 +1217,9 @@ export default NodeManager;
 function _delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function _nextTier(score) {
-    if (score >= 0.95) return 'Legend (max)';
+if (score >= 0.95) return 'Legend (max)';
     if (score >= 0.85) return 'Legend';
     if (score >= 0.70) return 'Sovereign';
     if (score >= 0.50) return 'Trusted';
     return 'Reliable';
-}
+} 
