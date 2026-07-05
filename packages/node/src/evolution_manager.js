@@ -600,7 +600,7 @@ export class EvolutionManager {
       throw new Error('registry.registerAdapter requis');
     registry.registerAdapter({
       name, task: 'general', runner: 'thevie', source: 'lesson',
-      baseModel: 'thevie-distilled-3b',
+      baseModel: 'thevie-8b',
       rank: this.#loraAdapter?.rank ?? 8, version: this.#trainingCount,
       specialties: ['general', 'continual-learning', 'evolution'],
     });
