@@ -26,7 +26,7 @@ export class TrainingExample {
 
 export class DistillationConfig {
   constructor({
-    teacherModel       = 'thevie-distilled-3b',
+    teacherModel       = 'thevie-8b',
     studentModel       = 'loraevo',
     outputDir          = './data/distillation',
     numSamples         = 3,
@@ -213,9 +213,10 @@ export class DistillationManager {
   // ─── Distillation depuis teachers externes (Fusion L4) ───────
 
   /**
-   * Génère un dataset depuis un teacher EXTERNE (Grok, Claude, Deepseek,
-   * Mistral) via une fonction generate injectée — distillation des IA cloud
-   * vers le student local.
+   * Génère un dataset depuis un teacher EXTERNE (Grok, Claude, Deepseek)
+   * via une fonction generate injectée — distillation des IA cloud vers le
+   * student local. Pare-feu : seul DeepSeek (poids ouverts) peut réellement
+   * enseigner ; Grok/Claude sont bloqués par assertTeachable.
    * @param {string[]} topics
    * @param {Function} teacherGenerate — async (prompt, {maxTokens}) => text|{text}
    * @returns {Promise<TrainingExample[]>}
