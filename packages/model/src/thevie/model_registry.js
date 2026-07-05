@@ -3,7 +3,7 @@
 // Model Registry — Gestion Centralisée des Modèles + Adapters (Fusion L0)
 // Sélection dynamique selon tâche, coût, vitesse, qualité.
 // Roster aligné : local = Thevie / LoraÉvo / open-weights ;
-// cloud = Claude · Deepseek · Grok · Mistral (gpt-4o + gemini retirés).
+// cloud = Claude · Deepseek · Grok (gpt-4o + gemini + mistral retirés).
 // + Catalogue du Dynamic Adapter Swarm (découverte d'adapters LoRA par tâche).
 // SkyAInet × Nikola T369
 // =====================================================
@@ -104,7 +104,7 @@ export class AdapterInfo {
     task           = 'general',
     rank           = 8,
     scale          = 1.0,
-    baseModel      = 'thevie-distilled-3b',
+    baseModel      = 'thevie-8b',
     source         = 'lesson',        // 'lesson' | 'distilled' | 'manual' | 'dream'
     runner         = 'thevie',        // Runner propriétaire (thevie | loraevo | t369)
     supportsHotSwap = true,
@@ -300,28 +300,22 @@ export class ModelRegistry {
     // (poids 3B entraînés pas encore disponibles), utilisés pour le scoring du
     // sélecteur. Mesures réelles du moteur actuel : voir MEASURED_REFERENCE.
     this.register({
-      name: 'thevie-distilled-3b', backend: 't369', modelId: 'thevie/distilled-3b',
+      name: 'thevie-8b', backend: 't369', modelId: 'thevie/qwen3-8b-distilled',
       costPer1kTokens: 0, avgQuality: 0.87, avgSpeed: 135,
       specialties: ['general','fast','thevie','rag','orchestration'],
-      supportsLora: true, isLocal: true, contextWindow: 8192,
+      supportsLora: true, isLocal: true, contextWindow: 32768,   // distillé depuis Qwen3-8B
     });
     this.register({
       name: 'loraevo', backend: 't369', modelId: 'thevie/lora-evo',
       costPer1kTokens: 0, avgQuality: 0.85, avgSpeed: 110,
       specialties: ['evolution','learning','lora','adaptation','code','contracts','thevie'],
-      supportsLora: true, isLocal: true, contextWindow: 8192,
+      supportsLora: true, isLocal: true, contextWindow: 32768,   // adaptateur sur Qwen3-8B
     });
     this.register({
-      name: 'llama-3.1-8b', backend: 'vllm', modelId: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+      name: 'qwen3-8b', backend: 'vllm', modelId: 'Qwen/Qwen3-8B',
       costPer1kTokens: 0, avgQuality: 0.84, avgSpeed: 48,
-      specialties: ['code','reasoning','general'],
-      supportsLora: true, isLocal: true, contextWindow: 32768,
-    });
-    this.register({
-      name: 'mistral-7b', backend: 'vllm', modelId: 'mistralai/Mistral-7B-Instruct-v0.3',
-      costPer1kTokens: 0, avgQuality: 0.82, avgSpeed: 62,
-      specialties: ['general','fast','multilingual'],
-      supportsLora: true, isLocal: true, contextWindow: 32768,
+      specialties: ['base','code','reasoning','general'],
+      supportsLora: true, isLocal: true, contextWindow: 32768,   // base résidente (Apache 2.0)
     });
 
     // ─── Modèles cloud (partenaires : Grok · Claude · DeepSeek) ──
@@ -349,7 +343,7 @@ export class ModelRegistry {
   #registerDefaultAdapters() {
     this.registerAdapter({
       name: 'thevie-rag', task: 'rag', runner: 'thevie', source: 'distilled',
-      baseModel: 'thevie-distilled-3b', specialties: ['rag','synthesis','orchestration','general'],
+      baseModel: 'thevie-8b', specialties: ['rag','synthesis','orchestration','general'],
     });
     this.registerAdapter({
       name: 'loraevo-code', task: 'code', runner: 'loraevo', source: 'lesson',
@@ -357,11 +351,11 @@ export class ModelRegistry {
     });
     this.registerAdapter({
       name: 't369-security', task: 'security', runner: 't369', source: 'manual',
-      baseModel: 'thevie-distilled-3b', specialties: ['security','verification','attestation'],
+      baseModel: 'thevie-8b', specialties: ['security','verification','attestation'],
     });
     this.registerAdapter({
       name: 't369-dreamweaver', task: 'imagination', runner: 't369', source: 'dream',
-      baseModel: 'thevie-distilled-3b', specialties: ['imagination','synthesis','creativity'],
+      baseModel: 'thevie-8b', specialties: ['imagination','synthesis','creativity'],
     });
   }
 }
