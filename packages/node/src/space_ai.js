@@ -34,6 +34,7 @@ const CONVERGENCE_SIM = 0.85;   // similarité au-delà de laquelle on considèr
 export class SpaceAI {
   #generate;     // async (prompt, {role, temperature, ai, maxTokens}) => text | {text}
   #maxRounds;
+  #minRounds;
   #names;
   #history;
 
@@ -49,6 +50,7 @@ export class SpaceAI {
     }
     this.#generate  = opts.generate;
     this.#maxRounds = Math.max(1, opts.maxRounds ?? 2);
+    this.#minRounds = Math.max(1, opts.minRounds ?? 6);   // plancher : même un sujet simple reçoit ≥ minRounds rounds (jamais bâclé)
     this.#names = {
       proposer   : opts.names?.proposer    ?? 'Thevie',
       critic     : opts.names?.critic      ?? 'T369',
@@ -64,45 +66,43 @@ export class SpaceAI {
    * @returns {Promise<{ answer, rounds, transcript, converged }>}
    */
   async trilogue(query, opts = {}) {
-    const rounds  = Math.max(1, Math.min(opts.rounds ?? this.#maxRounds, 5));
-    const context = opts.context ? `Contexte: ${opts.context}\n` : '';
+    const minRounds = Math.max(1, opts.minRounds ?? this.#minRounds);
+    const maxRounds = Math.max(minRounds, Math.min(opts.rounds ?? this.#maxRounds, 12));   // plafond 12
+    const context   = opts.context ? `Contexte: ${opts.context}\n` : '';
     const transcript = [];
 
-    let proposal = await this.#run('proposer',
-      `${context}Question: ${query}\n\nPropose ta meilleure réponse.`);
-    transcript.push({ role: 'proposer', ai: this.#names.proposer, text: proposal });
-
+    let prevSynth = '';
+    let answer    = '';
     let converged = false;
-    let prev = '';
+    let roundsRun = 0;
 
-    for (let round = 0; round < rounds; round++) {
-      // Critique
+    // Structure B : chaque round = Proposeur + Critique + Synthétiseur (les 3 parlent).
+    for (let round = 1; round <= maxRounds; round++) {
+      const proposal = await this.#run('proposer', round === 1
+        ? `${context}Question: ${query}\n\nPropose ta meilleure réponse, complète et rigoureuse.`
+        : `${context}Question: ${query}\n\nMeilleure réponse actuelle:\n${prevSynth}\n\nRe-propose une version améliorée (angle neuf, plus complète). Un sujet simple reste important : ne bâcle pas.`);
+      transcript.push({ role: 'proposer', ai: this.#names.proposer, round, text: proposal });
+
       const critique = await this.#run('critic',
-        `${context}Question: ${query}\n\nRéponse proposée:\n${proposal}\n\n` +
-        `Liste les faiblesses et ce qui manque.`);
-      transcript.push({ role: 'critic', ai: this.#names.critic, round: round + 1, text: critique });
+        `${context}Question: ${query}\n\nRéponse proposée:\n${proposal}\n\nListe rigoureusement les faiblesses, oublis et angles manquants.`);
+      transcript.push({ role: 'critic', ai: this.#names.critic, round, text: critique });
 
-      // Synthèse
       const synthesis = await this.#run('synthesizer',
-        `${context}Question: ${query}\n\nProposition:\n${proposal}\n\nCritique:\n${critique}\n\n` +
-        `Produis la réponse finale améliorée qui répond à la critique.`);
-      transcript.push({ role: 'synthesizer', ai: this.#names.synthesizer, round: round + 1, text: synthesis });
+        `${context}Question: ${query}\n\nProposition:\n${proposal}\n\nCritique:\n${critique}\n\nProduis la réponse finale améliorée qui répond à la critique.`);
+      transcript.push({ role: 'synthesizer', ai: this.#names.synthesizer, round, text: synthesis });
 
-      // Convergence : la synthèse change peu par rapport au tour précédent
-      if (prev && _similarity(prev, synthesis) > CONVERGENCE_SIM) {
-        proposal = synthesis; converged = true; break;
+      answer = synthesis;
+      roundsRun = round;
+
+      // Convergence autorisée SEULEMENT après minRounds (le simple reçoit >= minRounds rounds solides).
+      if (round >= minRounds && prevSynth && _similarity(prevSynth, synthesis) > CONVERGENCE_SIM) {
+        converged = true; break;
       }
-      prev     = synthesis;
-      proposal = synthesis;   // la synthèse devient la proposition du tour suivant
+      prevSynth = synthesis;
     }
 
-    const result = {
-      answer    : proposal,
-      rounds    : transcript.filter(t => t.role === 'synthesizer').length,
-      transcript,
-      converged,
-    };
-    this.#history.push({ query, answer: proposal, at: Date.now() });
+    const result = { answer, rounds: roundsRun, transcript, converged };
+    this.#history.push({ query, answer, at: Date.now() });
     return result;
   }
 
