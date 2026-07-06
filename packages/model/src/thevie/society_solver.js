@@ -46,6 +46,14 @@ export class ProblemRegistry {
     if (filter.category) a = a.filter(p => p.category === filter.category);
     return a.map(p => ({ ...p })).sort((x, y) => y.weight - x.weight);
   }
+  pruneSolved(keepFraction = 0.5) {                                // purge : garde la fraction LA PLUS RÉCENTE des problèmes résolus
+    const k = Math.max(0, Math.min(1, keepFraction));
+    const solved = [...this.#problems.values()].filter(p => p.status === 'solved').sort((a, b) => b.ts - a.ts);
+    const keep = Math.ceil(solved.length * k);
+    let removed = 0;
+    for (let i = keep; i < solved.length; i++) { this.#problems.delete(solved[i].id); removed++; }
+    return removed;
+  }
   stats() { const a = [...this.#problems.values()]; const by = (s) => a.filter(p => p.status === s).length; return { total: a.length, open: by('open'), solving: by('solving'), solved: by('solved') }; }
 }
 
@@ -55,10 +63,10 @@ export class SocietySolver {
   constructor({ minSolutionLen = 40 } = {}) { this.#minSolutionLen = minSolutionLen; }
   // `generate` : async (prompt, {role, temperature, ai, maxTokens}) => text|{text}.
   // Les rôles peuvent router vers des cœurs LOCAUX et/ou Claude/Grok (RAPPORT).
-  async solve(problem, { generate, rounds = 2, names } = {}) {
+  async solve(problem, { generate, rounds = 12, minRounds = 6, names } = {}) {
     if (typeof generate !== 'function') throw new Error('[Solver] generate requis (rôles → IA : cœurs locaux et/ou Claude/Grok pour le rapport)');
     const { SpaceAI } = await import('#space_ai');
-    const space = new SpaceAI({ generate, names, maxRounds: rounds });
+    const space = new SpaceAI({ generate, names, maxRounds: rounds, minRounds });
     const tri = await space.trilogue(problem.description || problem.title, {
       context: `Domaine: ${problem.domain} (${problem.category}). Problème à résoudre: ${problem.title}`,
     });
