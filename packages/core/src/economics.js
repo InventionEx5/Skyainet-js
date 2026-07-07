@@ -6,7 +6,7 @@
 
 "use strict";
 
-import { UserRewards, AccountType, RewardReason } from './rewards.js';
+import { UserRewards, AccountType, RewardReason } from '#rewards';
 
 // ─────────────────────────────────────────────────────────────────
 // ENUMS — Plans et Tiers
@@ -168,7 +168,7 @@ export class NodeEconomics {
    *   — En production, remplacer creditLocal par un vrai transfer ERC-20
    *     via treasury.sendToUser(wallet.address, amount).
    *
-   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @param {import('#wallet').SkyWallet|null} wallet
    * @returns {Promise<{ amount: number, walletBalance: number|null, payoutRecord: object }>}
    */
   async claimMonthlyRewards(wallet = null) {
@@ -204,7 +204,7 @@ export class NodeEconomics {
    * Appelée par TreasuryManager.distributeRewards() pour chaque nœud contributeur.
    *
    * @param {number} amount  — montant SKY à créditer
-   * @param {import('./wallet.js').SkyWallet|null} wallet
+   * @param {import('#wallet').SkyWallet|null} wallet
    */
   async receiveDistribution(amount, wallet = null) {
     if (amount <= 0) return;
@@ -258,6 +258,42 @@ export class NodeEconomics {
       lastPayout      : this.lastPayout,
       payoutHistory   : this.#payoutHistory,
       rewards         : this.userRewards.stats(),
+    };
+  }
+
+  // -- Handlers API (Economics: rewards/wallet/abonnements/profil) -- migres depuis skycloud.js
+  //    Les methodes node.X() restent dans skycloud (orchestrent #userRewards/#userProfile/#nodeEcon/#skyWallet/#treasury/#subscriptions).
+  apiHandlers(node) {
+    return {
+      claimRewards              : node.claimRewards.bind(node),
+      claim_rewards             : node.claimRewards.bind(node),
+      getRewardsStats           : node.getRewardsStats.bind(node),
+      get_rewards_stats         : node.getRewardsStats.bind(node),
+      creditWallet              : amount => node.creditWallet(amount),
+      credit_wallet             : amount    => node.creditWallet(amount),
+      withdraw_to_wallet        : (address, amount) => node.withdrawToWallet(address, amount),
+      connect_wallet            : wallet    => node.connectWallet(wallet),
+      connect_treasury          : treasury  => node.connectTreasury(treasury),
+      send_sky                  : (to, amt, label, txHash) => {   // log seul — l'envoi réel est signé par MetaMask côté frontend (non-custodial)
+        console.info(`[SkyCloud] tx sortante (signée MetaMask) → ${to} · ${amt} SKY · ${txHash ?? 'no-hash'}${label ? ' · ' + label : ''}`);
+        return { logged: true, to, amount: amt, txHash: txHash ?? null };
+      },
+      get_tx_history            : limit     => node.skyWallet?.getTransactionHistory(limit),
+      subscribeToPlan           : (context, planIndex) => node.subscribeToPlan(context, planIndex),
+      subscribe_to_plan         : (context, planIndex) => node.subscribeToPlan(context, planIndex),
+      cancelSubscription        : context              => node.cancelSubscription(context),
+      cancel_subscription       : (context)           => node.cancelSubscription(context),
+      getActiveSubscriptions    : ()                   => node.getActiveSubscriptions(),
+      get_active_subscriptions  : ()                   => node.getActiveSubscriptions(),
+      getSubscription           : context              => node.getSubscription(context),
+      getSubscriptionPlans      : ()                   => node.getSubscriptionPlans(),
+      get_subscription_plans    : ()                   => node.getSubscriptionPlans(),
+      get_user_profile          : ()        => node.getUserProfile(),
+      get_profile_nav_badge     : ()        => node.getProfileNavBadge(),
+      update_reputation         : score     => node.updateReputation(score),
+      set_account_type          : type      => node.setAccountType(type),
+      set_verification_level    : level     => node.setVerificationLevel(level),
+      link_wallet_to_profile    : address   => node.linkWalletToProfile(address),
     };
   }
 }
