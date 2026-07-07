@@ -482,6 +482,8 @@ export class ComputeMarketplace {
       'mp_get_owner_rentals'  : (ownerId) => this.getActiveRentalsForOwner(ownerId),
       'mp_get_stats'          : ()        => this.getMarketStats() ?? {},
       'mp_get_history'        : ()        => (this.getRentalHistory ? this.getRentalHistory() : []),
+      'get_node_avg_price'    : ()        => this.getAvgPriceByNodeType?.() ?? [],
+      'get_node_ticker_data'  : ()        => this.getNodeTickerData?.() ?? {},
     };
   }
 }
