@@ -5,8 +5,8 @@
 
 "use strict";
 
-import { HybridTransport }           from '../../secure/src/crypto/hybrid.js';
-import { UserRewards, RewardReason } from '../../core/src/rewards.js';
+import { HybridTransport }           from '#hybrid';
+import { UserRewards, RewardReason } from '#rewards';
 import { randomUUID }                from 'crypto';
 
 // ─────────────────────────────────────────────────────────────────
@@ -464,5 +464,24 @@ export class ComputeMarketplace {
     const rental = this.#rentals.get(rentalId);
     if (!rental) throw new MarketplaceError(`Location '${rentalId}' introuvable`, 'E_NOT_FOUND');
     return rental;
+  }
+
+  // ── Handlers API (page Marketplace · compute) — migrés depuis skycloud.js ──
+  //    Corrections de câblage : listOffers → getAvailableOffers, getMarketplaceStats → getMarketStats.
+  apiHandlers() {
+    return {
+      'mp_publish_offer'      : (nodeId, owner, pricePerHour, hours, opts) =>
+          this.publishOffer(nodeId, owner, pricePerHour, hours, 0, 0.50, opts ?? {}),
+      'mp_withdraw_offer'     : (offerId, owner)  => this.withdrawOffer(offerId, owner),
+      'mp_list_offers'        : (filters)         => this.getAvailableOffers(filters ?? {}),
+      'mp_rent_node'          : (offerId, renter, reputation, hours) =>
+          this.rentNode(offerId, renter, reputation, hours),
+      'mp_complete_rental'    : (rentalId, owner)  => this.completeRental(rentalId, owner),
+      'mp_cancel_rental'      : (rentalId, renter) => this.cancelRental(rentalId, renter),
+      'mp_get_active_rentals' : (userId)  => this.getActiveRentalsForUser(userId),
+      'mp_get_owner_rentals'  : (ownerId) => this.getActiveRentalsForOwner(ownerId),
+      'mp_get_stats'          : ()        => this.getMarketStats() ?? {},
+      'mp_get_history'        : ()        => (this.getRentalHistory ? this.getRentalHistory() : []),
+    };
   }
 }
