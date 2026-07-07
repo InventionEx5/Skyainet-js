@@ -436,6 +436,15 @@ export class AIChatManager {
 
     return `${prompt}\n\n${descriptions.join('\n')}`;
   }
+
+  // -- Handlers API (page Messaging) -- migres depuis skycloud.js
+  //    Delegue aux methodes node.X() (couplees a #messageBus/#apiKeyStore/#evolutionManager, gardees dans skycloud).
+  apiHandlers(node) {
+    return {
+      sendAiMessage    : (from, to, content, apiKey) => node.sendMessage(from, to, content, apiKey),
+      injectChatLesson : node.injectChatLesson.bind(node),
+    };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
