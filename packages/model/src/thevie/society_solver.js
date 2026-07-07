@@ -63,6 +63,11 @@ export class ProblemRegistry {
       'problem_derive'          : (cfg)      => node.deriveProblems(cfg ?? {}),
       'problem_list'            : (cfg)      => this.list(cfg ?? {}),
       'problem_stats'           : ()         => this.stats(),
+      // ─── Society Resolver Council (délibération) ─── migrés depuis skycloud.js
+      'society_solve'           : (cfg)      => node.societySolve(cfg ?? {}),
+      'society_agenda'          : (cfg)      => node.societyAgenda(cfg ?? {}),
+      'society_step'            : ()         => node.societyStep(),
+      'society_archive'         : (cfg)      => node.societyArchive(cfg ?? {}),
     };
   }
 }
