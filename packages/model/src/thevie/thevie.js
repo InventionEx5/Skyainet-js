@@ -306,6 +306,26 @@ export class ThevieRunner {
     }
     return `[plan:${runner}] ${prompt.slice(0, 80)}`;
   }
+
+  // -- Handlers API (page Thevie) -- migres depuis skycloud.js
+  apiHandlers(node) {
+    return {
+      // Orchestrateur IA Thevie (appels directs a ThevieRunner)
+      runThevieTask             : (goal, onStep, opts) => this.run(goal, onStep, opts),
+      getThevieToolCatalog      : ()                    => this.getToolCatalog(),
+      listThevieSessions        : ()                    => this.listSessions(),
+      getThevieStats            : ()                    => this.getStats(),
+      // Deploiement / staking de validateurs Thevie (via NodeManager)
+      'thevie_deploy'           : (type, alias, port, role) => node.nodeManager.deployWithThevie({ type, alias, port, role }),
+      'thevie_staking_stats'    : ()         => node.nodeManager.getStakingPool().getStats(),
+      'thevie_distribute'       : (totalSky) => node.nodeManager.distributeStakingRewards(totalSky),
+      'thevie_staking_history'  : ()         => node.nodeManager.getStakingPool().getDistributionHistory(),
+      // Monitoring (methodes conservees dans skycloud : lisent gateway/keys/nodeManager)
+      'thevie_genesis'          : () => node.thevieValidatorGenesis(),
+      'thevie_monitor_gateway'  : () => node.thevieMonitorGateway(),
+      'thevie_monitor_keys'     : () => node.thevieMonitorKeys(),
+    };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -591,7 +611,7 @@ export class Thevie {
   // ─────────────────────────────────────────────────────────────
 
   async #recursiveSelfImprovement() {
-    this.#recursiveCycles++;
+this.#recursiveCycles++;
 
     // Analyse des faiblesses basée sur les métriques réelles
     const [activeNeurons, avgWisdom] = this.#mesh.getStats();
@@ -804,7 +824,8 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // RÔLE VALIDATEUR
   // ═══════════════════════════════════════════════════════════════
-/**
+
+  /**
    * Statut du nœud courant vis-à-vis de son rôle de validateur :
    * type, éligibilité, stake minimum requis, scores éthiques enregistrés
    * on-chain et rééquilibrages réseau déclenchés.
@@ -867,8 +888,7 @@ export class Thevie {
   // ═══════════════════════════════════════════════════════════════
   // GESTION D'ÉNERGIE DU NŒUD
   // ═══════════════════════════════════════════════════════════════
-
-  /** Met le nœud en veille intelligente — réduit les cycles périodiques. */
+/** Met le nœud en veille intelligente — réduit les cycles périodiques. */
   async sleepNode() {
     this.#node.setState('Sleeping');
     // Suspendre le moteur LoraEvo pour libérer la mémoire
@@ -1169,7 +1189,7 @@ export class Thevie {
    * Envoie le score éthique d'un nœud vers le treasury on-chain.
    * Prépare le terrain pour l'intégration blockchain.
    *
-   * @param {string} nodeId
+* @param {string} nodeId
    * @param {number} score — [0, 1]
    */
   async sendEthicalScoreOnchain(nodeId, score) {
