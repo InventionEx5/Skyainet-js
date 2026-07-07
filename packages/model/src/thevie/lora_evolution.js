@@ -511,7 +511,7 @@ contract {{contractName}} is ReentrancyGuard, Ownable {
         Listing storage l = listings[listingId];
         require(l.seller == msg.sender, "Not seller");
         require(l.active, "Already inactive");
-        l.active = false;
+l.active = false;
         IERC721(l.nftContract).transferFrom(address(this), msg.sender, l.tokenId);
         emit Delisted(listingId);
     }
@@ -1313,14 +1313,12 @@ const ctx = this.shortTermMemory.length > 0
   // GOUVERNANCE LoRA — autorité, propositions d'adaptation, récompenses
   // ═══════════════════════════════════════════════════════════════
 
-  
-  
   /**
    * Définit le niveau d'autonomie de LoraÉvo : 'advisory' < 'copilot' < 'delegated'.
    * 'delegated' exige une sagesse ≥ 0.85, sinon rétrograde automatiquement en 'copilot'.
    * @returns {{ authority:string, autonomy:number, downgraded:boolean }}
    */
-  setLoraAuthority(level) {
+setLoraAuthority(level) {
     if (!LORA_AUTHORITY_TIERS.includes(level)) {
       throw new Error(`[LoraEvo] Niveau d'autorité invalide : ${level}`);
     }
@@ -1442,6 +1440,16 @@ const ctx = this.shortTermMemory.length > 0
       enableAutoDream           : opts => node.enableAutoDream(opts),
       disableAutoDream          : ()   => node.disableAutoDream(),
       isAutoDreamEnabled        : ()   => node.isAutoDreamEnabled,
+      // ─── Governance LoRA (page Governance) ─── migrés depuis skycloud.js
+      setLoraAuthority          : (level)      => this.setLoraAuthority(level),
+      applyLoraProposal         : (proposalId) => this.applyLoraProposal(proposalId),
+      lora_governance           : ()           => this.getLoraGovernance(),
+      getLoraEvoStatus          : ()           => this.getStatus(),
+      loraClaim                 : (amount)     => {
+        const r = this.loraClaim(amount);
+        if (r.claimed > 0) node.creditWallet(r.claimed);   // réclamation → TreasuryVault (wallet)
+        return r;
+      },
     };
   }
 }
