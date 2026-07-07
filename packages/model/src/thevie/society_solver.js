@@ -55,6 +55,16 @@ export class ProblemRegistry {
     return removed;
   }
   stats() { const a = [...this.#problems.values()]; const by = (s) => a.filter(p => p.status === s).length; return { total: a.length, open: by('open'), solving: by('solving'), solved: by('solved') }; }
+
+  // -- Handlers API (page Thevie - Problems) -- migres depuis skycloud.js
+  apiHandlers(node) {
+    return {
+      'problem_submit'          : (cfg)      => this.submit(cfg ?? {}),
+      'problem_derive'          : (cfg)      => node.deriveProblems(cfg ?? {}),
+      'problem_list'            : (cfg)      => this.list(cfg ?? {}),
+      'problem_stats'           : ()         => this.stats(),
+    };
+  }
 }
 
 // ─── Solveur : trilogue → compte rendu structuré ─────────────────────────────
