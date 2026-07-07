@@ -509,8 +509,10 @@ export class MandateEngine extends EventEmitter {
     this.emit('mandate', { type: 'advice', id });
     return { ...c, appliedNextTick: !!(m.pilot && m.status === MANDATE_STATUS.RUNNING) };
   }
-// ─── Tick ────────────────────────────────────────────────────────────────
+
+  // ─── Tick ────────────────────────────────────────────────────────────────
   async runTick(id) {
+async runTick(id) {
     const m = this.#get(id);
     if (m.status !== MANDATE_STATUS.RUNNING) return this.#view(m);
     m.ticks++;
@@ -693,7 +695,8 @@ export class MandateEngine extends EventEmitter {
 
   // ─── Contrôles utilisateur ───────────────────────────────────────────────
   pauseMandate(id) {
-const m = this.#get(id);
+pauseMandate(id) {
+    const m = this.#get(id);
     if (m.status === MANDATE_STATUS.RUNNING) { m.status = MANDATE_STATUS.PAUSED; this.#logAct(m, '*', 'pause', 'Mandat mis en pause'); this.emit('mandate', { type: 'pause', id }); }
     return this.#view(m);
   }
