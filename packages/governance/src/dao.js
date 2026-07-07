@@ -281,6 +281,28 @@ export class Dao {
     if (!p) throw DaoError.notFound(id);
     return p;
   }
+
+  // ─── Handlers API (page Governance — DAO) ─── migrés depuis skycloud.js
+  apiHandlers(node) {
+    return {
+      createProposal            : (title, category) => {
+        const id = this.createProposal({ title, description: title, proposer: 'local-node', category });
+        return { ok: true, proposalId: id };
+      },
+      castConvictionVote        : (proposalId, inFavor, days = 0) => {
+        // Modèle de conviction : plus l'engagement (jours) est long, plus le poids du vote est élevé (sous-linéaire).
+        const power = 1 + Math.sqrt(Math.max(0, Number(days) || 0));
+        this.vote(Number(proposalId), 'local-node', !!inFavor, power);
+        return { ok: true, proposalId: Number(proposalId), power: Math.floor(power) };
+      },
+      get_proposals             : () => this.getActiveProposals().map(p => p.toJSON()),
+      dao_stats                 : () => this.stats(),
+      canExecuteProposal        : (proposalId) => {
+        try { return { canExecute: this.canExecute(Number(proposalId)) }; }
+        catch (e) { return { canExecute: false, reason: e.code || e.message }; }
+      },
+    };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
