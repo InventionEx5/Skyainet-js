@@ -509,8 +509,7 @@ export class MandateEngine extends EventEmitter {
     this.emit('mandate', { type: 'advice', id });
     return { ...c, appliedNextTick: !!(m.pilot && m.status === MANDATE_STATUS.RUNNING) };
   }
-
-  // ─── Tick ────────────────────────────────────────────────────────────────
+// ─── Tick ────────────────────────────────────────────────────────────────
   async runTick(id) {
     const m = this.#get(id);
     if (m.status !== MANDATE_STATUS.RUNNING) return this.#view(m);
@@ -613,7 +612,8 @@ export class MandateEngine extends EventEmitter {
     }
     this.#logAct(m, symbol, 'hold', `Pilote : expo ${expoNow.toFixed(0)}% / cible ${f.exposure}% (${f.side}) — maintien`, this.#equity(m));
   }
-// ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
+
+  // ── Sous-stratégie : DCA (accumulation programmée, sans IA) ──
   #tickDCA(m) {
     const symbol = m.pairs[0];
     const p = this.#pairInfo(symbol);
@@ -693,7 +693,7 @@ export class MandateEngine extends EventEmitter {
 
   // ─── Contrôles utilisateur ───────────────────────────────────────────────
   pauseMandate(id) {
-    const m = this.#get(id);
+const m = this.#get(id);
     if (m.status === MANDATE_STATUS.RUNNING) { m.status = MANDATE_STATUS.PAUSED; this.#logAct(m, '*', 'pause', 'Mandat mis en pause'); this.emit('mandate', { type: 'pause', id }); }
     return this.#view(m);
   }
@@ -729,7 +729,8 @@ export class MandateEngine extends EventEmitter {
     this.emit('mandate', { type: 'remove', id });
     return { removed: true, id };
   }
-// ─── Daemon serveur ──────────────────────────────────────────────────────
+
+  // ─── Daemon serveur ──────────────────────────────────────────────────────
   async #daemonTick() {
     if (this.#daemonBusy) return;
     this.#daemonBusy = true;
@@ -813,6 +814,26 @@ export class MandateEngine extends EventEmitter {
     const active = all.filter(m => m.status === MANDATE_STATUS.RUNNING || m.status === MANDATE_STATUS.PAUSED).length;
     return { total: all.length, active, realizedPnl: +all.reduce((a, m) => a + m.realized, 0).toFixed(6), daemon: !!this.#daemon };
   }
-}
 
+  // -- Handlers API (page Governance - Mandates) -- migres depuis skycloud.js
+  apiHandlers(node) {
+    return {
+      'mandate_create'          : (cfg)      => this.createMandate(cfg ?? {}),
+      'mandate_list'            : ()         => this.listMandates(),
+      'mandate_get'             : (id)       => this.getMandate(id),
+      'mandate_tick'            : (id)       => this.runTick(id),
+      'mandate_consult'         : (id)       => this.consultMandate(id),
+      'mandate_pause'           : (id)       => this.pauseMandate(id),
+      'mandate_resume'          : (id)       => this.resumeMandate(id),
+      'mandate_stop'            : (id)       => this.stopMandate(id),
+      'mandate_remove'          : (id)       => this.removeMandate(id),
+      'mandate_log'             : (id)       => this.getMandateLog(id),
+      'mandate_stats'           : ()         => this.stats(),
+      'mandate_flatten'         : (id)       => this.flattenMandate(id),
+      'mandate_daemon_start'    : (opts)     => this.startDaemon(opts ?? {}),
+      'mandate_daemon_stop'     : ()         => this.stopDaemon(),
+      'mandate_daemon_status'   : ()         => this.daemonStatus(),
+    };
+  }
+}
 export default MandateEngine;
