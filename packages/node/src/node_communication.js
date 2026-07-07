@@ -33,13 +33,13 @@
 "use strict";
 
 import { randomBytes, randomUUID }  from 'crypto';
-import { HybridTransport }          from '../../secure/src/crypto/hybrid.js';
-import { GematriaAead }             from '../../secure/src/crypto/gematria_aead.js';
-import { hkdfSha256 }               from '../../secure/src/crypto/sha_fips.js';
-import { DecentralizedStorage }     from './storage.js';
-import { UserRewards }              from '../../core/src/rewards.js';
-import { NodeState }                from './node_types.js';
-import { ContributionProof }        from './pouw.js';
+import { HybridTransport }          from '#hybrid';
+import { GematriaAead }             from '#gematria_aead';
+import { hkdfSha256 }               from '#sha_fips';
+import { DecentralizedStorage }     from '#storage';
+import { UserRewards }              from '#rewards';
+import { NodeState }                from '#node_types';
+import { ContributionProof }        from '#pouw';
 
 // ─────────────────────────────────────────────────────────────────
 // CONSTANTES
@@ -656,6 +656,18 @@ export class NodeCommunication {
   /** Anti-manipulation — réutilisé lors de la re-validation */
   #hasManip(text) {
     return MANIP_PATTERNS.some(p => p.test(text));
+  }
+
+  // -- Handlers API (page Node - federation de lecons) -- migres depuis skycloud.js
+  //    Les methodes node.X() restent dans skycloud (integration messageBus/pushToBus + appels internes).
+  apiHandlers(node) {
+    return {
+      broadcastLesson  : (lesson, threshold) => node.broadcastLesson(lesson, threshold),
+      syncLessons      : (peerComm, topN)    => node.syncLessons(peerComm, topN),
+      propagateLessons : (peerComms)         => node.propagateLessons(peerComms),
+      requestLessons   : (peerComm, filter)  => node.requestLessons(peerComm, filter),
+      getCommStats     : ()                  => node.getCommStats(),
+    };
   }
 }
 
