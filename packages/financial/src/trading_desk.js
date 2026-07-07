@@ -69,19 +69,24 @@ export class TradingError extends Error {
   constructor(message, code = 'E_TRADING') { super(message); this.name = 'TradingError'; this.code = code; }
 }
 
+// Advisors externes reconnus (noms conviviaux ou clés provider) → clé provider.
+const ADVISOR_PROVIDERS = Object.freeze({ anthropic: 'anthropic', claude: 'anthropic', xai: 'xai', grok: 'xai', deepseek: 'deepseek' });
+
 export class TradingDesk extends EventEmitter {
   #pairs;        // Map<symbol, pair>
   #orders;       // Map<id, order>
   #history;      // Array<order>  (clos/annulés, plus récent en tête)
   #generate;     // async ({prompt, ai, maxTokens}) => string
   #search;       // async (query, max) => [{title,snippet,url}] — contexte de marché web (optionnel)
+  #consultExternal; // async (provider, prompt, maxTokens) => string — advisors externes RÉELS (gardé par le toggle External AI)
   #seq;          // compteur d'ordres
   #rng;          // PRNG
 
-  constructor({ generate = null, search = null, pairs = null, seed = 0x7369 } = {}) {
+  constructor({ generate = null, search = null, consultExternal = null, pairs = null, seed = 0x7369 } = {}) {
     super();
     this.#generate = typeof generate === 'function' ? generate : null;
     this.#search   = typeof search   === 'function' ? search   : null;
+    this.#consultExternal = typeof consultExternal === 'function' ? consultExternal : null;
     this.#orders   = new Map();
     this.#history  = [];
     this.#seq      = 0;
@@ -291,7 +296,10 @@ export class TradingDesk extends EventEmitter {
         `- Chiffres : ${ctx.local}\n` +
         (ctx.web ? `- Activité récente (web) :\n${ctx.web}\n` : '- Activité récente : (web indisponible)\n') +
         `Donne un avis bref (1-2 phrases) et un biais buy/sell/neutre, fondé sur ce contexte.`;
-      const text = await this.#ask(prompt, advisor, 200);
+      const prov = ADVISOR_PROVIDERS[String(advisor).toLowerCase()];
+      const text = (prov && this.#consultExternal)
+        ? await this.#consultExternal(prov, prompt, 200)   // advisor EXTERNE réel (gardé par le toggle External AI)
+        : await this.#ask(prompt, advisor, 200);            // cœur local
       const lean = this.#lean(text);
       notes.push({
         advisor,
@@ -434,8 +442,7 @@ export class TradingDesk extends EventEmitter {
     console.info(`[Trading] Clôture ${id} | PnL ${o.pnl} ${p.quote} (${o.pnlPct}%)`);
     return this.#mk(o);
   }
-
-  /** Ajuste TP/SL (positions) ou prix limite (ordres au repos). */
+/** Ajuste TP/SL (positions) ou prix limite (ordres au repos). */
   modifyOrder(id, patch = {}) {
     const o = this.#get(id);
     if (patch.tp != null) o.tp = roundPx(Number(patch.tp));
@@ -444,13 +451,13 @@ export class TradingDesk extends EventEmitter {
     this.emit('order', { type: 'modify', order: this.#mk(o) });
     return this.#mk(o);
   }
-
+ 
   getHistory(limit = 100) {
     return this.#history.slice(0, clamp(limit | 0, 1, 500)).map(o => this.#mk(o));
   }
-
+ 
   // ─── Statistiques ────────────────────────────────────────────────────────
-  stats() {
+stats() {
     const open = this.getOpenOrders();
     const positions = open.filter(o => o.status === ORDER_STATUS.FILLED).length;
     const resting   = open.filter(o => o.status === ORDER_STATUS.OPEN).length;
@@ -466,6 +473,26 @@ export class TradingDesk extends EventEmitter {
       winRate      : closed.length ? +((wins / closed.length) * 100).toFixed(1) : 0,
     };
   }
+ 
+  // ── Handlers API (page Marketplace · Trading) — migrés depuis skycloud.js ──
+apiHandlers(node) {
+    return {
+      'trading_pairs'       : () => this.getPairs(),
+      'trading_candles'     : (symbol, count)    => this.getCandles(symbol, count ?? 48),
+      'trading_set_price'   : (symbol, price)    => this.setMarkPrice(symbol, price),
+      'trading_signals'     : (symbol, ai)       => this.oracleSignals(symbol, ai ?? 't369'),
+      'trading_consult'     : (symbol, advisors) => this.consultAdvisors(symbol, advisors ?? []),
+      'trading_auto'        : (symbol, trader, opts) => this.autoTrade(symbol, trader ?? 'thevie', opts ?? {}),
+      'trading_place'       : (order) => this.placeOrder(order ?? {}),
+      'trading_open_orders' : ()      => this.getOpenOrders(),
+      'trading_cancel'      : (id)    => this.cancelOrder(id),
+      'trading_close'       : (id)    => this.closeOrder(id),
+      'trading_modify'      : (id, patch) => this.modifyOrder(id, patch ?? {}),
+      'trading_history'     : () => this.getHistory(),
+      'trading_stats'       : () => this.stats(),
+      'trading_ai_list'     : () => ({ local: [...node.registeredAIs.entries()].map(([id, label]) => ({ id, label })), external: ['anthropic', 'xai', 'deepseek'].map(id => ({ id, label: id })), externalEnabled: node.externalAIEnabled ?? false }),
+      'market_context'      : (symbol) => this.marketContext(symbol),
+    };
+  }
 }
-
 export default TradingDesk;
