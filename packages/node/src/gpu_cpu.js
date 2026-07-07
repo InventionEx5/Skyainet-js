@@ -548,4 +548,24 @@ export class GpuCpuMarketplaceService extends EventEmitter {
       console.warn('[Marketplace] Persistance échouée:', e.message);
     }
   }
+
+  // ── Handlers API (page Marketplace · GPU) — migrés depuis skycloud.js ──
+  apiHandlers(node) {
+    return {
+      'gpu_publish_offer'      : (nodeId, owner, pricePerHour, hours, tflops, opts) =>
+          this.publishOffer(nodeId, owner, pricePerHour, hours, tflops ?? 0, 0.65, opts ?? {}),
+      'gpu_withdraw_offer'     : (offerId, owner) => { this.withdrawOffer(offerId, owner); return { withdrawn: true, offerId }; },
+      'gpu_list_offers'        : () => this.getAvailableOffers(),
+      'gpu_rent'               : (offerId, renter, reputation, hours) => this.rentNode?.(offerId, renter, reputation, hours),
+      'gpu_complete_rental'    : (rentalId, owner)  => this.completeRental?.(rentalId, owner),
+      'gpu_cancel_rental'      : (rentalId, renter) => this.cancelRental?.(rentalId, renter),
+      'gpu_get_active_rentals' : (userId) => this.getActiveRentals?.(userId) ?? [],
+      'gpu_get_stats'          : () => this.getDashboardStats?.(),
+      'gpu_check_hardware'     : (nodeId) => this.checkNodeHardware?.(nodeId),
+      'get_gpu_catalog'        : () => this.getGpuCatalog(),
+      'get_gpu_avg_price'      : () => this.getAvgPriceByType(),
+      'get_gpu_ticker'         : () => this.getTickerData(),
+    };
+  }
 }
+ 
