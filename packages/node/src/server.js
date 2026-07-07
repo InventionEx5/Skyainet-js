@@ -661,7 +661,7 @@ app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
   if (!name?.trim() || !domain?.trim())
     return apiError(res, 400, 'BAD_REQUEST', "Champs 'name' et 'domain' requis.");
   try {
-    const site = state.node.createSite(name, domain);
+    const site = state.node.hosting.createSite(name, domain);
     res.status(201).json({
       success : true,
       site    : site.toJSON(),
@@ -682,12 +682,12 @@ app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
 
 // GET /api/hosting/sites — liste tous les sites
 app.get('/api/hosting/sites', requireScope('storage:read'), (req, res) => {
-  res.json({ success: true, sites: state.node.listSites() });
+  res.json({ success: true, sites: state.node.hosting.listSites() });
 });
 
 // GET /api/hosting/sites/:siteId — détails d'un site
 app.get('/api/hosting/sites/:siteId', requireScope('storage:read'), (req, res) => {
-  const site = state.node.getSite(req.params.siteId);
+  const site = state.node.hosting.getSite(req.params.siteId);
   if (!site) return apiError(res, 404, 'NOT_FOUND', 'Site introuvable.');
   res.json({ success: true, site });
 });
@@ -706,7 +706,7 @@ app.post('/api/hosting/sites/:siteId/files', requireScope('storage:write'), asyn
     } else {
       raw = Buffer.from(String(data), 'utf8');
     }
-    const fileId = await state.node.uploadSiteFile(req.params.siteId, path, raw);
+    const fileId = await state.node.hosting.uploadSiteFile(req.params.siteId, path, raw);
     res.status(201).json({ success: true, fileId, path, sizeBytes: raw.length });
   } catch (e) {
     apiError(res, 500, 'UPLOAD_ERROR', e.message);
@@ -716,7 +716,7 @@ app.post('/api/hosting/sites/:siteId/files', requireScope('storage:write'), asyn
 // POST /api/hosting/sites/:siteId/publish — publier un site
 app.post('/api/hosting/sites/:siteId/publish', requireScope('storage:write'), async (req, res) => {
   try {
-    const result = await state.node.publishSite(req.params.siteId);
+    const result = await state.node.hosting.publishSite(req.params.siteId);
     res.json({ success: true, ...result });
   } catch (e) {
     apiError(res, 400, 'PUBLISH_ERROR', e.message);
@@ -726,8 +726,8 @@ app.post('/api/hosting/sites/:siteId/publish', requireScope('storage:write'), as
 // POST /api/hosting/sites/:siteId/rollback — rollback à une version
 app.post('/api/hosting/sites/:siteId/rollback', requireScope('storage:write'), async (req, res) => {
   const { version } = req.body;
-try {
-    const result = await state.node.rollbackSite(req.params.siteId, version ?? null);
+  try {
+    const result = await state.node.hosting.rollbackSite(req.params.siteId, version ?? null);
     res.json({ success: true, ...result });
   } catch (e) {
     apiError(res, 400, 'ROLLBACK_ERROR', e.message);
@@ -740,7 +740,7 @@ app.put('/api/hosting/sites/:siteId/domain', requireScope('storage:write'), (req
   if (!customDomain?.trim())
     return apiError(res, 400, 'BAD_REQUEST', "Champ 'customDomain' requis.");
   try {
-    state.node.setCustomDomain(req.params.siteId, customDomain.trim());
+    state.node.hosting.setCustomDomain(req.params.siteId, customDomain.trim());
     res.json({ success: true, customDomain: customDomain.trim(),
                message: `Domaine custom configuré — pointez votre DNS vers ce nœud.` });
   } catch (e) {
@@ -751,7 +751,7 @@ app.put('/api/hosting/sites/:siteId/domain', requireScope('storage:write'), (req
 // DELETE /api/hosting/sites/:siteId — supprimer un site
 app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (req, res) => {
   try {
-    await state.node.deleteSite(req.params.siteId);
+    await state.node.hosting.deleteSite(req.params.siteId);
     res.json({ success: true, message: 'Site supprimé avec tous ses fichiers.' });
   } catch (e) {
     apiError(res, 404, 'NOT_FOUND', e.message);
@@ -779,7 +779,7 @@ async function serveSiteMiddleware(req, res) {
   const start    = Date.now();
 
   try {
-    const result = await state.node.getSiteFile(domain, filePath);
+    const result = await state.node.hosting.getSiteFile(domain, filePath);
 
     if (!result) {
       return res.status(404).send(`
@@ -791,7 +791,7 @@ async function serveSiteMiddleware(req, res) {
     }
 
     // Enregistrer le hit de monitoring
-    state.node.recordSiteHit(req.params.siteId ?? domain, result.sizeBytes);
+    state.node.hosting.recordSiteHit(req.params.siteId ?? domain, result.sizeBytes);
 
     // Log de trafic
     state.node.logTraffic({
@@ -832,6 +832,7 @@ app.post('/api/evolution/train', async (req, res) => {
 // =====================================================
 // WEBSOCKET — TEMPS RÉEL
 // =====================================================
+
 function handleWs(ws) {
   state.metrics.websocketConnections++;
   console.info('🔌 WebSocket connecté');
@@ -932,7 +933,7 @@ function handleWs(ws) {
         break;
 
       case 'hosting_list':
-        response = { type: 'hosting_list_response', sites: state.node.listSites() };
+        response = { type: 'hosting_list_response', sites: state.node.hosting.listSites() };
         break;
 
       case 'hosting_create':
@@ -940,7 +941,7 @@ function handleWs(ws) {
           response = { type: 'error', message: "Champs 'name' et 'domain' requis." };
         } else {
           try {
-            const site = state.node.createSite(cmd.name, cmd.domain);
+            const site = state.node.hosting.createSite(cmd.name, cmd.domain);
             response = { type: 'hosting_create_response', site: site.toJSON() };
           } catch (e) {
             response = { type: 'error', message: e.message };
@@ -953,7 +954,7 @@ function handleWs(ws) {
           response = { type: 'error', message: "Champ 'siteId' requis." };
         } else {
           try {
-            const result = await state.node.publishSite(cmd.siteId);
+            const result = await state.node.hosting.publishSite(cmd.siteId);
             response = { type: 'hosting_publish_response', ...result };
           } catch (e) {
             response = { type: 'error', message: e.message };
@@ -964,8 +965,8 @@ function handleWs(ws) {
       case 'hosting_stats':
         response = {
           type  : 'hosting_stats_response',
-          sites : state.node.listSites(),
-          total : state.node.listSites().length,
+          sites : state.node.hosting.listSites(),
+          total : state.node.hosting.listSites().length,
         };
         break;
 
@@ -1011,7 +1012,6 @@ function handleWs(ws) {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
-
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
@@ -1114,6 +1114,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 // =====================================================
 // DÉMARRAGE
 // =====================================================
+
 // ─── Route générique apiHandlers ──────────────────────────────
 // Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
 // Complète les routes spécifiques ci-dessus.
@@ -1447,7 +1448,7 @@ app.get('/api/node/deploy-thevie', async (req, res) => {
   }
 });
 
-// ── Thevie — surveillance périodique (Gateway + Keys) ──────────
+// ── Thevie — surveillance périodique (Gateway + Keys) ────
 if (state.node) {
   // Monitoring Gateway toutes les 30 secondes
   setInterval(() => {
