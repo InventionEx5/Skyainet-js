@@ -330,12 +330,7 @@ export class UniswapV4Bridge {
       amountOutMinHuman: outMin > 0n ? formatUnits(outMin, r.tout.decimals) : '0',
       slippageBps: Number(bps), deadline, nativeIn: r.nativeIn, nativeOut: r.nativeOut,
       swap: { to: this.#cfg.universalRouter, data: hx(strip0x(SELECTOR.execute) + body), value: r.nativeIn ? '0x' + amtIn.toString(16) : '0x0' },
-      // Vérifications à faire par le signeur (eth_call) — null si entrée native.
-      checks: r.nativeIn ? null : {
-        erc20Allowance : this.erc20AllowanceCalldata(side === 'buy' ? r.quote : r.base, ZERO_ADDRESS /* owner à substituer */),
-        permit2Allowance: null, // fourni par ownerChecks(owner) pour éviter une adresse fictive ici
-      },
-      note: 'La sortie du swap arrive au wallet appelant ; utiliser ownerChecks(pair, side, owner) pour les calldatas d\u2019allowance.',
+      note: 'Sortie du swap au wallet appelant. Entrée non-native : obtenir les calldatas d\u2019allowance/approve via ownerChecks(pair, side, owner).',
     };
   }
   /** Calldatas de vérification/approbation pour un owner donné (entrée non-native). */
@@ -351,6 +346,23 @@ export class UniswapV4Bridge {
       permit2Approve  : this.permit2ApproveCalldata(sym),
     };
   }
-}
 
+  // -- Handlers API (page Marketplace - Uniswap V4) -- migres depuis skycloud.js
+  apiHandlers(node) {
+    return {
+      'v4_status'                    : ()                 => ({ ready: this.isReady(), config: this.getConfig() }),
+      'v4_config_set'                : (cfg)              => this.configure(cfg ?? {}),
+      'v4_missing'                   : (pair)             => this.missingFor(pair),
+      'v4_quote_calldata'            : (pair, side, amt)  => this.quoteCalldata(pair, side, amt),
+      'v4_decode_quote'              : (retHex, outDec)   => this.decodeQuote(retHex, outDec),
+      'v4_plan'                      : (spec)             => this.swapPlan(spec ?? {}),
+      'v4_owner_checks'              : (pair, side, owner)=> this.ownerChecks(pair, side, owner),
+      'v4_erc20_approve_calldata'    : (sym)              => this.erc20ApprovePermit2Calldata(sym),
+      'v4_permit2_approve_calldata'  : (sym, amount, exp) => this.permit2ApproveCalldata(sym, amount ?? 'max', exp),
+      'v4_decode_permit2_allowance'  : (retHex)           => this.decodePermit2Allowance(retHex),
+      'v4_balance_calldata'          : (sym, owner)       => this.balanceOfCalldata(sym, owner),
+      'v4_decode_uint'               : (retHex, dec)      => this.decodeUint(retHex, dec),
+    };
+  }
+}
 export default UniswapV4Bridge;
