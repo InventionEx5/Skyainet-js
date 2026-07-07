@@ -153,6 +153,7 @@
     "#mesh_fabric": "./mesh_fabric.js",
     "#vitality_surf": "./vitality_surf.js",
     "#society_solver": "./society_solver.js",
+    "#smart_contract": "./smart_contract.js",
     "#uniswap_v4": "./uniswap_v4.js"
   }
 }
