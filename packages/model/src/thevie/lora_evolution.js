@@ -511,7 +511,7 @@ contract {{contractName}} is ReentrancyGuard, Ownable {
         Listing storage l = listings[listingId];
         require(l.seller == msg.sender, "Not seller");
         require(l.active, "Already inactive");
-l.active = false;
+        l.active = false;
         IERC721(l.nftContract).transferFrom(address(this), msg.sender, l.tokenId);
         emit Delisted(listingId);
     }
@@ -897,7 +897,7 @@ export class LoraEvo {
   // ═══════════════════════════════════════════════════════════════
 
   #buildContextualPrompt(prompt) {
-    const ctx = this.shortTermMemory.length > 0
+const ctx = this.shortTermMemory.length > 0
       ? '\n[Contexte récent]:\n' +
         this.shortTermMemory.slice(-4).map(e => `- ${e}`).join('\n') + '\n'
       : '';
@@ -1242,7 +1242,8 @@ export class LoraEvo {
   // ═══════════════════════════════════════════════════════════════
   // API PUBLIQUE
   // ═══════════════════════════════════════════════════════════════
-getStatus() {
+
+  getStatus() {
     return (
       `LoraEvo | Évolution: ${this.evolutionScore.toFixed(3)}` +
       ` | Interactions: ${this.totalInteractions}` +
@@ -1312,6 +1313,8 @@ getStatus() {
   // GOUVERNANCE LoRA — autorité, propositions d'adaptation, récompenses
   // ═══════════════════════════════════════════════════════════════
 
+  
+  
   /**
    * Définit le niveau d'autonomie de LoraÉvo : 'advisory' < 'copilot' < 'delegated'.
    * 'delegated' exige une sagesse ≥ 0.85, sinon rétrograde automatiquement en 'copilot'.
@@ -1421,6 +1424,24 @@ getStatus() {
       specialization : this.currentSpecialization,
       wisdom         : +this.evolutionProfile.wisdom.toFixed(3),
       proposals      : [...this.#loraProposals.values()].map(p => ({ ...p })),
+    };
+  }
+
+  // ─── Handlers API (Apprentissage continu : évolution + dream) ─── migrés depuis skycloud.js
+  //     Les méthodes restent dans SkyCloud (couplées à #evolutionManager / #engine / replayBuffer) ;
+  //     ce manager n'expose que les handlers, qui rappellent le node.
+  apiHandlers(node) {
+    return {
+      inject_lesson             : (content, source, qualityScore) => node.injectLesson(content, source, qualityScore),
+      injectLesson              : node.injectLesson.bind(node),
+      runDreamCycle             : node.runDreamCycle.bind(node),
+      triggerTraditionalTraining: node.triggerTraditionalTraining.bind(node),
+      enableAutoTraining        : opts => node.enableAutoTraining(opts),
+      disableAutoTraining       : ()   => node.disableAutoTraining(),
+      isAutoTrainingEnabled     : ()   => node.isAutoTrainingEnabled,
+      enableAutoDream           : opts => node.enableAutoDream(opts),
+      disableAutoDream          : ()   => node.disableAutoDream(),
+      isAutoDreamEnabled        : ()   => node.isAutoDreamEnabled,
     };
   }
 }
