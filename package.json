@@ -21,6 +21,7 @@
     "#canvas_blocker": "./canvas_blocker.js",
     "#chat": "./chat.js",
     "#collectivin": "./collectivin.js",
+    "#complexity_classifier": "./complexity_classifier.js",
     "#compression": "./compression.js",
     "#constant_time": "./constant_time.js",
     "#constitution": "./constitution.js",
