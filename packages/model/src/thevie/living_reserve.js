@@ -203,6 +203,10 @@ export class LivingReserve {
       'vitality_stats'    : ()       => this.stats(),
       'vitality_promote'  : (id)     => this.promote(id),
       'vitality_cycle'    : (id)     => t369FeedbackCycle(this, id, (req) => node.generateWithAI(req)),
+      'vitality_metabolize': (cfg)   => node.runVitalityCycle(cfg ?? {}),
+      'vitality_auto_enable': (cfg)  => node.enableAutoVitality(cfg ?? {}),
+      'vitality_auto_disable': ()    => node.disableAutoVitality(),
+      'vitality_auto_status': ()     => ({ enabled: node.isAutoVitalityEnabled }),
       'vitality_relay'    : (cfg)    => t369DistillationRelay({ teacherId: cfg?.teacher, teacher: (req) => node.generateWithAI(req), studentIds: cfg?.students ?? [], prompts: cfg?.prompts ?? [], reserve: this, router: node.router, meshNodes: node.meshDir.nodes() }),
       'surf_seed'         : (cfg)    => seedIntents(deriveIntents({ reserve: this, extra: cfg?.topics ?? [] }), (q, m) => node.webSearch(q, m), { perIntent: cfg?.perIntent ?? 1 }),
       'surf_run'          : (cfg)    => node.surfRun(cfg ?? {}),
@@ -352,7 +356,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const A = (c, l) => { console.log((c ? '✓' : '✗ ÉCHEC'), l); if (!c) process.exit(1); };
   const R = new LivingReserve();
   const ev = (overall) => ({ overall, suites: [{ name: 'frame-validity', score: overall }] });
-
+ 
   R.register({ id: 'ad_ai_1', domain: 'ai', owner: 'thevie', sizeBytes: 40e6 });
   R.register({ id: 'ad_ai_2', domain: 'ai', owner: 'loraevo', sizeBytes: 40e6 });
   R.register({ id: 'ad_ai_3', domain: 'ai', owner: 't369', sizeBytes: 40e6 });
@@ -366,8 +370,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   A(p2.promoted === true && p2.demoted === 'ad_ai_1', 'promotion gâchée : ad_ai_2 bat l\'actif → titulaire en repli');
   A(R.active('ai').id === 'ad_ai_2', 'actif du domaine = ad_ai_2');
   A(R.promote('ad_ai_3').promoted === false, 'promotion REFUSÉE : score trop bas vs actif');
- 
-  const loan = R.requestLoan('ad_ai_2', 'thevie', { ticks: 2 });
+const loan = R.requestLoan('ad_ai_2', 'thevie', { ticks: 2 });
   A(loan.ok === true && loan.grant.borrower === 'thevie', 'prêt : grant émis à thevie');
   A(!R.requestLoan('ad_ai_2', 'loraevo').ok, 'prêt : refus tant que déjà prêté');
   R.tickLoans();
@@ -378,7 +381,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   A(deg.some(d => d.id === 'ad_ai_3'), 'auto-healing : ad_ai_3 détecté comme dégradé');
   R.quarantine('ad_ai_3');
   A(R.get('ad_ai_3').state === 'retired', 'auto-healing : quarantaine → retiré');
-const rb = R.rollback('ai');
+ 
+  const rb = R.rollback('ai');
   A(rb.ok === true && rb.active === 'ad_ai_1' && rb.retired === 'ad_ai_2', 'rollback : repli ad_ai_1 réactivé, ad_ai_2 retiré');
  
   R.reabsorb('ad_ai_1');
@@ -388,7 +392,6 @@ const rb = R.rollback('ai');
   console.log('\nstats finales :', JSON.stringify(R.stats()));
   console.log('✓ Réserve Vivante — toutes les vérifs passent');
 }
- 
 // Démo (b) pipeline T369 de bout en bout + (c) Data Factory : `node living_reserve.js`
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
@@ -397,7 +400,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const proposal = JSON.stringify({ title:'Réduire le quorum', description:'Passer le quorum à 200.', category:'governance', durationDays:7 });
     const goodGen = async ({ prompt }) => /proposition|gouvernance|category/i.test(prompt) ? proposal : superset;
     const weakGen = async () => 'le marché me semble haussier';
-// ── (b) Pipeline T369 : runEvals → recordEval → promote ──
+ 
+    // ── (b) Pipeline T369 : runEvals → recordEval → promote ──
     const R2 = new LivingReserve();
     R2.register({ id: 'cand_good', domain: 'ai', owner: 'thevie',  sizeBytes: 40e6 });
     R2.register({ id: 'cand_weak', domain: 'ai', owner: 'loraevo', sizeBytes: 40e6 });
@@ -407,8 +411,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     A(cw.promoted === false, 'pipeline T369 : module faible → score bas → promotion refusée');
     A(R2.active('ai').id === 'cand_good', 'pipeline T369 : le meilleur module reste actif (boucle bouclée)');
     console.log(`   (bon: score ${cg.score.toFixed(1)} · faible: score ${cw.score.toFixed(1)})`);
- 
-    // ── (c) Data Factory : robinet du daemon → JSONL vérifié ──
+// ── (c) Data Factory : robinet du daemon → JSONL vérifié ──
     const { TradingDesk }   = await import('#trading_desk');
     const { MandateEngine } = await import('#trading_mandate');
     const OBJ = { horizonTicks:1000, takeProfitPct:100000, maxLossPct:99, maxDrawdownPct:99 };
@@ -418,15 +421,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     desk.setMarkPrice('ETH/USDC', 3200);
     const mdt = eng.createMandate({ capital:1000, pairs:['ETH/USDC'], strategy:'dca', strategyParams:{everyTicks:2}, perTradePct:10, pilotEveryTicks:2, objectives:OBJ });
     for (const px of [3200,3300,3400,3500,3600,3700]) { desk.setMarkPrice('ETH/USDC', px); await eng.runTick(mdt.id); }
-const st = factory.stats();
+    const st = factory.stats();
     A(st.seen > 0, 'data factory : échantillons captés du daemon (cockpit→trame→résultat)');
     A(st.kept > 0, 'data factory : signal vérifié (gain>0) retenu, reste filtré');
     const first = JSON.parse(factory.jsonl.split('\n')[0]);
     A(first.messages && first.messages[0].role === 'user' && first.messages[1].role === 'assistant', 'data factory : format JSONL {messages:[user,assistant]}');
     A(first.messages[0].content.includes('PILOTE'), 'data factory : le prompt cockpit est présent (entraînable)');
     console.log(`   (data factory: ${st.seen} captés, ${st.kept} retenus → ${factory.jsonl.split('\n').length} lignes JSONL)`);
- 
-    // ── Accès LECTURE PARTAGÉE : 3 cerveaux lisent le MÊME module sans exclusivité ──
+// ── Accès LECTURE PARTAGÉE : 3 cerveaux lisent le MÊME module sans exclusivité ──
     const R3 = new LivingReserve();
     R3.register({ id: 'mod_shared', domain: 'ai', owner: 'thevie', base: 'Qwen3-8B' });
     A(R3.checkout('mod_shared', 'thevie').ok && R3.checkout('mod_shared', 'loraevo').ok && R3.checkout('mod_shared', 't369').ok, 'lecture partagée : 3 cerveaux checkout le même module simultanément');
@@ -437,7 +439,7 @@ const st = factory.stats();
  
     // ── Relais de distillation T369 : professeur enseigne → lignée → dispatch GPU ──
     const { CapabilityRouter } = await import('#mesh_fabric');
-const teach = async ({ prompt }) => 'réponse pédagogique vérifiée pour: ' + prompt.slice(0, 20);
+    const teach = async ({ prompt }) => 'réponse pédagogique vérifiée pour: ' + prompt.slice(0, 20);
     const relay = await t369DistillationRelay({
       teacherId: 't369', teacher: teach, studentIds: ['thevie', 'loraevo'],
       prompts: ['explique X', 'résous Y', 'corrige Z'], reserve: R3,
@@ -445,7 +447,7 @@ const teach = async ({ prompt }) => 'réponse pédagogique vérifiée pour: ' + 
       meshNodes: [{ nodeId: 'gpu-cloud', gpu: true, vramMB: 24000, ramMB: 64000 }],
     });
     A(relay.taughtSamples === 3 && relay.jsonl.split('\n').length === 3, 'relais : 3 traces vérifiées → dataset JSONL');
-    A(relay.plans.length === 2 && relay.plans.every(p => p.moduleId), 'relais : 2 élèves, chacun un module distillé enregistré (lignée)');
+A(relay.plans.length === 2 && relay.plans.every(p => p.moduleId), 'relais : 2 élèves, chacun un module distillé enregistré (lignée)');
     A(R3.get(relay.plans[0].moduleId).lineage.some(l => l.op === 'distill' && l.from === 't369'), 'relais : lignée « distillé de t369 » tracée');
     A(relay.plans[0].dispatch.where === 'dispatch' && relay.plans[0].dispatch.target === 'gpu-cloud', 'relais : entraînement élève DISPATCHÉ vers nœud GPU (via fabric)');
     console.log(`   (relais: prof t369 → ${relay.students.join('+')}, ${relay.taughtSamples} traces, dispatch → ${relay.plans[0].dispatch.target})`);
@@ -455,7 +457,7 @@ const teach = async ({ prompt }) => 'réponse pédagogique vérifiée pour: ' + 
     const con = await triadConcert({ prompt: 'BTC maintenant ?', generate: async ({ ai }) => brainVote[ai] || '' });
     A(con.opinions.length === 3, 'concertation : les 3 cerveaux ont donné leur avis');
     A(con.decision.label === 'buy' && con.decision.votes === 2, 'concertation : vote majoritaire (2 buy / 1 sell) → buy');
-const tieVote = { thevie: 'buy', loraevo: 'sell', t369: 'hold' };     // égalité 1/1/1
+    const tieVote = { thevie: 'buy', loraevo: 'sell', t369: 'hold' };     // égalité 1/1/1
     const con2 = await triadConcert({ prompt: 'x', generate: async ({ ai }) => tieVote[ai] });
     A(con2.decision.label === 'hold' && con2.decision.tiebreak === 't369', 'concertation : égalité → T369 (régulateur) tranche');
     console.log(`   (concertation: ${con.decision.label} par ${con.decision.votes}/3${con.decision.unanimous ? ' unanime' : ''})`);
@@ -463,4 +465,3 @@ const tieVote = { thevie: 'buy', loraevo: 'sell', t369: 'hold' };     // égalit
     console.log('✓ Pipeline T369 + Data Factory + lecture partagée + relais + concertation — toutes les vérifs passent');
   })();
 }
- 
