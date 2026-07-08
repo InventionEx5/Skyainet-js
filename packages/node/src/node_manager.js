@@ -854,7 +854,7 @@ setMaintenance(nodeId) {
      * Prouve que le nœud était actif à cet instant.
      * @param {string} nodeId
      */
-    generateAttestation(nodeId) {
+generateAttestation(nodeId) {
         const node  = this.#get(nodeId);
         const attest = new Attestation(node.alias ?? nodeId);
         node.attestation = attest;
@@ -900,7 +900,7 @@ setMaintenance(nodeId) {
      * @param {number} offerOpts.availableHours — durée de disponibilité
      * @param {string} [offerOpts.description]
      */
-setForRent(nodeId, offerOpts = {}) {
+    setForRent(nodeId, offerOpts = {}) {
         const node = this.#get(nodeId);
         if (node.isRentedOut) throw NodeManagerError.alreadyRented(nodeId);
         if (!node.isActive)   throw new NodeManagerError(`Node ${nodeId} must be Active to rent`, 'INVALID_STATE');
@@ -983,7 +983,7 @@ setForRent(nodeId, offerOpts = {}) {
      * Retourne les handlers REST pour server.js.
      * Branché dans skycloud.js apiHandlers().
      */
-    apiHandlers() {
+    apiHandlers(node) {
         const m = this;
         return {
             // Catalogue
@@ -1030,6 +1030,17 @@ setForRent(nodeId, offerOpts = {}) {
             'get_staking_pool'      : ()                         => m.#stakingPool.getStats(),
             'distribute_staking'    : totalSky                   => m.distributeStakingRewards(totalSky),
             'get_staking_history'   : ()                         => m.#stakingPool.getDistributionHistory(),
+            // ─── Mesh Fabric + pairs réseau ─── migrés depuis skycloud.js
+            //     (les méthodes restent dans le node : elles orchestrent #router/#meshDir/#meshBeacon partagés + this.peers)
+            'mesh_capability'       : (cfg)                      => node.setCapability(cfg ?? {}),
+            'mesh_route'            : (cfg)                      => node.meshRoute(cfg?.task ?? 'inference', cfg ?? {}),
+            'mesh_ingest'           : (ann)                      => node.meshIngest(ann),
+            'mesh_nodes'            : ()                         => node.meshNodes(),
+            'mesh_announce'         : (cfg)                      => node.announceSelf(cfg ?? {}),
+            'add_peer'              : (peerData)                 => node.addPeer(peerData),
+            'remove_peer'           : (peerId)                   => node.removePeer(peerId),
+            'syncWithNetwork'       : node.syncWithNetwork.bind(node),
+            'getPeers'              : node.getPeers.bind(node),
         };
     }
 }
@@ -1212,14 +1223,13 @@ export class ThevieGenesisNode {
 }
 
 export default NodeManager;
-
 // ─── Helpers privés ───────────────────────────────────────────
 function _delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function _nextTier(score) {
-if (score >= 0.95) return 'Legend (max)';
+    if (score >= 0.95) return 'Legend (max)';
     if (score >= 0.85) return 'Legend';
     if (score >= 0.70) return 'Sovereign';
     if (score >= 0.50) return 'Trusted';
     return 'Reliable';
-} 
+}
