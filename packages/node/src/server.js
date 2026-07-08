@@ -563,7 +563,7 @@ app.post('/api/gateway/expose', requireScope('gateway:admin'), (req, res) => {
 app.get('/api/gateway/endpoints', requireScope('gateway:read'), (req, res) => {
   res.json({ success: true, endpoints: state.node.listExposedEndpoints() });
 });
-
+ 
 // DELETE /api/gateway/endpoints/:name — supprime un endpoint
 app.delete('/api/gateway/endpoints/:name', requireScope('gateway:admin'), (req, res) => {
   try {
@@ -573,13 +573,18 @@ app.delete('/api/gateway/endpoints/:name', requireScope('gateway:admin'), (req, 
     apiError(res, 404, 'NOT_FOUND', e.message);
   }
 });
-
+ 
 // GET /api/gateway/logs — logs de trafic (50 derniers par défaut)
 app.get('/api/gateway/logs', requireScope('gateway:read'), (req, res) => {
   const limit = Math.min(500, parseInt(req.query.limit) || 50);
   res.json({ success: true, logs: state.node.getTrafficLogs(limit) });
 });
-
+// GET /api/gateway/logs — logs de trafic (50 derniers par défaut)
+app.get('/api/gateway/logs', requireScope('gateway:read'), (req, res) => {
+  const limit = Math.min(500, parseInt(req.query.limit) || 50);
+  res.json({ success: true, logs: state.node.getTrafficLogs(limit) });
+});
+ 
 // GET /api/gateway/status — statut Gateway complet
 app.get('/api/gateway/status', requireScope('gateway:read'), (req, res) => {
   const s = state.node.getStatus();
@@ -592,7 +597,7 @@ app.get('/api/gateway/status', requireScope('gateway:read'), (req, res) => {
     nodeState        : s.state,
   });
 });
-
+ 
 // ─── Mount inference endpoints dynamiquement ──────────────────────────────
 /**
  * Monte l'endpoint /api/inference/:name sur Express.
@@ -602,27 +607,26 @@ app.get('/api/gateway/status', requireScope('gateway:read'), (req, res) => {
 function mountInferenceEndpoint(name) {
   const path = `/api/inference/${name}`;
   if (app._router?.stack?.some(l => l.route?.path === path)) return;
-
-  app.post(path, requireScope('inference:read'), async (req, res) => {
+app.post(path, requireScope('inference:read'), async (req, res) => {
     const endpoints = state.node.listExposedEndpoints();
     const ep        = endpoints.find(e => e.name === name);
     if (!ep || !ep.active) return apiError(res, 404, 'NOT_FOUND', `Endpoint '${name}' introuvable ou désactivé.`);
-
+ 
     const { prompt, maxTokens, temperature } = req.body;
     if (!prompt?.trim()) return apiError(res, 400, 'BAD_REQUEST', "Champ 'prompt' requis.");
-
+ 
     try {
       const fullPrompt = ep.persona
         ? `[SYSTEM] ${ep.persona}\n\n[USER] ${prompt}\n\n[ASSISTANT]`
         : prompt;
-
+ 
       const result = await state.node.generateWithAI({
         prompt     : fullPrompt,
         ai         : ep.ai,
         maxTokens  : maxTokens  ?? ep.maxTokens,
         temperature: temperature ?? ep.temperature,
       });
-
+ 
       ep.requestCount++;
       res.json({
         success  : true,
@@ -631,15 +635,15 @@ function mountInferenceEndpoint(name) {
         response : result.text,
         tokens   : result.tokensGenerated,
         wisdom   : result.wisdomScore,
-      });
+});
     } catch (e) {
       apiError(res, 500, 'INFERENCE_ERROR', e.message);
     }
   });
-
+ 
   console.info(`[Gateway] Route montée : POST ${path}`);
 }
-
+ 
 // =====================================================
 // ROUTES — WEB HOSTING
 //
@@ -654,7 +658,7 @@ function mountInferenceEndpoint(name) {
 //   • réplication décentralisée ZipMemory
 //   • monitoring hits + bande passante en temps réel
 // =====================================================
-
+ 
 // POST /api/hosting/sites — créer un nouveau site
 app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
   const { name, domain } = req.body;
@@ -664,7 +668,7 @@ app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
     const site = state.node.hosting.createSite(name, domain);
     res.status(201).json({
       success : true,
-      site    : site.toJSON(),
+site    : site.toJSON(),
       message : `Site créé — URL publique : https://${site.domain}`,
       benefits: [
         'Chiffrement automatique RomanT369 Hyper256',
@@ -679,19 +683,18 @@ app.post('/api/hosting/sites', requireScope('storage:write'), (req, res) => {
     apiError(res, 409, 'CONFLICT', e.message);
   }
 });
-
+ 
 // GET /api/hosting/sites — liste tous les sites
 app.get('/api/hosting/sites', requireScope('storage:read'), (req, res) => {
   res.json({ success: true, sites: state.node.hosting.listSites() });
 });
-
+ 
 // GET /api/hosting/sites/:siteId — détails d'un site
 app.get('/api/hosting/sites/:siteId', requireScope('storage:read'), (req, res) => {
   const site = state.node.hosting.getSite(req.params.siteId);
   if (!site) return apiError(res, 404, 'NOT_FOUND', 'Site introuvable.');
   res.json({ success: true, site });
 });
-
 // POST /api/hosting/sites/:siteId/files — uploader un fichier
 app.post('/api/hosting/sites/:siteId/files', requireScope('storage:write'), async (req, res) => {
   const { path, data, encoding = 'utf8' } = req.body;
@@ -712,17 +715,17 @@ app.post('/api/hosting/sites/:siteId/files', requireScope('storage:write'), asyn
     apiError(res, 500, 'UPLOAD_ERROR', e.message);
   }
 });
-
+ 
 // POST /api/hosting/sites/:siteId/publish — publier un site
 app.post('/api/hosting/sites/:siteId/publish', requireScope('storage:write'), async (req, res) => {
   try {
     const result = await state.node.hosting.publishSite(req.params.siteId);
     res.json({ success: true, ...result });
   } catch (e) {
-    apiError(res, 400, 'PUBLISH_ERROR', e.message);
+apiError(res, 400, 'PUBLISH_ERROR', e.message);
   }
 });
-
+ 
 // POST /api/hosting/sites/:siteId/rollback — rollback à une version
 app.post('/api/hosting/sites/:siteId/rollback', requireScope('storage:write'), async (req, res) => {
   const { version } = req.body;
@@ -733,7 +736,7 @@ app.post('/api/hosting/sites/:siteId/rollback', requireScope('storage:write'), a
     apiError(res, 400, 'ROLLBACK_ERROR', e.message);
   }
 });
-
+ 
 // PUT /api/hosting/sites/:siteId/domain — configurer un domaine custom
 app.put('/api/hosting/sites/:siteId/domain', requireScope('storage:write'), (req, res) => {
   const { customDomain } = req.body;
@@ -747,7 +750,6 @@ app.put('/api/hosting/sites/:siteId/domain', requireScope('storage:write'), (req
     apiError(res, 409, 'CONFLICT', e.message);
   }
 });
-
 // DELETE /api/hosting/sites/:siteId — supprimer un site
 app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (req, res) => {
   try {
@@ -757,7 +759,7 @@ app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (r
     apiError(res, 404, 'NOT_FOUND', e.message);
   }
 });
-
+ 
 // =====================================================
 // SERVING — Sites web hébergés
 //
@@ -770,16 +772,16 @@ app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (r
 //   GET /sites/:domain/*     → fichier demandé (fallback SPA → index.html)
 //   GET /:domain/*           → (optionnel) domaine custom à la racine
 // =====================================================
+ 
 // Middleware de serving — commun aux deux routes /sites/*
 async function serveSiteMiddleware(req, res) {
   const { domain } = req.params;
   // req.params[0] = le reste du chemin (ex: '/css/style.css')
   const filePath = '/' + (req.params[0] ?? '');
   const start    = Date.now();
-
-  try {
+try {
     const result = await state.node.hosting.getSiteFile(domain, filePath);
-
+ 
     if (!result) {
       return res.status(404).send(`
         <html><body style="font-family:monospace;padding:2rem;background:#0a0a0f;color:#fff">
@@ -788,10 +790,10 @@ async function serveSiteMiddleware(req, res) {
           <p style="color:#00f3ff">Powered by SkyAInet × RomanT369 Hyper256</p>
         </body></html>`);
     }
-
+ 
     // Enregistrer le hit de monitoring
     state.node.hosting.recordSiteHit(req.params.siteId ?? domain, result.sizeBytes);
-
+ 
     // Log de trafic
     state.node.logTraffic({
       method    : 'GET',
@@ -801,24 +803,24 @@ async function serveSiteMiddleware(req, res) {
       keyName   : 'public',
       ip        : (req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.ip || 'unknown',
     });
-
+ 
     res.setHeader('Content-Type', result.contentType);
     res.setHeader('X-SkyCloud-Domain', domain);
     res.setHeader('X-SkyCloud-Encrypted', 'RomanT369-Hyper256');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(Buffer.from(result.data));
-
+res.send(Buffer.from(result.data));
+ 
   } catch (e) {
     console.error(`[Hosting] Erreur serving ${domain}${filePath} :`, e.message);
     res.status(500).send('Internal error');
   }
 }
-
+ 
 // GET /sites/:domain        → index.html
 app.get('/sites/:domain', serveSiteMiddleware);
 // GET /sites/:domain/*      → fichier demandé
 app.get('/sites/:domain/*', serveSiteMiddleware);
-
+ 
 app.post('/api/evolution/train', async (req, res) => {
   try {
     await state.node.triggerTraditionalTraining();
@@ -827,29 +829,29 @@ app.post('/api/evolution/train', async (req, res) => {
     apiError(res, 500, 'INTERNAL_ERROR', e.message);
   }
 });
-
+ 
 // =====================================================
 // WEBSOCKET — TEMPS RÉEL
 // =====================================================
-
+ 
 function handleWs(ws) {
   state.metrics.websocketConnections++;
   console.info('🔌 WebSocket connecté');
-
+ 
   ws.send(JSON.stringify({
     type     : 'connected',
     message  : 'SkyCloud WebSocket connecté',
-    timestamp: new Date().toISOString(),
+timestamp: new Date().toISOString(),
   }));
-
+ 
   ws.on('message', async (raw) => {
     let cmd;
     try { cmd = JSON.parse(raw.toString()); }
     catch { return ws.send(JSON.stringify({ type: 'error', message: 'JSON invalide' })); }
-
+ 
     let response;
     switch (cmd.type) {
-
+ 
       case 'status': {
         const s = state.node.getStatus();
         response = {
@@ -862,24 +864,24 @@ function handleWs(ws) {
         };
         break;
       }
-
+ 
       case 'ping':
         response = { type: 'pong', ts: new Date().toISOString() };
         break;
-
+ 
       case 'dream':
         try {
           await state.node.runEvolutionCycle();
           response = {
             type   : 'dream_response',
-            message: `Cycle terminé. Sagesse: ${state.node.wisdomScore.toFixed(4)}`,
+message: `Cycle terminé. Sagesse: ${state.node.wisdomScore.toFixed(4)}`,
             wisdom : state.node.wisdomScore,
           };
         } catch (e) {
           response = { type: 'error', message: e.message };
         }
         break;
-
+ 
       case 'generate':
         if (!cmd.prompt) {
           response = { type: 'error', message: "Champ 'prompt' requis." };
@@ -897,24 +899,24 @@ function handleWs(ws) {
           }
         }
         break;
-
+ 
       case 'lesson':
         if (!cmd.lesson) {
           response = { type: 'error', message: "Champ 'lesson' requis." };
         } else {
           try {
-            const r = await state.node.injectLesson(cmd.lesson);
+const r = await state.node.injectLesson(cmd.lesson);
             response = { type: 'lesson_response', ...r };
           } catch (e) {
             response = { type: 'error', message: e.message };
           }
         }
         break;
-
+ 
       case 'metrics':
         response = { type: 'metrics_response', metrics: state.metrics.toJSON() };
         break;
-
+ 
       case 'gateway_status':
         response = {
           type             : 'gateway_status_response',
@@ -923,18 +925,18 @@ function handleWs(ws) {
           trafficLogs      : state.node.getTrafficLogs(20),
         };
         break;
-
+ 
       case 'keys_list':
         response = {
           type: 'keys_list_response',
           keys: state.node.listApiKeys(),
         };
         break;
-
+ 
       case 'hosting_list':
         response = { type: 'hosting_list_response', sites: state.node.hosting.listSites() };
-        break;
-
+break;
+ 
       case 'hosting_create':
         if (!cmd.name || !cmd.domain) {
           response = { type: 'error', message: "Champs 'name' et 'domain' requis." };
@@ -947,7 +949,7 @@ function handleWs(ws) {
           }
         }
         break;
-
+ 
       case 'hosting_publish':
         if (!cmd.siteId) {
           response = { type: 'error', message: "Champ 'siteId' requis." };
@@ -960,15 +962,15 @@ function handleWs(ws) {
           }
         }
         break;
-
+ 
       case 'hosting_stats':
-        response = {
+response = {
           type  : 'hosting_stats_response',
           sites : state.node.hosting.listSites(),
           total : state.node.hosting.listSites().length,
         };
         break;
-
+ 
       case 'rotate_key':
         if (!cmd.key) {
           response = { type: 'error', message: "Champ 'key' requis." };
@@ -981,7 +983,7 @@ function handleWs(ws) {
           }
         }
         break;
-
+ 
       // ── SkyChat — relais temps réel des messages ──────────────
       // Diffuse un message (DM ou groupe) à tous les clients connectés
       // pour une livraison instantanée multi-onglets / multi-appareils.
@@ -991,38 +993,38 @@ function handleWs(ws) {
         }
         response = { type: 'sc_relay_ack', ts: Date.now() };
         break;
-      }
-
+}
+ 
       default:
         response = { type: 'error', message: `Commande inconnue: ${cmd.type}` };
     }
-
+ 
     ws.send(JSON.stringify(response));
   });
-
+ 
   ws.on('close', () => {
     state.metrics.websocketConnections = Math.max(0, state.metrics.websocketConnections - 1);
     console.info('🔌 WebSocket déconnecté');
   });
-
+ 
   ws.on('error', err => console.error('[WS]', err.message));
 }
-
+ 
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
-
+ 
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
-const metrics = state.node.getNodeMetrics();
+    const metrics = state.node.getNodeMetrics();
     const status  = state.node.getStatus();
     const rewards = state.node.getRewardsStats();
     res.json({
       nodeId         : metrics.node_id,
       state          : metrics.state,
       engineReady    : metrics.engine_ready,
-      wisdomScore    : metrics.wisdom_score,
+wisdomScore    : metrics.wisdom_score,
       totalRequests  : metrics.total_requests,
       evolutionCycles: metrics.evolution_cycles,
       peersConnected : metrics.peers_connected,
@@ -1035,7 +1037,7 @@ const metrics = state.node.getNodeMetrics();
     apiError(res, 500, 'DASHBOARD_ERROR', e.message);
   }
 });
-
+ 
 // GET /api/node/full-status — rapport d'état complet
 app.get('/api/node/full-status', auth, async (req, res) => {
   try {
@@ -1050,7 +1052,6 @@ app.get('/api/node/full-status', auth, async (req, res) => {
     apiError(res, 500, 'STATUS_ERROR', e.message);
   }
 });
-
 // POST /api/node/create — crée un nœud utilisateur
 app.post('/api/node/create', auth, async (req, res) => {
   try {
@@ -1077,10 +1078,10 @@ app.post('/api/node/create', auth, async (req, res) => {
     apiError(res, 500, 'CREATE_NODE_ERROR', e.message);
   }
 });
-
+ 
 // POST /api/rewards/claim — réclame les récompenses quotidiennes
 app.post('/api/rewards/claim', auth, async (req, res) => {
-  try {
+try {
     const result  = state.node.claimRewards();
     const stats   = state.node.getRewardsStats();
     res.json({
@@ -1092,7 +1093,7 @@ app.post('/api/rewards/claim', auth, async (req, res) => {
     apiError(res, 500, 'CLAIM_ERROR', e.message);
   }
 });
-
+ 
 // POST /api/ai/rate — note la dernière réponse IA
 app.post('/api/ai/rate', auth, async (req, res) => {
   try {
@@ -1110,21 +1111,20 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     apiError(res, 500, 'RATE_ERROR', e.message);
   }
 });
-
 // =====================================================
 // DÉMARRAGE
 // =====================================================
-
+ 
 // ─── Route générique apiHandlers ──────────────────────────────
 // Expose toutes les commandes de skycloud.js via POST /api/cmd/:name
 // Complète les routes spécifiques ci-dessus.
 // Les routes spécifiques ont la priorité (Express les matche en premier).
 {
   const handlers = { ...state.node.apiHandlers(), ...state.secure.apiHandlers() };
-
+ 
   // Mapping commandes → méthode HTTP pour GET sémantique
   const GET_CMDS = new Set([
-'get_status', 'get_node_metrics', 'get_rewards_stats',
+    'get_status', 'get_node_metrics', 'get_rewards_stats',
     'get_wallet_balance', 'get_user_profile', 'get_profile_nav_badge',
     'get_current_language', 'list_available_models',
     'get_active_subscriptions', 'get_subscription_plans',
@@ -1134,29 +1134,30 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     'get_comm_stats', 'get_thevie_stats', 'list_thevie_sessions',
     'is_auto_training_enabled', 'is_auto_dream_enabled',
     'get_wisdom',
-    // SkyChat — lectures
+// SkyChat — lectures
     'sc_get_identity', 'sc_did_history', 'sc_list_contacts', 'sc_contact_stats',
     'sc_get_conversation', 'sc_conversations', 'sc_list_groups', 'sc_get_group_messages',
     'sc_security_status', 'sc_storage_stats', 'sc_list_devices', 'sc_red_team_report',
   ]);
-
+ 
   // Commandes publiques du frontend Thevie (thevie.html) — lecture/chat
   // accessibles sans clé API pour que l'interface fonctionne en local.
   // Toutes les autres commandes /api/cmd/* restent protégées par `auth`.
   const PUBLIC_CMDS = new Set([
     'generate_with_ai', 'get_wisdom', 'inject_lesson', 'web_search',
+    'thevie_ask',
   ]);
-
+ 
   // Middleware : laisse passer les commandes publiques + toutes les commandes
   // SkyChat (préfixe sc_), exige l'auth sinon.
   const cmdAuth = (req, res, next) =>
     (PUBLIC_CMDS.has(req.params.name) || req.params.name.startsWith('sc_'))
       ? next() : auth(req, res, next);
-
+ 
   // ─── Routes REST dédiées manquantes ─── parité avec la map d'API de skycloud.html.
   // Chacune dispatche vers le handler /api/cmd/ correspondant ; réponse { ok, result }
   // (skyCall en extrait .result). Auth alignée sur les commandes /api/cmd/ (clé API admin).
-  const cmdRoute = async (res, name, ...args) => {
+const cmdRoute = async (res, name, ...args) => {
     const fn = handlers[name];
     if (!fn) return apiError(res, 404, 'UNKNOWN_CMD', `Unknown command: ${name}`);
     try {
@@ -1164,24 +1165,23 @@ app.post('/api/ai/rate', auth, async (req, res) => {
       res.json({ ok: true, result: result ?? null });
     } catch (e) { apiError(res, 500, 'CMD_ERROR', e.message); }
   };
-
+ 
   // Smart Contracts (page Skycloud — modal Learn)
   app.post  ('/api/smart-contracts/generate', auth, (req, res) => cmdRoute(res, 'generateSmartContract', req.body?.description, req.body?.options ?? {}));
   app.post  ('/api/smart-contracts/deploy',   auth, (req, res) => cmdRoute(res, 'deploySmartContract',   req.body?.contractId));
   app.get   ('/api/smart-contracts',          auth, (req, res) => cmdRoute(res, 'listSmartContracts'));
   app.get   ('/api/smart-contracts/:id',      auth, (req, res) => cmdRoute(res, 'getSmartContract',      req.params.id));
   app.delete('/api/smart-contracts/:id',      auth, (req, res) => cmdRoute(res, 'deleteSmartContract',   req.params.id));
-
+ 
   // Évolution — entraînement LoRA automatique (page Skycloud)
   app.post  ('/api/evolution/auto-train/enable',  auth, (req, res) => cmdRoute(res, 'enableAutoTraining', req.body ?? {}));
   app.post  ('/api/evolution/auto-train/disable', auth, (req, res) => cmdRoute(res, 'disableAutoTraining'));
-
+ 
   // Stockage — réplication décentralisée
   app.post  ('/api/storage/replicate', auth, (req, res) => cmdRoute(res, 'replicateFiles'));
-
-  // Cycle d'évolution (run_evolution_cycle) — POST ; le GET /api/dream-cycle existe déjà.
+// Cycle d'évolution (run_evolution_cycle) — POST ; le GET /api/dream-cycle existe déjà.
   app.post  ('/api/dream-cycle', auth, (req, res) => cmdRoute(res, 'runEvolutionCycle'));
-
+ 
   // Gateway — le frontend pilote enable/disable via un port : >0 active, 0 désactive.
   app.post  ('/api/gateway/enable', auth, async (req, res) => {
     try {
@@ -1191,7 +1191,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
     } catch (e) { apiError(res, 500, 'CMD_ERROR', e.message); }
   });
   app.post  ('/api/gateway/disable', auth, (req, res) => cmdRoute(res, 'disableGateway'));
-
+ 
   app.all('/api/cmd/:name', cmdAuth, async (req, res) => {
     const name = req.params.name;
     let   fn   = handlers[name];
@@ -1199,16 +1199,18 @@ app.post('/api/ai/rate', auth, async (req, res) => {
       const camel = name.replace(/_([a-z])/g, function (_m, c) { return c.toUpperCase(); });
       fn = handlers[camel];
     }
-
+ 
     if (!fn) {
       return apiError(res, 404, 'UNKNOWN_CMD', `Unknown command: ${name}`);
     }
-
-    // Arguments : query params pour GET, body pour POST/PUT
+// Arguments : query params pour GET, body pour POST/PUT.
+    // Repli sur le body quand la query est vide : le frontend (messaging.html/_get) poste
+    // les args des lectures en body même pour des commandes classées GET_CMDS (ex.
+    // sc_get_conversation), sinon l'argument positionnel serait perdu.
     const args = GET_CMDS.has(name)
-      ? Object.values(req.query)
+      ? (Object.keys(req.query).length ? Object.values(req.query) : Object.values(req.body ?? {}))
       : Object.values(req.body ?? {});
-
+ 
     try {
       const result = await fn(...args);
       res.json({ ok: true, result: result ?? null });
@@ -1216,20 +1218,20 @@ app.post('/api/ai/rate', auth, async (req, res) => {
       apiError(res, 500, 'CMD_ERROR', e.message);
     }
   });
-
+ 
   console.info(`[Server] apiHandlers exposés — ${Object.keys(handlers).length} commandes sur /api/cmd/:name`);
 }
-
+ 
 // ── Routes PWA — assets en mémoire ou depuis le disque ────────
 // En mode binaire Bun compilé : readFileSync depuis le bundle
 // En mode dev : sendFile depuis le disque
 import { join as _join, dirname as _dirname } from 'path';
 import { fileURLToPath as _ftu } from 'url';
 import { readFileSync as _rfs, existsSync as _ex } from 'fs';
-
+ 
 const _projectRoot = _dirname(_dirname(_dirname(_ftu(import.meta.url))));
 const _root        = _join(_projectRoot, 'public-ui');  // assets PWA dans public-ui/
-
+ 
 // Charger les assets — depuis le bundle (binaire) ou le disque (dev)
 function _asset(relPath, encoding = 'utf8') {
     const full = _join(_root, relPath);
@@ -1237,11 +1239,11 @@ function _asset(relPath, encoding = 'utf8') {
     // En mode binaire, les assets sont embarqués — chemin relatif direct
     try { return _rfs(relPath, encoding); } catch { return null; }
 }
-
+ 
 const _sw       = _asset('sw.js');
 const _manifest = _asset('manifest.json');
 const _offline  = _asset('offline.html');
-
+ 
 // Servir les assets PWA (en mémoire si disponible, sinon disque)
 app.get('/sw.js', (req, res) => {
     res.setHeader('Content-Type', 'application/javascript');
@@ -1250,28 +1252,28 @@ app.get('/sw.js', (req, res) => {
     if (_sw) return res.send(_sw);
     res.sendFile(_join(_root, 'sw.js'));
 });
-
+ 
 app.get('/manifest.json', (req, res) => {
     res.setHeader('Content-Type', 'application/manifest+json');
     res.setHeader('Cache-Control', 'no-cache');
     if (_manifest) return res.send(_manifest);
     res.sendFile(_join(_root, 'manifest.json'));
 });
-
+ 
 app.get('/offline.html', (req, res) => {
     res.setHeader('Content-Type', 'text/html');
     if (_offline) return res.send(_offline);
     res.sendFile(_join(_root, 'offline.html'));
 });
-
+ 
 // Icônes et autres assets statiques
 app.use('/icons', express.static(_join(_root, 'icons')));
-
+ 
 // Pages HTML — servis depuis la racine (dev) ou le bundle (binaire)
 const _HTML_PAGES = ['skyainet.html', 'skycloud.html', 'thevie.html',
                      'messaging.html', 'node.html', 'marketplace.html',
                      'governance.html', 'settings.html'];
-
+ 
 for (const page of _HTML_PAGES) {
     app.get(`/${page}`, (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
@@ -1281,13 +1283,13 @@ for (const page of _HTML_PAGES) {
         res.sendFile(_join(_root, page));
     });
 }
-
+ 
 // Fallback → skyainet.html pour toutes les routes inconnues
 app.get('/', (req, res) => res.redirect('/skyainet.html'));
-
+ 
 // Assets statiques restants (JS, CSS, fonts)
 app.use(express.static(_root, {
-    index   : false,
+index   : false,
     dotfiles: 'ignore',
     setHeaders(res, filePath) {
         if (filePath.endsWith('.html')) {
@@ -1298,12 +1300,12 @@ app.use(express.static(_root, {
         res.setHeader('Service-Worker-Allowed', '/');
     },
 }));
-
+ 
 // ── Génération des icônes PWA ─────────────────────────────────
 // Génère tous les PNG depuis icon-source.svg au premier démarrage.
 // Aucun PNG à committer sur Github — juste le SVG source.
 // Si le design change → supprimer les PNG → ils se régénèrent.
-
+ 
 const _ICON_SIZES = [
     { size: 72,  name: 'icon-72.png'   },
     { size: 96,  name: 'icon-96.png'   },
@@ -1313,16 +1315,15 @@ const _ICON_SIZES = [
     { size: 32,  name: 'icon-tray.png' },
     { size: 72,  name: 'badge-72.png'  },
 ];
-
+ 
 async function generateIcons() {
     const svgPath  = _join(_root, 'icons', 'icon-source.svg');
     const iconsDir = _join(_root, 'icons');
-
-    if (!_ex(svgPath)) {
+if (!_ex(svgPath)) {
         console.warn('[Icons] icon-source.svg introuvable — icônes PWA non générées');
         return;
     }
-
+ 
     // Vérifier si sharp est disponible
     let sharp;
     try {
@@ -1333,22 +1334,22 @@ async function generateIcons() {
         console.warn('[Icons] Les icônes PWA ne seront pas générées automatiquement.');
         return;
     }
-
+ 
     const { mkdirSync, writeFileSync } = await import('fs');
     mkdirSync(iconsDir, { recursive: true });
-
+ 
     const svg       = _rfs(svgPath);
     let   generated = 0;
     let   skipped   = 0;
-
+ 
     for (const { size, name } of _ICON_SIZES) {
         const outPath = _join(iconsDir, name);
         // Ne pas écraser un fichier existant (permet de mettre une icône custom)
         if (_ex(outPath)) { skipped++; continue; }
-
+ 
         try {
             await sharp(svg)
-                .resize(size, size, { fit: 'contain', background: { r: 10, g: 10, b: 15, alpha: 1 } })
+.resize(size, size, { fit: 'contain', background: { r: 10, g: 10, b: 15, alpha: 1 } })
                 .png({ compressionLevel: 9, adaptiveFiltering: true })
                 .toFile(outPath);
             generated++;
@@ -1356,7 +1357,7 @@ async function generateIcons() {
             console.warn(`[Icons] Erreur génération ${name} : ${e.message}`);
         }
     }
-
+ 
     // Générer icon.ico (Windows) depuis icon-32.png si sharp le supporte
     const ico32 = _join(iconsDir, 'icon-tray.png');
     const icoOut = _join(iconsDir, 'icon.ico');
@@ -1377,17 +1378,17 @@ async function generateIcons() {
             dir.writeUInt8(0,  3);        // reserved
             dir.writeUInt16LE(1, 4);      // planes
             dir.writeUInt16LE(32, 6);     // bit count
-            dir.writeUInt32LE(pngBuf.length, 8);  // size
+dir.writeUInt32LE(pngBuf.length, 8);  // size
             dir.writeUInt32LE(22, 12);    // offset (6 + 16)
             _wfs(icoOut, Buffer.concat([header, dir, pngBuf]));
             generated++;
         } catch { /* ok — ico optionnel */ }
     }
-
+ 
     if (generated > 0) console.info(`[Icons] ${generated} icône(s) PWA générée(s) dans public-ui/icons/`);
     if (skipped   > 0) console.info(`[Icons] ${skipped} icône(s) déjà présente(s) — conservées`);
 }
-
+ 
 const PORT   = parseInt(process.env.PORT ?? '8080');
 const server = app.listen(PORT, '0.0.0.0', () => {
   const url = `http://localhost:${PORT}/skyainet.html`;
@@ -1401,11 +1402,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   for (const ep of state.node.listExposedEndpoints()) {
     mountInferenceEndpoint(ep.name);
   }
-
+ 
   // Générer les icônes PWA depuis icon-source.svg (si non encore générées)
   generateIcons().catch(e => console.warn('[Icons]', e.message));
-
-  // Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
+// Auto-ouvrir le browser (désactiver avec SKYAINET_NO_BROWSER=1)
   if (process.env.SKYAINET_NO_BROWSER !== '1') {
     const _exec = exec;
     const cmd = process.platform === 'win32'  ? `start "" "${url}"`
@@ -1416,10 +1416,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     });
   }
 });
-
+ 
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', ws => handleWs(ws));
-
+ 
 // ── Relay des events marketplace → tous les clients WebSocket ──
 // GpuCpuMarketplaceService est un EventEmitter —
 // on connecte ses events pour les broadcaster en temps réel.
@@ -1431,7 +1431,6 @@ function broadcastWs(event, data) {
     }
   });
 }
-
 // Brancher les events du gpuMarket
 const _gpuMarket = state.node.gpuMarket;
 if (_gpuMarket) {
@@ -1443,7 +1442,7 @@ if (_gpuMarket) {
   _gpuMarket.on('rentals:expired',   n => broadcastWs('gpu:rentals_expired',  { count: n }));
   console.info('[Server] GPU Marketplace events → WebSocket connectés');
 }
-
+ 
 // Routes ticker temps réel
 app.get('/api/marketplace/ticker', async (req, res) => {
   try {
@@ -1454,23 +1453,23 @@ app.get('/api/marketplace/ticker', async (req, res) => {
     apiError(res, 500, 'TICKER_ERROR', e.message);
   }
 });
-
+ 
 // ── Thevie — déploiement orchestré via Server-Sent Events ──────
 // Le client (node.html) se connecte à cette route et reçoit
 // les étapes de déploiement en temps réel.
 app.get('/api/node/deploy-thevie', async (req, res) => {
   const { type, alias, port, role } = req.query;
-
+ 
   res.setHeader('Content-Type',                'text/event-stream');
   res.setHeader('Cache-Control',               'no-cache');
   res.setHeader('Connection',                  'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
-
+ 
   const send = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
-
+ 
   try {
     const result = await state.node.nodeManager.deployWithThevie({
       type,
@@ -1486,7 +1485,6 @@ app.get('/api/node/deploy-thevie', async (req, res) => {
     res.end();
   }
 });
-
 // ── Thevie — surveillance périodique (Gateway + Keys) ──────────
 if (state.node) {
   // Monitoring Gateway toutes les 30 secondes
@@ -1499,7 +1497,7 @@ if (state.node) {
       }
     } catch { /* silencieux */ }
   }, 30_000).unref();
-
+ 
   // Monitoring Keys toutes les 5 minutes
   setInterval(() => {
     try {
@@ -1510,29 +1508,28 @@ if (state.node) {
       }
     } catch { /* silencieux */ }
   }, 300_000).unref();
-
+ 
   // Thevie Genesis au démarrage
   try {
     state.node.thevieValidatorGenesis?.();
   } catch { /* silencieux si pas encore disponible */ }
 }
-
 // Route catalogue GPU pour marketplace.html
 app.get('/api/gpu/catalog', (req, res) => {
   const catalog = _gpuMarket?.getGpuCatalog?.() ?? [];
   res.json({ ok: true, result: catalog });
 });
-
+ 
 // Route stats GPU avg price
 app.get('/api/gpu/avg-price', (req, res) => {
   const data = _gpuMarket?.getAvgPriceByType?.() ?? [];
   res.json({ ok: true, result: data });
 });
-
+ 
 // Route stats nœuds avg price
 app.get('/api/marketplace/avg-price', (req, res) => {
   const data = state.node.marketplace?.getAvgPriceByNodeType?.() ?? [];
   res.json({ ok: true, result: data });
 });
-
+ 
 export { app, server, wss, state };
