@@ -1244,7 +1244,7 @@ const ctx = this.shortTermMemory.length > 0
   // ═══════════════════════════════════════════════════════════════
 
   getStatus() {
-    return (
+return (
       `LoraEvo | Évolution: ${this.evolutionScore.toFixed(3)}` +
       ` | Interactions: ${this.totalInteractions}` +
       ` | Spécialisation: ${this.currentSpecialization}` +
@@ -1318,7 +1318,7 @@ const ctx = this.shortTermMemory.length > 0
    * 'delegated' exige une sagesse ≥ 0.85, sinon rétrograde automatiquement en 'copilot'.
    * @returns {{ authority:string, autonomy:number, downgraded:boolean }}
    */
-setLoraAuthority(level) {
+  setLoraAuthority(level) {
     if (!LORA_AUTHORITY_TIERS.includes(level)) {
       throw new Error(`[LoraEvo] Niveau d'autorité invalide : ${level}`);
     }
@@ -1433,6 +1433,7 @@ setLoraAuthority(level) {
       inject_lesson             : (content, source, qualityScore) => node.injectLesson(content, source, qualityScore),
       injectLesson              : node.injectLesson.bind(node),
       runDreamCycle             : node.runDreamCycle.bind(node),
+      runEvolutionCycle         : node.runEvolutionCycle.bind(node),
       triggerTraditionalTraining: node.triggerTraditionalTraining.bind(node),
       enableAutoTraining        : opts => node.enableAutoTraining(opts),
       disableAutoTraining       : ()   => node.disableAutoTraining(),
