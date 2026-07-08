@@ -224,6 +224,7 @@ export class SecureMessagingService {
       name       : c.name,
       reputation : c.reputation,
       verified   : c.verified,
+      verifyLevel: c.verificationLevel ?? (c.verified ? 1 : 0),
       favorite   : c.favorite,
       lastSeen   : c.lastSeen ?? '—',
       revoked    : c.revoked,
@@ -401,7 +402,7 @@ export class SecureMessagingService {
 
   #groupToUI(g) {
     return {
-      id: g.id, name: g.name,
+      id: g.id, name: g.name, memberDids: g.memberDids,
       members: g.memberDids.length + 1,   // +1 = créateur local
       created: new Date(g.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric' }),
       lastActivity: g.lastActivity, epoch: g.epoch,
