@@ -770,7 +770,6 @@ app.delete('/api/hosting/sites/:siteId', requireScope('storage:write'), async (r
 //   GET /sites/:domain/*     → fichier demandé (fallback SPA → index.html)
 //   GET /:domain/*           → (optionnel) domaine custom à la racine
 // =====================================================
-
 // Middleware de serving — commun aux deux routes /sites/*
 async function serveSiteMiddleware(req, res) {
   const { domain } = req.params;
@@ -1012,10 +1011,11 @@ function handleWs(ws) {
 // =====================================================
 // ROUTES THEVIE — Node Dashboard, Rewards, Rating
 // =====================================================
+
 // GET /api/node/dashboard — tableau de bord complet du nœud
 app.get('/api/node/dashboard', auth, async (req, res) => {
   try {
-    const metrics = state.node.getNodeMetrics();
+const metrics = state.node.getNodeMetrics();
     const status  = state.node.getStatus();
     const rewards = state.node.getRewardsStats();
     res.json({
@@ -1124,7 +1124,7 @@ app.post('/api/ai/rate', auth, async (req, res) => {
 
   // Mapping commandes → méthode HTTP pour GET sémantique
   const GET_CMDS = new Set([
-    'get_status', 'get_node_metrics', 'get_rewards_stats',
+'get_status', 'get_node_metrics', 'get_rewards_stats',
     'get_wallet_balance', 'get_user_profile', 'get_profile_nav_badge',
     'get_current_language', 'list_available_models',
     'get_active_subscriptions', 'get_subscription_plans',
@@ -1152,6 +1152,45 @@ app.post('/api/ai/rate', auth, async (req, res) => {
   const cmdAuth = (req, res, next) =>
     (PUBLIC_CMDS.has(req.params.name) || req.params.name.startsWith('sc_'))
       ? next() : auth(req, res, next);
+
+  // ─── Routes REST dédiées manquantes ─── parité avec la map d'API de skycloud.html.
+  // Chacune dispatche vers le handler /api/cmd/ correspondant ; réponse { ok, result }
+  // (skyCall en extrait .result). Auth alignée sur les commandes /api/cmd/ (clé API admin).
+  const cmdRoute = async (res, name, ...args) => {
+    const fn = handlers[name];
+    if (!fn) return apiError(res, 404, 'UNKNOWN_CMD', `Unknown command: ${name}`);
+    try {
+      const result = await fn(...args);
+      res.json({ ok: true, result: result ?? null });
+    } catch (e) { apiError(res, 500, 'CMD_ERROR', e.message); }
+  };
+
+  // Smart Contracts (page Skycloud — modal Learn)
+  app.post  ('/api/smart-contracts/generate', auth, (req, res) => cmdRoute(res, 'generateSmartContract', req.body?.description, req.body?.options ?? {}));
+  app.post  ('/api/smart-contracts/deploy',   auth, (req, res) => cmdRoute(res, 'deploySmartContract',   req.body?.contractId));
+  app.get   ('/api/smart-contracts',          auth, (req, res) => cmdRoute(res, 'listSmartContracts'));
+  app.get   ('/api/smart-contracts/:id',      auth, (req, res) => cmdRoute(res, 'getSmartContract',      req.params.id));
+  app.delete('/api/smart-contracts/:id',      auth, (req, res) => cmdRoute(res, 'deleteSmartContract',   req.params.id));
+
+  // Évolution — entraînement LoRA automatique (page Skycloud)
+  app.post  ('/api/evolution/auto-train/enable',  auth, (req, res) => cmdRoute(res, 'enableAutoTraining', req.body ?? {}));
+  app.post  ('/api/evolution/auto-train/disable', auth, (req, res) => cmdRoute(res, 'disableAutoTraining'));
+
+  // Stockage — réplication décentralisée
+  app.post  ('/api/storage/replicate', auth, (req, res) => cmdRoute(res, 'replicateFiles'));
+
+  // Cycle d'évolution (run_evolution_cycle) — POST ; le GET /api/dream-cycle existe déjà.
+  app.post  ('/api/dream-cycle', auth, (req, res) => cmdRoute(res, 'runEvolutionCycle'));
+
+  // Gateway — le frontend pilote enable/disable via un port : >0 active, 0 désactive.
+  app.post  ('/api/gateway/enable', auth, async (req, res) => {
+    try {
+      const port   = Number(req.body?.port);
+      const result = port > 0 ? await handlers.enableGateway(port) : await handlers.disableGateway();
+      res.json({ ok: true, result: result ?? null });
+    } catch (e) { apiError(res, 500, 'CMD_ERROR', e.message); }
+  });
+  app.post  ('/api/gateway/disable', auth, (req, res) => cmdRoute(res, 'disableGateway'));
 
   app.all('/api/cmd/:name', cmdAuth, async (req, res) => {
     const name = req.params.name;
@@ -1448,7 +1487,7 @@ app.get('/api/node/deploy-thevie', async (req, res) => {
   }
 });
 
-// ── Thevie — surveillance périodique (Gateway + Keys) ────
+// ── Thevie — surveillance périodique (Gateway + Keys) ──────────
 if (state.node) {
   // Monitoring Gateway toutes les 30 secondes
   setInterval(() => {
