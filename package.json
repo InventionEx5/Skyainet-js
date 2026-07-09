@@ -112,7 +112,6 @@
     "#steganography": "./steganography.js",
     "#storage": "./storage.js",
     "#synapse": "./synapse.js",
-    "#synaptic_mesh": "./synaptic_mesh.js",
     "#t369": "./t369.js",
     "#thevie": "./thevie.js",
     "#tiered_memory": "./tiered_memory.js",
