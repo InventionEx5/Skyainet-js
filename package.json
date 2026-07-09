@@ -42,6 +42,7 @@
     "#epoch_rekey": "./epoch_rekey.js",
     "#evolution_manager": "./evolution_manager.js",
     "#federated_sync": "./federated_sync.js",
+    "#fee_engine": "./fee_engine.js",
     "#financial": "./financial.js",
     "#flash_scheduler": "./flash_scheduler.js",
     "#gematria": "./gematria.js",
