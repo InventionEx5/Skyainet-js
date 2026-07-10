@@ -13,8 +13,6 @@ import { KVCache }                                         from '#kv_cache';
 import { SpeculativeDecoder, SpeculativeConfig }            from '#speculative';
 import { ParallelExecutor, ParallelConfig, ParallelStrategy } from '#parallel';
 import { BpeTokenizer }                                    from '#tokenizer';
-import { GpuKernels, CpuKernels }                          from '#gpu_kernels';
-import { EngineSupervisor, EngineKind }                    from '#engine_supervisor';
 
 export const ParallelMode = Object.freeze({
   None: 'None', Pipeline: 'Pipeline', Tensor: 'Tensor', Speculative: 'Speculative',
@@ -134,7 +132,7 @@ export class T369Inference {
 // =====================================================
 
 export const BackendKind = Object.freeze({
-  LocalJS: 'local-js', Native: 'native', WebGPU: 'webgpu', Wasm: 'wasm', Mesh: 'mesh', Embedded: 'embedded', LlamaCpp: 'llama-cpp',
+  LocalJS: 'local-js', Native: 'native', LlamaCpp: 'llama-cpp', Ollama: 'ollama',
 });
 
 export class InferenceBackend {
@@ -192,74 +190,132 @@ export class RemoteHTTPBackend extends InferenceBackend {
   }
 }
 
-// Inférence pilotée 100% depuis JS via WebGPU (kernels WGSL) — sans binaire,
-// tourne aussi dans le navigateur. Kernels portés en L1.
-export class WebGPUBackend extends InferenceBackend {
-  constructor() { super(BackendKind.WebGPU); this.kernels = null; }
-  get capabilities() { return { streaming: true, adapters: true, gpu: true, sovereign: true, browser: true, kernels: ['matmul', 'dequant4'] }; }
-  static available() { return GpuKernels.available(); }
-  async init() {
-    if (!WebGPUBackend.available()) throw new Error('[WebGPUBackend] WebGPU indisponible sur cet hôte');
-    this.kernels = new GpuKernels();
-    await this.kernels.init();   // acquiert le device + compile les shaders WGSL au runtime
-    this.ready = true; return this;
+// ─────────────────────────────────────────────────────────────────────────────
+// OllamaBackend — inférence via un serveur Ollama local (http://127.0.0.1:11434).
+//
+// Parle l'API NATIVE d'Ollama (/api/generate, /api/embed, /api/tags), pas un
+// format maison. Un backend = un modèle (ex. « qwen3:8b »). Pour trois cerveaux
+// distincts, on enregistre trois OllamaBackend (thevie / loraevo / t369), chacun
+// pointant sur son propre modèle Ollama.
+//
+// Durci : health-check au démarrage, erreurs EXPLICITES (serveur injoignable →
+// « ollama serve » ; modèle absent → « ollama pull <modèle> »), timeout borné,
+// streaming NDJSON avec callback onToken.
+// ─────────────────────────────────────────────────────────────────────────────
+export class OllamaBackend extends InferenceBackend {
+  constructor({ url = 'http://127.0.0.1:11434', model = 'qwen3:8b', timeoutMs = 120000 } = {}) {
+    super(BackendKind.Ollama);
+    this.url       = String(url).replace(/\/+$/, '');   // sans slash final
+    this.model     = model;
+    this.timeoutMs = timeoutMs;
   }
-  // Primitive exposée au moteur (matmul GPU). Le graphe forward complet se
-  // compose au-dessus de ces kernels (étape suivante).
-  async matmul(A, B, M, K, N) { if (!this.ready) await this.init(); return this.kernels.matmul(A, B, M, K, N); }
-  async generate() { throw new Error('[WebGPUBackend] graphe forward WGSL en composition — kernels matmul/dequant prêts'); }
-  async dispose() { this.kernels?.dispose(); this.ready = false; }
-}
 
-// Fallback CPU portable, sans binaire : kernels AssemblyScript -> WASM SIMD (L1).
-export class WasmBackend extends InferenceBackend {
-  constructor() { super(BackendKind.Wasm); this.kernels = new CpuKernels(); }
-  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, portable: true, kernels: ['matmul', 'dequant4', 'silu'] }; }
-  async init() { await this.kernels.init(); this.ready = true; return this; }
-  // En attendant l'AssemblyScript->WASM compilé, ces primitives tournent sur le
-  // kernel CPU de référence (résultats identiques, plus lent).
-  matmul(A, B, M, K, N) { return this.kernels.matmul(A, B, M, K, N); }
-  async generate() { throw new Error('[WasmBackend] graphe forward en composition — kernels CPU de référence prêts (WASM à compiler)'); }
-}
+  get capabilities() {
+    return { streaming: true, adapters: false, gpu: true, sovereign: true, grammar: false, kind: 'ollama', model: this.model };
+  }
 
-// Backend MESH (souverain) : inférence distribuée façon Petals via le
-// MeshInferenceRouter (#sharded_inference). Le modèle est sharded sur les nœuds ;
-// le forward traverse la chaîne de pairs. Routeur + executeShard injectés.
-export class MeshBackend extends InferenceBackend {
-  constructor(router, opts = {}) {
-    super(BackendKind.Mesh);
-    this.router       = router ?? null;            // MeshInferenceRouter
-    this.executeShard = opts.executeShard ?? null; // async (nodeId, {start,end}, act) => act
-    this.redundancy   = opts.redundancy ?? 1;
-  }
-  get capabilities() { return { streaming: false, adapters: true, gpu: false, sovereign: true, distributed: true }; }
+  // ── Health-check : serveur joignable + modèle réellement présent ───────────
   async init() {
-    if (!this.router) throw new Error('[MeshBackend] router requis (MeshInferenceRouter)');
-    this.ready = true; return this;
+    let tags;
+    try {
+      const res = await this.#call('/api/tags', { method: 'GET' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      tags = await res.json();
+    } catch (e) {
+      throw new Error(`[Ollama] serveur injoignable sur ${this.url} — lance « ollama serve » (détail : ${this.#reason(e)})`);
+    }
+    const names = (tags?.models ?? []).map(m => m.name || m.model).filter(Boolean);
+    // Ollama sous-entend le tag « :latest » — on compare avec ET sans le tag.
+    const base = this.model.split(':')[0];
+    const present = names.some(n => n === this.model || n.split(':')[0] === base);
+    if (!present) {
+      throw new Error(`[Ollama] modèle « ${this.model} » absent — lance « ollama pull ${this.model} » (installés : ${names.join(', ') || 'aucun'})`);
+    }
+    this.ready = true;
+    return this;
   }
+
+  // ── Génération (streaming si opts.onToken, sinon réponse unique) ────────────
   async generate(prompt, opts = {}) {
-    if (!this.executeShard) throw new Error('[MeshBackend] executeShard requis pour le forward distribué');
-    const res = await this.router.runDistributed(prompt, this.executeShard, {
-      redundancy: opts.redundancy ?? this.redundancy,
-    });
-    return { text: res.output, hops: res.hops, route: res.route, backend: 'mesh' };
-  }
-}
+    const stream = typeof opts.onToken === 'function';
+    const body = {
+      model  : this.model,
+      prompt : String(prompt),
+      stream,
+      options: {
+        temperature: opts.temperature ?? 0.8,
+        top_p      : opts.topP ?? 0.92,
+        ...(opts.topK != null ? { top_k: opts.topK } : {}),
+        num_predict: opts.maxNewTokens ?? opts.maxTokens ?? 256,
+      },
+    };
+    let res;
+    try {
+      res = await this.#call('/api/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw new Error(`[Ollama] génération impossible sur ${this.url} — serveur arrêté ? (${this.#reason(e)})`);
+    }
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`[Ollama] HTTP ${res.status} : ${txt.slice(0, 200) || 'erreur serveur'}`);
+    }
 
-// Backend MOTEUR EMBARQUÉ (souverain) : possède et supervise un moteur natif
-// (llama.cpp / vLLM / MLX) via EngineSupervisor — spawn, health, redémarrage
-// auto. C'est le cœur d'inférence souverain de SkyCloud. Backend-agnostique :
-// le moteur est choisi par EngineKind sans changer l'API.
-export class EmbeddedEngineBackend extends InferenceBackend {
-  constructor(opts = {}) {
-    super(BackendKind.Embedded);
-    this.engine = opts.engine instanceof EngineSupervisor ? opts.engine : new EngineSupervisor(opts);
+    if (!stream) {
+      const j = await res.json();
+      return { text: j.response ?? '', tokensGenerated: j.eval_count ?? null };
+    }
+
+    // Streaming NDJSON : une ligne JSON par token { response, done }
+    let text = '', tokens = 0, buf = '';
+    const dec = new TextDecoder();
+    for await (const chunk of res.body) {
+      buf += dec.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let obj; try { obj = JSON.parse(line); } catch { continue; }
+        if (obj.response) { text += obj.response; tokens++; try { opts.onToken(obj.response); } catch (_) { /* best-effort */ } }
+        if (obj.done) return { text, tokensGenerated: obj.eval_count ?? tokens };
+      }
+    }
+    return { text, tokensGenerated: tokens };
   }
-  get capabilities() { return { streaming: false, adapters: true, gpu: true, sovereign: true, embedded: true, kind: this.engine.kind }; }
-  async init()                 { await this.engine.start(); this.ready = this.engine.isReady; return this; }
-  async generate(prompt, opts) { return this.engine.generate(prompt, opts); }
-  async embed(text)            { return this.engine.embed(text); }
-  async dispose()              { await this.engine.stop(); }
+
+  // ── Embeddings (/api/embed nouveau, /api/embeddings ancien en repli) ───────
+  async embed(text) {
+    let res;
+    try {
+      res = await this.#call('/api/embed', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model, input: String(text) }),
+      });
+    } catch (e) {
+      throw new Error(`[Ollama] embeddings impossibles sur ${this.url} (${this.#reason(e)})`);
+    }
+    if (!res.ok) throw new Error(`[Ollama] embed HTTP ${res.status}`);
+    const j = await res.json();
+    return j.embeddings?.[0] ?? j.embedding ?? [];
+  }
+
+  async dispose() { this.ready = false; }
+
+  // ── Interne : fetch avec timeout borné (AbortController) ────────────────────
+  async #call(path, init) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    try { return await fetch(this.url + path, { ...init, signal: ac.signal }); }
+    finally { clearTimeout(timer); }
+  }
+  #reason(e) {
+    const code = e?.cause?.code || e?.code || '';
+    if (code === 'ECONNREFUSED') return 'connexion refusée (serveur non démarré)';
+    if (e?.name === 'AbortError') return `timeout après ${this.timeoutMs} ms`;
+    return e?.message || String(e);
+  }
 }
 
 // Backend node-llama-cpp (souverain, EN-PROCESSUS) : charge un GGUF directement
@@ -319,66 +375,4 @@ export class LlamaCppBackend extends InferenceBackend {
     }
   }
   async dispose() { await this._model?.dispose?.(); this._model = null; this.ready = false; }
-}
-
-export class InferenceCore {
-  constructor(opts = {}) {
-    this.backends = new Map();
-    this.kind = opts.backend || BackendKind.LocalJS;
-    this.cacheEnabled = opts.cache ?? true;
-    this._cache = new Map();
-    this._stats = { calls: 0, hits: 0, misses: 0 };
-    this.register(BackendKind.LocalJS, new LocalJSBackend(opts.modelConfig || null));
-    if (opts.endpoint)   this.register(BackendKind.Native, new RemoteHTTPBackend(opts.endpoint));
-    if (opts.meshRouter) this.register(BackendKind.Mesh, new MeshBackend(opts.meshRouter, opts.mesh || {}));
-    if (opts.engine || opts.embeddedEngine) this.register(BackendKind.Embedded, new EmbeddedEngineBackend(opts.engine ? { engine: opts.engine } : (opts.embeddedEngine || {})));
-    if (opts.llamaModelPath) this.register(BackendKind.LlamaCpp, new LlamaCppBackend({ modelPath: opts.llamaModelPath, ...(opts.llama || {}) }));
-  }
-  register(kind, backend) { this.backends.set(kind, backend); return this; }
-  get backend() { return this.backends.get(this.kind); }
-  async use(kind) { this.kind = kind; const b = this.backends.get(kind); if (b && !b.ready) await b.init(); return this; }
-
-  // Sélection auto selon les capacités disponibles : natif > webgpu > local-js > wasm
-  async autoSelect() {
-    const order = [BackendKind.LlamaCpp, BackendKind.Native, BackendKind.WebGPU, BackendKind.LocalJS, BackendKind.Wasm];
-    for (const k of order) {
-      const b = this.backends.get(k);
-      if (b) { try { await b.init(); this.kind = k; return k; } catch (_) { /* indispo -> suivant */ } }
-    }
-    return this.kind;
-  }
-
-  _key(prompt, opts) {
-    let h = 2166136261;
-    const s = prompt + '|' + (opts.maxNewTokens ?? 128) + '|' + (opts.adapters ? opts.adapters.join(',') : '');
-    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return (h >>> 0).toString(36);
-  }
-
-  // Memory Router : si le backend expose un MoERouter, on dérive un biais de
-  // routing d'adapters depuis un vecteur de contexte (à passer en opts.bias).
-  routeAdapters(contextVec) {
-    const b = this.backend;
-    if (b && b.router && contextVec) { try { return b.router.biasFromContext(contextVec); } catch (_) { return null; } }
-    return null;
-  }
-
-  async generate(prompt, opts = {}) {
-    this._stats.calls++;
-    const b = this.backend;
-    if (this.cacheEnabled) {
-      const k = this._key(prompt, opts);
-      if (this._cache.has(k)) { this._stats.hits++; return this._cache.get(k); }
-      if (b && !b.ready) await b.init();
-      const out = await b.generate(prompt, opts);
-      this._cache.set(k, out); this._stats.misses++;
-      return out;
-    }
-    if (b && !b.ready) await b.init();
-    return b.generate(prompt, opts);
-  }
-
-  async embed(text) { const b = this.backend; if (b && !b.ready) await b.init(); return b.embed(text); }
-  clearCache() { this._cache.clear(); }
-  stats() { return { ...this._stats, backend: this.kind, cacheSize: this._cache.size, capabilities: this.backend?.capabilities }; }
 }
