@@ -61,6 +61,7 @@
     "#ipfs": "./ipfs.js",
     "#kem_t369": "./kem_t369.js",
     "#kv_cache": "./kv_cache.js",
+    "#lesson_guard": "./lesson_guard.js",
     "#libp2p": "./libp2p.js",
     "#liquidity": "./liquidity.js",
     "#lora_evolution": "./lora_evolution.js",
