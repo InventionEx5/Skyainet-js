@@ -4,18 +4,16 @@
 //
 // Hiérarchie mémoire :
 //   • HOT  (RAM)       — index de TOUTES les leçons + cache LRU du contenu chaud
-//   • WARM (SSD 2 To)  — contenu complet de toutes les leçons persistées
-//   • COLD (carte SD)  — leçons rarement consultées, migrées à l'insertion d'une SD
+//   • WARM (disque)    — contenu complet de toutes les leçons persistées
 //
 // Objectif : les leçons apprises SURVIVENT au redémarrage (rechargées au boot),
-// sont rappelables (RAG), organisées par qualité/accès, et le stockage s'étend
-// automatiquement quand une carte SD est montée.
+  // sont rappelables (RAG) et organisées par qualité/accès.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import fs   from 'fs';
 import path from 'path';
 
-export const Tier = Object.freeze({ HOT: 'hot', WARM: 'warm', COLD: 'cold' });
+export const Tier = Object.freeze({ HOT: 'hot', WARM: 'warm' });
 
 // ── Détection du meilleur point de montage (le plus d'espace libre = SSD) ────
 //    Utilise statfs (Node 18.15+). Renvoie le chemin le plus spacieux et inscriptible.
@@ -38,20 +36,17 @@ export async function detectBestMount(candidates = []) {
 // ═══════════════════════════════════════════════════════════════
 export class LessonVault {
   #dir;                    // répertoire WARM (SSD)
-  #coldDir = null;         // répertoire COLD (carte SD), si montée
   #index = new Map();      // id → { id, quality, source, ts, hits, tier }
   #hotCache = new Map();   // id → { query, response } (cache LRU du contenu)
   #hotCacheMax;            // taille max du cache chaud
-  #warmMax;                // nb max de leçons gardées en WARM avant migration COLD
   #autoSsd = false;        // détecter le SSD réel au boot
   #ssdSubdir = '';         // sous-répertoire à créer sur le SSD détecté
   #ssdPath = null;         // montage SSD détecté
   #ssdFreeGb = null;       // espace libre du SSD détecté
   #ready;
 
-  constructor({ dir = './data/lessons', warmMax = 5000, hotCacheMax = 200, autoSsd = false, ssdSubdir = 'skyainet/lessons' } = {}) {
+  constructor({ dir = './data/lessons', hotCacheMax = 200, autoSsd = false, ssdSubdir = 'skyainet/lessons' } = {}) {
     this.#dir         = dir;
-    this.#warmMax     = warmMax;
     this.#hotCacheMax = hotCacheMax;
     this.#autoSsd     = autoSsd;
     this.#ssdSubdir   = ssdSubdir;
@@ -98,7 +93,6 @@ export class LessonVault {
     for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
     return 'L' + (h >>> 0).toString(36);
   }
-  #dirFor(tier) { return (tier === Tier.COLD && this.#coldDir) ? this.#coldDir : this.#dir; }
 
   // ── Persistance d'une leçon retenue ──────────────────────────
   async save({ query = '', response = '', quality = 0.8, source = 'lesson' } = {}) {
@@ -118,14 +112,13 @@ export class LessonVault {
     const entry = { id, quality: Number(quality) || 0.8, source, ts: Date.now(), hits: 0, tier: Tier.WARM };
     try {
       await fs.promises.writeFile(
-        path.join(this.#dirFor(entry.tier), id + '.json'),
+        path.join(this.#dir, id + '.json'),
         JSON.stringify({ query: String(query ?? ''), response: answer }),
       );
     } catch { return { ok: false, reason: 'write failed' }; }
 
     this.#index.set(id, entry);
     this.#cachePut(id, { query: String(query ?? ''), response: answer });
-    await this.#evictIfNeeded();
     await this.#persistIndex();
     return { ok: true, id };
   }
@@ -142,30 +135,11 @@ export class LessonVault {
   async #loadContent(entry) {
     if (this.#hotCache.has(entry.id)) { const c = this.#hotCache.get(entry.id); this.#cachePut(entry.id, c); return c; }
     try {
-      const raw = await fs.promises.readFile(path.join(this.#dirFor(entry.tier), entry.id + '.json'), 'utf8');
+      const raw = await fs.promises.readFile(path.join(this.#dir, entry.id + '.json'), 'utf8');
       const content = JSON.parse(raw);
       this.#cachePut(entry.id, content);
       return content;
     } catch { return null; }
-  }
-
-  // ── Migration WARM → COLD (organisation avancée) ─────────────
-  //    Score = qualité + accès + fraîcheur ; les plus bas partent sur la SD.
-  async #evictIfNeeded() {
-    if (!this.#coldDir) return;                       // pas de SD → tout reste WARM
-    const warm = [...this.#index.values()].filter(e => e.tier === Tier.WARM);
-    if (warm.length <= this.#warmMax) return;
-    const scored = warm.map(e => ({
-      e,
-      s: e.quality + (e.hits || 0) * 0.1 + Math.max(0, 1 - (Date.now() - e.ts) / 2.592e9),
-    }));
-    scored.sort((a, b) => a.s - b.s);
-    for (const { e } of scored.slice(0, warm.length - this.#warmMax)) {
-      try {
-        await fs.promises.rename(path.join(this.#dir, e.id + '.json'), path.join(this.#coldDir, e.id + '.json'));
-        e.tier = Tier.COLD;
-      } catch { /* best-effort */ }
-    }
   }
 
   // ── Rappel (RAG) : leçons les plus pertinentes pour une requête ──
@@ -192,19 +166,25 @@ export class LessonVault {
     return top.map(({ score, ...r }) => r);
   }
 
-  // ── Carte SD : activation / désactivation du tier COLD ───────
-  async attachColdTier(dir) {
-    if (!dir) return { attached: false, reason: 'no path' };
-    await fs.promises.mkdir(dir, { recursive: true }).catch(() => {});
-    this.#coldDir = dir;
-    await this.#evictIfNeeded();
-    await this.#persistIndex();
-    return { attached: true, dir, migrated: [...this.#index.values()].filter(e => e.tier === Tier.COLD).length };
+  /**
+   * Les n meilleures leçons par qualité (contenu chargé) — pour l'export du
+   * corpus d'entraînement et la construction du Modelfile. Tri qualité + accès.
+   */
+  async top(n = 50) {
+    await this.#ready;
+    const ranked = [...this.#index.values()]
+      .sort((a, b) => (b.quality + (b.hits || 0) * 0.05) - (a.quality + (a.hits || 0) * 0.05))
+      .slice(0, Math.max(1, n));
+    const out = [];
+    for (const e of ranked) {
+      const c = await this.#loadContent(e);
+      if (c && String(c.response).trim()) out.push({ id: e.id, query: c.query, response: c.response, quality: e.quality, source: e.source });
+    }
+    return out;
   }
-  detachColdTier() { this.#coldDir = null; return { attached: false }; }
 
-  stats() {
-    const bySource = {}, byTier = { hot: 0, warm: 0, cold: 0 };
+    stats() {
+    const bySource = {}, byTier = { hot: 0, warm: 0 };
     for (const e of this.#index.values()) {
       bySource[e.source] = (bySource[e.source] || 0) + 1;
       byTier[e.tier]     = (byTier[e.tier] || 0) + 1;
@@ -213,26 +193,21 @@ export class LessonVault {
       total: this.#index.size,
       bySource, byTier,
       hotCache: this.#hotCache.size,
-      coldAttached: !!this.#coldDir,
-      warmMax: this.#warmMax,
     };
   }
   count() { return this.#index.size; }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// STORAGE TIERS — hiérarchie de capacité RAM / SSD / SD
+// STORAGE TIERS — hiérarchie de capacité RAM / SSD
 // ═══════════════════════════════════════════════════════════════
 export class StorageTiers {
   #tiers = new Map();  // name → { name, path, role }
-  #scanTimer = null;   // scanner carte SD en tâche de fond
-  #attached = new Set(); // montages déjà attachés (évite les doublons)
 
   constructor({ ram = 32, ssd = 2048 } = {}) {
     // Capacités nominales déclarées (Go) — la RAM héberge les 3 cerveaux.
     this.#tiers.set(Tier.HOT,  { name: Tier.HOT,  role: 'RAM · 3 brains + hot index', capacityGb: ram,  path: null });
     this.#tiers.set(Tier.WARM, { name: Tier.WARM, role: 'SSD · lesson vault + snapshots', capacityGb: ssd, path: './data' });
-    // COLD ajouté dynamiquement à l'insertion d'une carte SD.
   }
 
   /** Pointe le tier WARM vers le vrai montage SSD détecté. */
@@ -240,55 +215,6 @@ export class StorageTiers {
 
   /** Détecte le meilleur SSD (le plus d'espace libre, inscriptible). */
   async detectBestSsd(candidates = []) { return detectBestMount(candidates); }
-
-  /** Détecte des points de montage amovibles (carte SD) sur les chemins usuels. */
-  async detectRemovable() {
-    const roots = ['/media', '/Volumes', '/mnt', '/run/media'];
-    const found = [];
-    for (const root of roots) {
-      try {
-        const entries = await fs.promises.readdir(root, { withFileTypes: true });
-        for (const e of entries) if (e.isDirectory()) found.push(path.join(root, e.name));
-      } catch { /* montage absent */ }
-    }
-    return found;
-  }
-
-  /** Active un tier COLD (carte SD) — capacité auto-mesurée si possible. */
-  async attachCold(dir, capacityGb = null) {
-    if (!dir) return { ok: false, reason: 'no path' };
-    await fs.promises.mkdir(dir, { recursive: true }).catch(() => {});
-    this.#tiers.set(Tier.COLD, { name: Tier.COLD, role: 'SD card · cold archive', capacityGb: capacityGb ?? 0, path: dir });
-    return { ok: true, dir };
-  }
-  detachCold() { this.#tiers.delete(Tier.COLD); return { ok: true }; }
-
-  // ── Scan carte SD en tâche de fond (activation auto à l'insertion) ────────
-  /** Démarre un scan périodique ; onAttach(dir) est appelé pour chaque NOUVEAU montage détecté. */
-  startAutoScan(intervalMs = 30000, onAttach = () => {}) {
-    if (this.#scanTimer) return { running: true, alreadyActive: true };
-    const scan = async () => {
-      try {
-        const found = await this.detectRemovable();
-        for (const dir of found) {
-          if (this.#attached.has(dir)) continue;
-          this.#attached.add(dir);
-          try {
-            let capGb = 0;
-            try { const st = await fs.promises.statfs(dir); capGb = Number(st.blocks) * Number(st.bsize) / 1_073_741_824; } catch { /* statfs indispo */ }
-            await this.attachCold(dir, capGb);
-            await onAttach(dir);
-          } catch { /* best-effort */ }
-        }
-      } catch { /* best-effort */ }
-    };
-    scan();                                           // scan immédiat
-    this.#scanTimer = setInterval(scan, Math.max(5000, intervalMs));
-    if (this.#scanTimer.unref) this.#scanTimer.unref();
-    return { running: true, intervalMs };
-  }
-  stopAutoScan() { if (this.#scanTimer) { clearInterval(this.#scanTimer); this.#scanTimer = null; } return { running: false }; }
-  get isAutoScanRunning() { return this.#scanTimer !== null; }
 
   /** Taille réelle utilisée sur disque d'un répertoire. */
   async #dirSizeGb(dir) {
@@ -317,14 +243,14 @@ export class StorageTiers {
         path: t.path,
       });
     }
-    return { tiers: out, coldAttached: this.#tiers.has(Tier.COLD) };
+    return { tiers: out };
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // ADAPTER VAULT — bibliothèque d'adaptateurs LoRA sur SSD
 //   Persiste manifestes + poids des adaptateurs ; rechargée au boot.
-//   HOT (RAM) : adaptateurs actifs/repli · COLD (SSD) : archive retirés.
+  //   HOT (RAM) : adaptateurs actifs/repli · WARM : archive des retirés.
 //   C'est la "croissance des poids cerveaux" : le modèle de base ne grossit
 //   pas, mais la bibliothèque d'adaptateurs spécialisés grandit sur le SSD.
 // ═══════════════════════════════════════════════════════════════
@@ -402,7 +328,7 @@ export class AdapterVault {
     if (!e) return { ok: false, reason: 'unknown' };
     e.state = state;
     if (score != null) e.score = Number(score);
-    if (state === 'retired' || state === 'reabsorbed') e.tier = Tier.COLD;   // archive froide (SSD/SD)
+    if (state === 'retired' || state === 'reabsorbed') e.tier = Tier.WARM;   // conservé en WARM (plus de tier COLD)
     await this.#persistIndex();
     return { ok: true, id, state };
   }
@@ -474,7 +400,7 @@ export class MoEExpertPool {
     }
     return { active, loadedFromSsd, evicted };
   }
- 
+
   hotExperts() { return [...this.#hot.keys()]; }
   stats() {
     return {
